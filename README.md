@@ -123,4 +123,12 @@ See [IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md) for the full bui
 
 ## License
 
-Internal use — Microsoft Developer Advocacy.
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+## Disclaimers
+
+- **Trademark:** Misty is a trademark of its respective owner.
+- **Affiliation:** This project is not affiliated with or endorsed by Misty Robotics or its successor entities.
+- **SDK:** This project requires the Misty SDK; users must comply with the Misty SDK license and terms of use.
