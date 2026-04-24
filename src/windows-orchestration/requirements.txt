@@ -1,0 +1,14 @@
+"""
+Requirements for Windows Orchestration Service
+Install with: pip install -r requirements.txt
+"""
+Flask==2.3.2
+Flask-CORS==4.0.0
+requests==2.31.0
+python-dotenv==1.0.0
+# TTS: kokoro-onnx (neural, offline, win-arm64 native via onnxruntime)
+kokoro-onnx
+onnxruntime
+soundfile
+# TTS fallback: pyttsx3 SAPI5 (robotic but guaranteed on all Windows)
+pyttsx3
