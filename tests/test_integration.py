@@ -28,8 +28,8 @@ def _discover_foundry_endpoint() -> str:
         if match:
             parsed = urlparse(match.group(0).rstrip('/'))
             return urlunparse((parsed.scheme, parsed.netloc, '', '', '', ''))
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"Failed to discover Foundry endpoint via CLI: {e}")
     return ""
 
 
