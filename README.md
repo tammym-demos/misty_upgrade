@@ -99,7 +99,24 @@ Misty II's onboard Snapdragon 820 + 410 (2 GB RAM) cannot run modern inference w
 
 ---
 
-## Quick Start
+## Configuration
+
+The orchestration service is configured via environment variables (copy `.env.example` to `.env`):
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `FOUNDRY_LOCAL_HOST` | Auto-discovered | Foundry Local base URL (overrides CLI discovery) |
+| `FOUNDRY_API_TIMEOUT` | `5.0` | Per-request timeout (seconds) for Foundry API calls |
+| `SERVICE_TIMEOUT` | `6.0` | Overall orchestration pipeline timeout (seconds) |
+| `KOKORO_VOICE` | `af_heart` | Kokoro TTS voice ID |
+| `SYSTEM_PROMPT` | *(see below)* | System prompt for the LLM; if unset, uses the built-in Misty persona prompt |
+| `MAX_USER_CHARS` | `400` | Maximum characters for a single transcribed user utterance. Longer inputs are truncated before LLM inference to reduce token count and latency. |
+| `MAX_CONTEXT_CHARS` | `3000` | Maximum total characters across all messages (system prompt + history) sent to the LLM. Oldest turns are removed first; the system prompt and latest user message are always preserved. Set to `0` to disable. |
+
+**Latency note:** `MAX_USER_CHARS` and `MAX_CONTEXT_CHARS` are the primary latency levers. Reducing these values lowers input token count and directly improves inference time, at the cost of context completeness.
+
+---
+
 
 ```powershell
 # 1. Start Foundry Local on the companion device

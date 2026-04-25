@@ -41,8 +41,16 @@ SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", "6.0"))
 KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_heart")
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
-    "You are Misty, a helpful and friendly robot assistant. Keep answers concise and conversational — no more than 2-3 sentences. Be warm and engaging."
+    "You are Misty, a helpful and friendly robot assistant. Keep answers concise and conversational — no more than 2-3 sentences. Be warm and engaging. "
+    "When the user message or conversation context is long, internally summarize it into 2-3 bullet points and answer only from that summary. "
+    "Never quote the user verbatim; paraphrase and quote at most 80 characters. "
+    "If a request is too long or unclear, ask a single clarifying question instead of guessing."
 )
+
+# Maximum characters for a single user prompt (truncated if exceeded)
+MAX_USER_CHARS = int(os.getenv("MAX_USER_CHARS", "400"))
+# Maximum total characters across all messages sent to the LLM (0 = disabled)
+MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "3000"))
 
 # Locked v1 model stack
 MODELS = {
@@ -282,16 +290,43 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
             logger.error("LLM timeout: no time remaining")
             return {"status": "error", "error": "timeout"}
         
+        # Strip and enforce user prompt character limit
+        user_text = (user_text or "").strip()
+        if len(user_text) > MAX_USER_CHARS:
+            logger.warning(
+                f"User prompt truncated: {len(user_text)} → {MAX_USER_CHARS} chars"
+            )
+            user_text = user_text[:MAX_USER_CHARS]
+
         # Build message history
         conversation_history.append({"role": "user", "content": user_text})
-        
-        # Keep history limited to last 5 turns to control context size
+
+        # Keep history limited to last 10 messages to control context size
         if len(conversation_history) > 10:
             conversation_history = conversation_history[-10:]
-        
+
         url = f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions"
         # Prepend system prompt on every call; not stored in history
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
+
+        # Enforce maximum total context character budget (trim oldest turns first)
+        if MAX_CONTEXT_CHARS > 0:
+            total_chars = sum(len(m.get("content", "")) for m in messages)
+            if total_chars > MAX_CONTEXT_CHARS:
+                trimmed = 0
+                # messages[0] is the system prompt; messages[-1] is the latest user turn.
+                # Remove the oldest non-system messages (index 1) until within budget.
+                while len(messages) > 2:
+                    total_chars = sum(len(m.get("content", "")) for m in messages)
+                    if total_chars <= MAX_CONTEXT_CHARS:
+                        break
+                    messages.pop(1)
+                    trimmed += 1
+                logger.warning(
+                    f"Context trimmed: removed {trimmed} message(s); "
+                    f"total={sum(len(m.get('content', '')) for m in messages)} chars"
+                )
+
         payload = {
             "model": MODELS["chat"],
             "messages": messages,
