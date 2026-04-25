@@ -303,7 +303,7 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
 
         # Keep history limited to last 10 messages to control context size
         if len(conversation_history) > 10:
-            conversation_history = conversation_history[-10:]
+            del conversation_history[:-10]
 
         url = f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions"
         # Prepend system prompt on every call; not stored in history
@@ -322,9 +322,9 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
                         break
                     messages.pop(1)
                     trimmed += 1
+                final_chars = sum(len(m.get("content", "")) for m in messages)
                 logger.warning(
-                    f"Context trimmed: removed {trimmed} message(s); "
-                    f"total={sum(len(m.get('content', '')) for m in messages)} chars"
+                    f"Context trimmed: removed {trimmed} message(s); total={final_chars} chars"
                 )
 
         payload = {

@@ -314,7 +314,7 @@ class TestPromptLimiting(unittest.TestCase):
             self.skipTest("MAX_CONTEXT_CHARS is disabled (0)")
 
         # Stuff conversation_history with large old turns to exceed the budget
-        large_content = "x" * (max_ctx // 2)
+        large_content = "x" * (max_ctx // 2 + 1)
         self._svc.conversation_history = [
             {"role": "user", "content": large_content},
             {"role": "assistant", "content": large_content},
