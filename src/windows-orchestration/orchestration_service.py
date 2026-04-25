@@ -316,15 +316,12 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
                 trimmed = 0
                 # messages[0] is the system prompt; messages[-1] is the latest user turn.
                 # Remove the oldest non-system messages (index 1) until within budget.
-                while len(messages) > 2:
-                    total_chars = sum(len(m.get("content", "")) for m in messages)
-                    if total_chars <= MAX_CONTEXT_CHARS:
-                        break
-                    messages.pop(1)
+                while len(messages) > 2 and total_chars > MAX_CONTEXT_CHARS:
+                    removed = messages.pop(1)
+                    total_chars -= len(removed.get("content", ""))
                     trimmed += 1
-                final_chars = sum(len(m.get("content", "")) for m in messages)
                 logger.warning(
-                    f"Context trimmed: removed {trimmed} message(s); total={final_chars} chars"
+                    f"Context trimmed: removed {trimmed} message(s); total={total_chars} chars"
                 )
 
         payload = {
