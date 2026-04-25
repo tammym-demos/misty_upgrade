@@ -3,10 +3,11 @@ Misty Controller — REST API + WebSocket approach.
 Drives Misty II from the laptop, avoiding on-robot skill runtime issues.
 
 Architecture:
-  - WebSocket subscription for KeyPhraseRecognized events
+  - WebSocket subscription for KeyPhraseRecognized and BatteryCharge events
   - REST API calls for LED, recording, audio upload/playback
   - Calls orchestration service for STT→LLM→TTS pipeline
   - State machine: IDLE → RECORDING → PROCESSING → PLAYING → REARMING
+  - Battery management: IDLE ↔ CHARGING (auto at 10%/25%)
 """
 
 import os
@@ -21,6 +22,7 @@ import requests
 import websocket
 
 from enum import Enum
+from dataclasses import dataclass, field
 from datetime import datetime
 
 # ============================================================================
@@ -39,6 +41,19 @@ WS_RECONNECT_BASE_S = 2.0
 WS_RECONNECT_MAX_S = 30.0
 HEALTH_CHECK_INTERVAL_S = 30.0
 
+# Battery thresholds (as fractions 0.0–1.0)
+BATTERY_LOW_WARN = 0.20       # yellow LED warning
+BATTERY_LOW_CRITICAL = 0.10   # auto-enter charging mode
+BATTERY_RESUME = 0.25         # exit charging mode (must also be charging)
+BATTERY_TEMP_WARN_C = 45.0    # log warning
+BATTERY_TEMP_THROTTLE_C = 50.0  # add delay between turns
+
+# Idle timeout
+IDLE_TIMEOUT_S = float(os.getenv("IDLE_TIMEOUT_S", "900"))  # 15 minutes
+
+# Unused sensor services to disable on startup for power savings
+DISABLE_SERVICES = ["LocomotionService", "3DToFService"]
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -48,6 +63,20 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("misty_controller")
+
+
+# ============================================================================
+# BATTERY STATE
+# ============================================================================
+
+@dataclass
+class BatteryState:
+    charge_percent: float = 0.0   # 0.0–1.0
+    voltage: float = 0.0
+    is_charging: bool = False
+    health_percent: float = 0.0   # 0.0–1.0
+    temperature: float = 0.0      # Celsius
+    last_updated: float = 0.0     # time.time()
 
 
 # ============================================================================
@@ -61,6 +90,7 @@ class State(Enum):
     PROCESSING = "PROCESSING"
     PLAYING = "PLAYING"
     REARMING = "REARMING"
+    CHARGING = "CHARGING"
     ERROR = "ERROR"
 
 
@@ -75,6 +105,15 @@ class MistyController:
         self.turn_id = 0
         self.running = True
 
+        # Battery monitoring
+        self.battery = BatteryState()
+        self.battery_lock = threading.Lock()
+        self._low_battery_warned = False
+
+        # Idle timeout
+        self.last_activity_time = time.time()
+        self._is_dimmed = False
+
     # --- State transitions ---
 
     def set_state(self, new_state: State):
@@ -83,6 +122,16 @@ class MistyController:
             self.state = new_state
         if old != new_state:
             logger.info(f"State: {old.value} -> {new_state.value}")
+
+    def try_set_state(self, expected: State, new_state: State) -> bool:
+        """Atomic compare-and-swap for state transitions. Returns True if successful."""
+        with self.state_lock:
+            if self.state == expected:
+                old = self.state
+                self.state = new_state
+                logger.info(f"State: {old.value} -> {new_state.value}")
+                return True
+            return False
 
     def get_state(self) -> State:
         with self.state_lock:
@@ -190,6 +239,166 @@ class MistyController:
         except Exception:
             return False
 
+    # --- Battery management ---
+
+    def check_battery(self) -> BatteryState | None:
+        """Poll battery status via REST API and update internal state."""
+        result = self.misty_get("/api/battery", timeout=3.0)
+        if result and result.get("status") == "Success":
+            data = result.get("result", {})
+            with self.battery_lock:
+                self.battery.charge_percent = data.get("chargePercent", 0.0)
+                self.battery.voltage = data.get("voltage", 0.0)
+                self.battery.is_charging = data.get("isCharging", False)
+                self.battery.health_percent = data.get("healthPercent", 0.0)
+                self.battery.temperature = data.get("temperature", 0.0)
+                self.battery.last_updated = time.time()
+                battery_snapshot = BatteryState(
+                    charge_percent=self.battery.charge_percent,
+                    voltage=self.battery.voltage,
+                    is_charging=self.battery.is_charging,
+                    health_percent=self.battery.health_percent,
+                    temperature=self.battery.temperature,
+                    last_updated=self.battery.last_updated,
+                )
+            self._log_battery(battery_snapshot)
+            return battery_snapshot
+        logger.warning("Failed to read battery status")
+        return None
+
+    def _update_battery_from_event(self, data: dict):
+        """Update battery state from a WebSocket BatteryCharge event."""
+        with self.battery_lock:
+            self.battery.charge_percent = data.get("chargePercent", self.battery.charge_percent)
+            self.battery.voltage = data.get("voltage", self.battery.voltage)
+            self.battery.is_charging = data.get("isCharging", self.battery.is_charging)
+            self.battery.health_percent = data.get("healthPercent", self.battery.health_percent)
+            self.battery.temperature = data.get("temperature", self.battery.temperature)
+            self.battery.last_updated = time.time()
+            battery_snapshot = BatteryState(
+                charge_percent=self.battery.charge_percent,
+                voltage=self.battery.voltage,
+                is_charging=self.battery.is_charging,
+                health_percent=self.battery.health_percent,
+                temperature=self.battery.temperature,
+                last_updated=self.battery.last_updated,
+            )
+        self._log_battery(battery_snapshot)
+        self._evaluate_battery_thresholds(battery_snapshot)
+
+    def _log_battery(self, b: BatteryState):
+        logger.info(
+            f"Battery: {b.charge_percent*100:.0f}% | {b.voltage:.1f}V | "
+            f"charging={b.is_charging} | health={b.health_percent*100:.0f}% | "
+            f"temp={b.temperature:.0f}°C"
+        )
+        if b.temperature >= BATTERY_TEMP_THROTTLE_C:
+            logger.warning(f"Battery temperature {b.temperature:.0f}°C exceeds throttle threshold ({BATTERY_TEMP_THROTTLE_C}°C)")
+        elif b.temperature >= BATTERY_TEMP_WARN_C:
+            logger.warning(f"Battery temperature {b.temperature:.0f}°C exceeds warning threshold ({BATTERY_TEMP_WARN_C}°C)")
+
+    def _evaluate_battery_thresholds(self, b: BatteryState):
+        """Check battery levels and trigger state changes as needed."""
+        # Critical: auto-enter charging mode (atomic transition)
+        if b.charge_percent < BATTERY_LOW_CRITICAL:
+            if self.try_set_state(State.IDLE, State.CHARGING):
+                logger.warning(f"Battery critically low ({b.charge_percent*100:.0f}%) — entering charging mode")
+                self._apply_charging_mode()
+            return
+
+        # Exit charging mode when sufficiently charged (charge level alone, no is_charging requirement)
+        if self.get_state() == State.CHARGING and b.charge_percent >= BATTERY_RESUME:
+            self.exit_charging_mode()
+            return
+
+        # Warning: flash yellow LED briefly (non-blocking)
+        if b.charge_percent < BATTERY_LOW_WARN and not self._low_battery_warned and self.get_state() == State.IDLE:
+            self._low_battery_warned = True
+            logger.warning(f"Battery low ({b.charge_percent*100:.0f}%) — warning")
+            self.set_led(255, 200, 0)  # yellow
+            threading.Timer(1.0, self._restore_idle_led).start()
+        elif b.charge_percent >= BATTERY_LOW_WARN:
+            self._low_battery_warned = False
+
+    def _restore_idle_led(self):
+        """Restore green LED after low-battery warning flash (runs on timer thread)."""
+        if self.get_state() == State.IDLE:
+            self.set_led(0, 255, 0)
+
+    def get_battery_snapshot(self) -> BatteryState:
+        with self.battery_lock:
+            return BatteryState(
+                charge_percent=self.battery.charge_percent,
+                voltage=self.battery.voltage,
+                is_charging=self.battery.is_charging,
+                health_percent=self.battery.health_percent,
+                temperature=self.battery.temperature,
+                last_updated=self.battery.last_updated,
+            )
+
+    # --- Charging mode ---
+
+    def enter_charging_mode(self):
+        """Minimize power draw for faster charging. Atomic state transition."""
+        if self.try_set_state(State.IDLE, State.CHARGING):
+            self._apply_charging_mode()
+
+    def _apply_charging_mode(self):
+        """Apply charging mode side effects (call after state is already CHARGING)."""
+        self.misty_post("/api/audio/keyphrase/stop")
+        self.misty_post("/api/skills/cancel")
+        self.set_led(0, 0, 0)
+        self.display_image("e_Sleeping.jpg")
+        logger.info("Charging mode active — keyphrase off, LED off, display sleeping")
+
+    def exit_charging_mode(self):
+        """Resume normal operation from charging mode."""
+        if self.start_keyphrase(force_restart=True):
+            self.set_led(0, 255, 0)
+            self.display_image("e_DefaultContent.jpg")
+            self.last_activity_time = time.time()
+            self._is_dimmed = False
+            self.set_state(State.IDLE)
+            logger.info("Exited charging mode — resumed normal operation")
+        else:
+            logger.error("Failed to resume from charging mode")
+            self.set_state(State.ERROR)
+
+    # --- Sensor service management ---
+
+    def _disable_unused_services(self):
+        """Disable sensor services not needed for conversation to reduce power/heat."""
+        for service in DISABLE_SERVICES:
+            result = self.misty_post("/api/services", {"Name": service, "Enabled": False})
+            if result:
+                logger.info(f"Disabled service: {service}")
+            else:
+                logger.warning(f"Failed to disable service: {service}")
+
+    def _restore_services(self):
+        """Re-enable sensor services on shutdown."""
+        for service in DISABLE_SERVICES:
+            self.misty_post("/api/services", {"Name": service, "Enabled": True})
+            logger.info(f"Re-enabled service: {service}")
+
+    # --- Shutdown ---
+
+    def _shutdown(self):
+        """Centralized cleanup on exit."""
+        logger.info("Shutting down...")
+        self.running = False
+        # Log final battery state
+        battery = self.check_battery()
+        if battery:
+            logger.info(f"Final battery: {battery.charge_percent*100:.0f}% | {battery.voltage:.1f}V")
+        # Restore services, stop keyphrase, LED off
+        self._restore_services()
+        self.misty_post("/api/audio/keyphrase/stop")
+        if self.ws:
+            self.ws.close()
+        self.set_led(0, 0, 0)
+        logger.info("Goodbye!")
+
     # --- WebSocket ---
 
     def _ws_subscribe_keyphrase(self):
@@ -210,16 +419,42 @@ class MistyController:
             self.ws.send(msg)
             logger.info("Subscribed to KeyPhraseRecognized events")
 
+    def _ws_subscribe_battery(self):
+        if self.ws:
+            unsub = json.dumps({"Operation": "unsubscribe", "EventName": "BatteryMonitor"})
+            self.ws.send(unsub)
+            time.sleep(0.3)
+            msg = json.dumps({
+                "Operation": "subscribe",
+                "Type": "BatteryCharge",
+                "DebounceMs": 60000,
+                "EventName": "BatteryMonitor",
+                "ReturnProperty": None,
+                "EventConditions": [],
+            })
+            self.ws.send(msg)
+            logger.info("Subscribed to BatteryCharge events")
+
     def _on_ws_open(self, ws):
         logger.info("WebSocket connected")
         self.reconnect_attempts = 0
+        # Always subscribe to events
         self._ws_subscribe_keyphrase()
-        # Start keyphrase recognition
+        self._ws_subscribe_battery()
+
+        current_state = self.get_state()
+        if current_state == State.CHARGING:
+            # Reconnected during charging — stay in charging mode
+            logger.info("WebSocket reconnected in CHARGING mode — not restarting keyphrase")
+            return
+
+        # Normal startup: start keyphrase recognition
         if self.start_keyphrase():
             self.set_led(0, 255, 0)
             self.display_image("e_DefaultContent.jpg")
             # Grace period: ignore wake events for 3s after connect (spurious residual events)
             self.ready_time = time.time() + 3.0
+            self.last_activity_time = time.time()
             self.set_state(State.IDLE)
         else:
             self.set_state(State.ERROR)
@@ -238,7 +473,20 @@ class MistyController:
             logger.debug(f"WS registration: {msg_content}")
             return
 
+        if event_name == "BatteryMonitor":
+            if isinstance(msg_content, dict):
+                self._update_battery_from_event(msg_content)
+            return
+
         if event_name == "WakeWord":
+            self.last_activity_time = time.time()
+            # Restore from dimmed state on activity
+            if self._is_dimmed and self.get_state() == State.IDLE:
+                self._is_dimmed = False
+                self.set_led(0, 255, 0)
+                self.display_image("e_DefaultContent.jpg")
+                logger.info("Restored from idle-dim on wake word")
+
             if self.get_state() == State.IDLE and time.time() >= self.ready_time:
                 logger.info("[Wake] Wake word detected!")
                 self.turn_id += 1
@@ -291,6 +539,19 @@ class MistyController:
         turn = self.turn_id
         turn_start = time.time()
         logger.info(f"[Turn {turn}] Starting conversation turn")
+
+        # Battery guard: enter charging mode if battery critically low
+        battery = self.get_battery_snapshot()
+        if battery.last_updated > 0 and battery.charge_percent < BATTERY_LOW_CRITICAL:
+            logger.warning(f"[Turn {turn}] Skipping — battery too low ({battery.charge_percent*100:.0f}%)")
+            if self.try_set_state(State.IDLE, State.CHARGING):
+                self._apply_charging_mode()
+            return
+
+        # Temperature throttle: add delay if overheating
+        if battery.last_updated > 0 and battery.temperature >= BATTERY_TEMP_THROTTLE_C:
+            logger.warning(f"[Turn {turn}] Thermal throttle — waiting 2s (temp={battery.temperature:.0f}°C)")
+            time.sleep(2.0)
 
         try:
             # 1. Visual feedback — recording
@@ -399,6 +660,7 @@ class MistyController:
         logger.info(f"  Misty:         {MISTY_BASE}")
         logger.info(f"  Orchestration: {ORCHESTRATION_URL}")
         logger.info(f"  Recording:     {RECORDING_DURATION_S}s")
+        logger.info(f"  Idle timeout:  {IDLE_TIMEOUT_S}s")
         logger.info("=" * 60)
 
         # Pre-flight checks
@@ -406,29 +668,58 @@ class MistyController:
             logger.error("Cannot reach Misty! Check network/IP.")
             return
 
+        # Initial battery check
+        battery = self.check_battery()
+        start_in_charging = battery and battery.charge_percent < BATTERY_LOW_CRITICAL
+        if start_in_charging:
+            logger.warning(f"Battery critically low at startup ({battery.charge_percent*100:.0f}%) — starting in charging mode")
+
         orch_ok = self.check_orchestration_health()
         if not orch_ok:
             logger.warning("Orchestration service not reachable — will retry during turns")
 
-        # Connect WebSocket
+        # Disable unused sensor services to reduce power/heat
+        self._disable_unused_services()
+
+        # Cancel any lingering skills (e.g., built-in faceDetection)
+        self.misty_post("/api/skills/cancel")
+
+        # Connect WebSocket (will enter IDLE or stay DISCONNECTED)
         self._connect_ws()
+
+        # If battery was critically low at startup, override to charging mode
+        # (give WS a moment to connect first)
+        if start_in_charging:
+            time.sleep(2.0)
+            self.set_state(State.CHARGING)
+            self._apply_charging_mode()
 
         # Health check loop
         try:
             while self.running:
                 time.sleep(HEALTH_CHECK_INTERVAL_S)
                 state = self.get_state()
+
+                # Battery monitoring (every health check cycle)
+                battery = self.check_battery()
+                if battery:
+                    self._evaluate_battery_thresholds(battery)
+
+                # Idle timeout: dim LED after inactivity
+                if state == State.IDLE and not self._is_dimmed:
+                    idle_duration = time.time() - self.last_activity_time
+                    if idle_duration > IDLE_TIMEOUT_S:
+                        self._is_dimmed = True
+                        self.set_led(0, 50, 0)  # dim green
+                        logger.info(f"Idle for {idle_duration/60:.0f}min — dimming LED")
+
+                # Health check (only when idle)
                 if state == State.IDLE:
                     if not self.check_misty_health():
                         logger.warning("Misty health check failed")
                         self.set_state(State.DISCONNECTED)
         except KeyboardInterrupt:
-            logger.info("Shutting down...")
-            self.running = False
-            if self.ws:
-                self.ws.close()
-            self.set_led(0, 0, 0)
-            logger.info("Goodbye!")
+            self._shutdown()
 
 
 # ============================================================================

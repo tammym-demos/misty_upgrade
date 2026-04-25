@@ -9,7 +9,7 @@ This is a two-device conversational AI system for a Misty II robot:
   - `orchestration_service.py` — Flask service for the STT → LLM → TTS inference pipeline
   - `misty_controller.py` — WebSocket + REST controller that drives Misty (wake word events, recording, audio upload/playback, LED/display state)
 
-The robot's hardware (Snapdragon 212, 2 GB RAM) cannot run inference — all AI workload runs on the companion laptop via **Foundry Local** (local OpenAI-compatible model server). See `docs/ADR-001-companion-device-over-onrobot-inference.md` for the full decision record.
+The robot's hardware (Snapdragon 820 + 410, 2 GB RAM) cannot run inference — 2 GB RAM is the binding constraint. All AI workload runs on the companion laptop via **Foundry Local** (local OpenAI-compatible model server). See `docs/ADR-001-companion-device-over-onrobot-inference.md` for the full decision record.
 
 ### Pipeline flow
 
@@ -133,17 +133,20 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 
 ## Misty Hardware Notes
 
+- **Processors**: Qualcomm Snapdragon 820 (main) + Snapdragon 410 (sensory services). 2 GB RAM (soldered, not upgradeable).
+- **Battery**: 10,200 mAh, 8.4V Li-ion. ~2.2 hours at max speed, up to 10 hours idle. Abruptly powers down at ~7V (no graceful shutdown).
+- **Charging**: Two methods — wireless pad (~6-7 hours full charge) and direct wired via port on bottom near power switch (~3-4 hours, ~2× faster). Different barrel jack sizes; each has its own adapter. Robot does NOT need to be on to charge.
 - **Tally light**: Blue LED on side of head indicates camera/mic is active (PII collection indicator). Turns off when keyphrase/recording is stopped.
-- **Battery**: Monitor via `GET /api/battery`. At very low charge (~5%), mic and keyphrase **silently fail** — APIs return success but produce no data. Minimum ~10% recommended for operation.
-- **Charging**: When not in use, stop keyphrase, cancel skills, and turn LED off (`{"red":0,"green":0,"blue":0}`) to reduce power draw and charge faster.
-- **Fans**: Run continuously — may be firmware-controlled with no user override. Under investigation (issue #8).
-- **Firmware**: v2.0.2.140 / robot OS 2.0.2.11660. Misty Robotics was acquired by Furhat Robotics; no further firmware updates expected.
+- **Battery monitoring**: `GET /api/battery` returns chargePercent, healthPercent, isCharging, voltage, temperature. At very low charge (~5%), mic and keyphrase **silently fail** — APIs return success but produce no data. Minimum ~10% recommended for operation.
+- **Power saving**: When not in use, stop keyphrase, cancel skills, disable unused sensor services, and turn LED off (`{"red":0,"green":0,"blue":0}`) to reduce power draw and charge faster.
+- **Fans**: Run continuously — firmware-controlled with no API or user override. Reducing compute load (disabling unused services) is the only lever to reduce thermal output.
+- **Firmware**: v2.0.2.140 / robot OS 2.0.2.11660. Misty Robotics was acquired by Furhat Robotics; no further firmware updates expected. This is the final firmware.
 
 ## Key Conventions
 
 - **Latency SLO**: p50 < 3s, p95 < 6s end-to-end. The orchestration service enforces per-stage latency budgets (STT: 1500ms, LLM: 2000ms, TTS: 1500ms). Keep responses short (`max_tokens: 150`) to stay within budget.
-- **Misty controller state machine**: DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → REARMING → IDLE. All state transitions are logged.
-- **LED color scheme**: 🟢 Green = ready/idle, 🟠 Orange = recording, 🔵 Blue = processing, 🟣 Purple = playing response, 🔴 Red = error.
+- **Misty controller state machine**: DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → REARMING → IDLE. IDLE ↔ CHARGING (auto-enters at 10% battery, exits at 25%+charging). All state transitions are logged.
+- **LED color scheme**: 🟢 Green = ready/idle, 🟠 Orange = recording, 🔵 Blue = processing, 🟣 Purple = playing response, 🟡 Yellow = low battery warning, ⚫ Off = charging mode, 🔴 Red = error.
 - **TTS fallback chain**: Kokoro-ONNX is primary TTS. If unavailable, pyttsx3 (Windows SAPI5) is used as fallback. Both are lazily initialized. The API response includes `"ttsFallback": true` when fallback is used.
 - **Conversation history**: Maintained in-memory, capped at the last 10 messages. System prompt is prepended on every call but not stored in history.
 - **Configuration**: The orchestration service reads from `.env` (copy `.env.example`). The Misty controller reads `MISTY_IP` and `ORCHESTRATION_URL` from environment.

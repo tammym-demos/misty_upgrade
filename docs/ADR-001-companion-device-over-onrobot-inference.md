@@ -28,7 +28,7 @@ Three options were evaluated:
 
 | Spec | Value | Implication |
 |------|-------|-------------|
-| CPU | Qualcomm Snapdragon 212 (4× Cortex-A7 @ 1.3 GHz) | Very low-power ARM cores; designed for IoT, not inference |
+| CPU | Qualcomm Snapdragon 820 (4× Kryo @ 2.15 GHz) + Snapdragon 410 | Capable ARM cores, but 2 GB RAM is the binding constraint for inference |
 | RAM | 2 GB LPDDR3 | Smallest quantized LLMs need ~1 GB+ for weights alone, leaving almost nothing for the OS, skill runtime, and sensors |
 | Storage | 16 GB eMMC | Limited space for model files (Phi-3.5-mini Q4 ≈ 2 GB, Whisper-tiny ≈ 75 MB, Kokoro ≈ 100 MB) |
 | OS | Windows 10 IoT Core | Restricted runtime; no native support for common ML frameworks |
@@ -40,7 +40,7 @@ Three options were evaluated:
 
 - **Memory**: Loading even a tiny 1B-parameter Q4 model consumes ~600 MB–1 GB. With 2 GB total and the OS + skill runtime already resident, there isn't enough headroom to load a model reliably — let alone run STT, LLM, and TTS concurrently.
 - **Compute**: The Cortex-A7 cores lack NEON SIMD optimizations found in modern ARM chips. Inference on a 1B model would take **tens of seconds to minutes per response** — far outside our 3–6 second latency SLO.
-- **Thermal/Power**: Sustained inference would thermally throttle the Snapdragon 212 and drain Misty's battery rapidly.
+- **Thermal/Power**: Sustained inference would thermally throttle the Snapdragon 820 and drain Misty's 10,200 mAh battery rapidly.
 - **Framework support**: Windows 10 IoT Core on this chipset has limited support for ONNX Runtime, llama.cpp, or other inference engines. Porting and testing would be high-effort with low reward given the above constraints.
 
 ### Why Backpack Was Deferred (Not Rejected)
