@@ -135,7 +135,7 @@ All three services must be running. Start them in order — each depends on the 
 | 2 | **Orchestration service** | `curl http://localhost:5000/api/health` | Reports Foundry and TTS status |
 | 3 | **Misty controller** | Misty LED turns green | Connects via WebSocket + REST |
 
-**Model management:** Only `phi-3.5-mini` should be loaded in Foundry (`foundry service ps`). Whisper-tiny loads on demand for STT. Kokoro TTS runs in-process in the orchestration service — it is **not** a Foundry model and won't appear in `foundry model list`.
+**Model management:** Only `phi-3.5-mini` should be loaded in Foundry (`foundry service ps`). Whisper-tiny STT runs in-process via faster-whisper (not through Foundry). Kokoro TTS runs in-process in the orchestration service — neither STT nor TTS are Foundry models and won't appear in `foundry model list`.
 
 ---
 

@@ -54,7 +54,7 @@ MIN_RECORDING_MS: 500                        // Reject recordings < 500ms
 ```
 POST /api/orchestrate [WAV file]
   ↓
-  ├─ Step 1: STT (Foundry Local /v1/audio/transcriptions)
+  ├─ Step 1: STT (faster-whisper in-process, whisper-tiny model)
   │   • Input: WAV bytes
   │   • Output: transcribed text
   │   • Timeout: 1500ms

@@ -79,15 +79,18 @@ The Misty controller runs on the companion device and drives the robot entirely 
 
 **Pipeline**:
 1. Receives WAV file from Misty
-2. Calls Foundry Local `/v1/audio/transcriptions` (STT — Whisper-tiny)
+2. Transcribes audio using **faster-whisper** in-process (STT — Whisper-tiny via CTranslate2)
 3. Calls Foundry Local `/v1/chat/completions` (LLM — Phi-3.5-mini)
 4. Synthesises speech locally via kokoro-onnx (TTS — Kokoro); falls back to pyttsx3/SAPI5 if unavailable
 5. Returns response audio URI to Misty
 
-> **Note:** Kokoro is **not** a Foundry Local model. It runs as a standalone
-> Python library (`kokoro-onnx`) with its own ONNX model file and voice pack
-> downloaded from HuggingFace. See the [TTS Architecture](#tts-architecture)
-> section below for details.
+> **Note:** STT and TTS both run **in-process** in the orchestration service —
+> they are **not** Foundry Local models. Foundry Local does not expose a REST
+> endpoint for Whisper. We use [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+> (CTranslate2) which loads the whisper-tiny model directly in the Python process.
+> The model is auto-downloaded from HuggingFace on first run (~75 MB).
+> Kokoro TTS runs as a standalone Python library (`kokoro-onnx`) with its own
+> ONNX model file and voice pack. See [TTS Architecture](#tts-architecture) below.
 
 **Error Handling**:
 - Timeout detection at each stage
@@ -100,12 +103,15 @@ The Misty controller runs on the companion device and drives the robot entirely 
 
 **Model Stack (Locked v1)**:
 - Chat: `phi-3.5-mini` — Lightweight LLM (~3.8B params) — **via Foundry Local**
-- STT: `whisper-tiny` — Fast speech-to-text — **via Foundry Local**
+- STT: `whisper-tiny` — Fast speech-to-text — **via faster-whisper (in-process, not Foundry)**
 
-**Endpoints Used**:
+**Foundry Local Endpoints Used**:
 - `POST /v1/chat/completions` — OpenAI-compatible LLM (use full model ID, e.g., `Phi-3.5-mini-instruct-openvino-gpu:2`)
-- `POST /v1/audio/transcriptions` — Speech-to-text (use full model ID, e.g., `openai-whisper-tiny-generic-cpu:3`)
 - `GET /openai/models` — List loaded models (returns array of model ID strings)
+
+> **Important:** Foundry Local does **not** expose a REST endpoint for Whisper STT.
+> The orchestration service uses `faster-whisper` (CTranslate2) to run whisper-tiny
+> in-process. The Foundry whisper-tiny download is not required for the current architecture.
 
 > **Important:** Foundry's `service status` CLI reports a URL like `http://127.0.0.1:64722/openai/status`.
 > The orchestration service must strip the `/openai/status` path and use only `http://127.0.0.1:64722`
@@ -178,13 +184,15 @@ foundry service status
 ⚠️ Requires internet. Downloads can take 5-15 minutes.
 
 ```powershell
-# Download the two models served by Foundry Local
+# Download the chat model served by Foundry Local
 foundry model download phi-3.5-mini
-foundry model download whisper-tiny
 
-# Load them into the running service
+# Load it into the running service
 foundry model load phi-3.5-mini
-foundry model load whisper-tiny
+
+# Note: whisper-tiny is NOT served by Foundry Local.
+# The orchestration service uses faster-whisper (CTranslate2) which
+# auto-downloads the model from HuggingFace on first run (~75 MB).
 ```
 
 **1.5 Verify Foundry Local Models**
@@ -492,15 +500,16 @@ All versions are locked for v1 reproducibility:
 | Component | Model | Version | Provider | Size | Runtime |
 |-----------|-------|---------|----------|------|---------|
 | Chat | Phi-3.5-mini | latest | Microsoft/Hugging Face | ~3.8B | Foundry Local |
-| STT | Whisper-tiny | latest | OpenAI/Hugging Face | ~39M | Foundry Local |
+| STT | Whisper-tiny | latest | OpenAI/Hugging Face | ~39M | **faster-whisper** (in-process CTranslate2) |
 | TTS | Kokoro | v1.0 (ONNX) | Hugging Face | ~82M | Standalone (`kokoro-onnx`) |
 | TTS (fallback) | SAPI5 | — | Windows built-in | — | `pyttsx3` |
 
 To update model versions:
-1. For Chat/STT: Edit `MODELS` dict in `orchestration_service.py`, verify new model is available in Foundry Local
-2. For TTS: Update the Kokoro ONNX model file and voice pack, or swap the TTS backend in the `text_to_speech()` function
-3. Test latency against SLO
-4. Update this document and `plans/planWindowsFoundry.prompt.md`
+1. For Chat: Edit `MODELS` dict in `orchestration_service.py`, verify new model is available in Foundry Local
+2. For STT: Update the model name in `_get_whisper_model()` in `orchestration_service.py` (uses faster-whisper, auto-downloads from HuggingFace)
+3. For TTS: Update the Kokoro ONNX model file and voice pack, or swap the TTS backend in the `text_to_speech()` function
+4. Test latency against SLO
+5. Update this document and `plans/planWindowsFoundry.prompt.md`
 
 ---
 

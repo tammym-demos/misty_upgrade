@@ -220,48 +220,48 @@ def orchestrate():
         return jsonify({"status": "error", "error": "internal_error"}), 500
 
 # ============================================================================
-# STEP 1: SPEECH-TO-TEXT
+# STEP 1: SPEECH-TO-TEXT (faster-whisper, in-process)
 # ============================================================================
 
+_whisper_model = None
+
+
+def _get_whisper_model():
+    """Return a cached faster-whisper model, or load on first use."""
+    global _whisper_model
+    if _whisper_model is not None:
+        return _whisper_model
+    try:
+        from faster_whisper import WhisperModel  # noqa: PLC0415
+        _whisper_model = WhisperModel("tiny", compute_type="int8", cpu_threads=4)
+        logger.info("faster-whisper model loaded (tiny, int8)")
+        return _whisper_model
+    except Exception as e:
+        logger.error(f"Failed to load faster-whisper: {e}")
+        return None
+
+
 def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
-    """Transcribe audio using Foundry Local."""
+    """Transcribe audio using faster-whisper (in-process CTranslate2)."""
     try:
         elapsed = (time.time() - start_time) * 1000
         remaining = LATENCY_BUDGET["stt"] - elapsed
-        
+
         if remaining <= 0:
             logger.error("STT timeout: no time remaining")
             return {"status": "error", "error": "timeout"}
-        
-        url = f"{FOUNDRY_LOCAL_HOST}/v1/audio/transcriptions"
-        files = {
-            'file': ('audio.wav', BytesIO(audio_bytes), 'audio/wav'),
-        }
-        data = {
-            'model': MODELS["stt"],
-            'language': 'en',
-        }
-        
-        response = requests.post(
-            url,
-            files=files,
-            data=data,
-            timeout=min(FOUNDRY_API_TIMEOUT, remaining / 1000.0)
-        )
-        
-        if response.status_code != 200:
-            logger.error(f"STT API error: {response.status_code} {response.text}")
+
+        model = _get_whisper_model()
+        if model is None:
             return {"status": "error", "error": "stt_failure"}
-        
-        result = response.json()
-        text = result.get("text", "")
-        
+
+        audio_io = BytesIO(audio_bytes)
+        segments, info = model.transcribe(audio_io, language="en", beam_size=1)
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+
         logger.debug(f"STT result: {text}")
         return {"status": "ok", "text": text}
-        
-    except requests.Timeout:
-        logger.error("STT request timed out")
-        return {"status": "error", "error": "timeout"}
+
     except Exception as e:
         logger.error(f"STT failed: {e}")
         return {"status": "error", "error": "stt_failure"}
