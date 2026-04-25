@@ -39,7 +39,7 @@ This project integrates a **Misty II** social robot with **Microsoft Foundry Loc
 
 ### Why a Companion Device?
 
-Misty II's onboard Snapdragon 212 (4× Cortex-A7, 2 GB RAM) cannot run modern inference workloads. A companion Windows laptop provides the compute while Misty handles audio I/O and interaction. See [ADR-001](docs/ADR-001-companion-device-over-onrobot-inference.md) for the full decision record.
+Misty II's onboard Snapdragon 820 + 410 (2 GB RAM) cannot run modern inference workloads — RAM is the bottleneck. A companion Windows laptop provides the compute while Misty handles audio I/O and interaction. See [ADR-001](docs/ADR-001-companion-device-over-onrobot-inference.md) for the full decision record.
 
 ---
 
