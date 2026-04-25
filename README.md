@@ -17,16 +17,25 @@ This project integrates a **Misty II** social robot with **Microsoft Foundry Loc
 ┌──────────────────────────────┐         ┌──────────────────────────────────┐
 │        Misty II Robot        │         │     Windows Companion Device     │
 │                              │  Wi-Fi  │                                  │
-│  "Hey, Misty!" (wake word)   │────────▶│  Orchestration Service (Flask)   │
-│  Record audio (up to 10s)    │  POST   │    ├─ STT  (Whisper-tiny)        │
+│  "Hey, Misty!" (wake word)   │◄───────►│  Misty Controller (Python)      │
+│  Microphone / Speakers       │  REST + │    ├─ WebSocket event listener   │
+│  LED / Display               │  WS     │    ├─ REST API commands          │
+│                              │         │    └─ State machine (IDLE →      │
+│  Controlled entirely via     │         │        RECORDING → PROCESSING →  │
+│  REST API + WebSocket from   │         │        PLAYING → REARMING)       │
+│  companion device            │         │                                  │
+│                              │         │  Orchestration Service (Flask)   │
+│                              │         │    ├─ STT  (Whisper-tiny)        │
 │                              │         │    ├─ LLM  (Phi-3.5-mini)        │
-│  Play response audio ◀───────│────────◀│    └─ TTS  (Kokoro)              │
-│  Re-arm wake word listener   │  JSON   │                                  │
+│                              │         │    └─ TTS  (Kokoro / pyttsx3)    │
+│                              │         │                                  │
 │                              │         │  Foundry Local (model server)    │
 └──────────────────────────────┘         └──────────────────────────────────┘
 ```
 
-**Pipeline flow:** Wake word → Record → `POST /api/orchestrate` → STT → LLM → TTS → Audio response → Playback
+**Pipeline flow:** Wake word (WebSocket event) → Record via REST → Download audio → `POST /api/orchestrate` → STT → LLM → TTS → Upload audio to Misty → Playback → Re-arm wake word
+
+> **Note:** We use the REST API + WebSocket approach (code runs on the laptop) instead of Misty's on-robot JavaScript SDK. The skill runtime proved unreliable — see [Implementation Guide](docs/IMPLEMENTATION_GUIDE.md) for details.
 
 ### Why a Companion Device?
 
@@ -38,13 +47,14 @@ Misty II's onboard Snapdragon 212 (4× Cortex-A7, 2 GB RAM) cannot run modern in
 
 ```
 ├── src/
-│   ├── misty-skill/                    # JavaScript skill deployed to Misty II
-│   │   ├── FoundryLocalSkill.json      #   Skill metadata & config
-│   │   └── FoundryLocalSkill.js        #   Wake word → record → request → play (~350 LOC)
+│   ├── misty-skill/                    # Legacy JavaScript skill (deprecated — kept for reference)
+│   │   ├── FoundryLocalSkill.json      #   Skill metadata
+│   │   └── FoundryLocalSkill.js        #   On-robot skill code (not used in current architecture)
 │   │
-│   └── windows-orchestration/          # Python Flask service on companion device
+│   └── windows-orchestration/          # Python services on companion device
 │       ├── orchestration_service.py    #   STT → LLM → TTS pipeline (~450 LOC)
-│       ├── requirements.txt            #   Dependencies (Flask, requests, Flask-CORS)
+│       ├── misty_controller.py         #   REST+WebSocket controller for Misty (~400 LOC)
+│       ├── requirements.txt            #   Dependencies (Flask, requests, websocket-client)
 │       └── .env.example                #   Configuration template
 │
 ├── tests/
@@ -85,23 +95,22 @@ Misty II's onboard Snapdragon 212 (4× Cortex-A7, 2 GB RAM) cannot run modern in
 ```powershell
 # 1. Start Foundry Local on the companion device
 pip install foundry-local
-foundry --port 5000 --host 0.0.0.0
+foundry
 
 # 2. Install and run the orchestration service
 cd src\windows-orchestration
 pip install -r requirements.txt
 python orchestration_service.py
 
-# 3. Verify the service is healthy
+# 3. Verify the service is healthy (port is auto-discovered from `foundry service status`)
 Invoke-RestMethod -Uri http://localhost:5000/api/health
 
-# 4. Configure the Misty skill with the companion device IP
-#    Edit src/misty-skill/FoundryLocalSkill.js → WINDOWS_HOST
-
-# 5. Deploy the skill to Misty via web interface or REST API
+# 4. Start the Misty controller (separate terminal)
+#    Set MISTY_IP and ORCHESTRATION_URL env vars if not using defaults
+python misty_controller.py
 ```
 
-Then say **"Hey, Misty!"** followed by your question.
+The Misty controller connects to Misty via WebSocket and REST API — no skill deployment needed. Misty's LED turns green when ready. Say **"Hey, Misty!"** followed by your question.
 
 ---
 
@@ -116,7 +125,9 @@ Then say **"Hey, Misty!"** followed by your question.
 
 ## Status
 
-**v1.0 — Implementation Complete, Ready for Deployment**
+**v1.0 — REST+WebSocket Architecture, Orchestration Service Complete**
+
+The project has moved from on-robot JavaScript skills to a laptop-driven REST+WebSocket architecture. The Misty controller and orchestration service run on the companion device. Wake word detection, recording, and audio playback are all handled via Misty's REST API.
 
 See [IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md) for the full build log, known limitations, and future enhancement roadmap.
 

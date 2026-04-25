@@ -11,7 +11,7 @@ import os
 from io import BytesIO
 
 # Configuration for testing
-MISTY_HOST = os.getenv("MISTY_HOST", "http://192.168.1.100")
+MISTY_HOST = os.getenv("MISTY_HOST", "http://10.0.0.44")
 WINDOWS_HOST = os.getenv("WINDOWS_HOST", "http://localhost:5000")
 FOUNDRY_HOST = os.getenv("FOUNDRY_LOCAL_HOST", "http://localhost:5000")
 

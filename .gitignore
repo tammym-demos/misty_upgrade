@@ -1,0 +1,15 @@
+# Model files (large binaries)
+*.onnx
+*.bin
+
+# Logs
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.env
+
+# OS
+Thumbs.db
+.DS_Store
