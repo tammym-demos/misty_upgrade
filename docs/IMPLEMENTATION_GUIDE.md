@@ -36,24 +36,31 @@ This implementation integrates Misty II robot with Microsoft Foundry Local for o
 
 ## Components
 
-### 1. Misty Skill (JavaScript)
-**Location**: `src/misty-skill/`
+### 1. Misty Controller (Python — replaces JavaScript Skill)
+**Location**: `src/windows-orchestration/misty_controller.py`
 
-**Files**:
-- `FoundryLocalSkill.json` — Metadata for skill deployment
-- `FoundryLocalSkill.js` — Main skill logic
+The Misty controller runs on the companion device and drives the robot entirely via REST API + WebSocket. This replaces the on-robot JavaScript skill, which proved unreliable (see [Why Not On-Robot Skills?](#why-not-on-robot-skills) below).
+
+**State Machine**: `DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → REARMING → IDLE`
 
 **Functionality**:
-- Listens for "Hey, Misty!" wake word
-- Records audio (max 10s, ends on 800ms silence)
-- Sends WAV to Windows companion `/api/orchestrate`
-- Plays response audio via Misty speakers
-- Handles fallback responses for errors
+- Connects to Misty via WebSocket (`ws://<ip>/pubsub`) for `KeyPhraseRecognized` events
+- Issues REST API calls for recording, audio upload/download, LED, display
+- Manages the full conversation turn cycle in a worker thread
+- Auto-reconnects on WebSocket disconnect with exponential backoff
+- Periodic health checks for Misty and orchestration service
 
-**Key Configuration**:
-- `WINDOWS_HOST`: IP and port of Windows companion (default: `http://192.168.1.100:5000`)
-- `RESPONSE_TIMEOUT_MS`: 6s max wait for orchestration
-- Fallback messages for service unavailable, timeout, model load failure
+**LED Color Scheme**:
+- 🟢 Green = IDLE (listening for wake word)
+- 🟠 Orange = RECORDING (capturing user speech)
+- 🔵 Blue = PROCESSING (STT → LLM → TTS)
+- 🟣 Purple = PLAYING (speaking response)
+- 🔴 Red = ERROR (will auto-recover)
+
+**Key Configuration** (environment variables):
+- `MISTY_IP`: Robot IP address (default: `10.0.0.44`)
+- `ORCHESTRATION_URL`: Orchestration service URL (default: `http://10.0.0.58:5000`)
+- `RECORDING_DURATION_S`: How long to record after wake word (default: `4` seconds)
 
 ### 2. Windows Orchestration Service (Python/Flask)
 **Location**: `src/windows-orchestration/`
@@ -96,9 +103,13 @@ This implementation integrates Misty II robot with Microsoft Foundry Local for o
 - STT: `whisper-tiny` — Fast speech-to-text — **via Foundry Local**
 
 **Endpoints Used**:
-- `POST /v1/chat/completions` — OpenAI-compatible LLM
-- `POST /v1/audio/transcriptions` — Speech-to-text
-- `GET /openai/models` — Model availability
+- `POST /v1/chat/completions` — OpenAI-compatible LLM (use full model ID, e.g., `Phi-3.5-mini-instruct-openvino-gpu:2`)
+- `POST /v1/audio/transcriptions` — Speech-to-text (use full model ID, e.g., `openai-whisper-tiny-generic-cpu:3`)
+- `GET /openai/models` — List loaded models (returns array of model ID strings)
+
+> **Important:** Foundry's `service status` CLI reports a URL like `http://127.0.0.1:64722/openai/status`.
+> The orchestration service must strip the `/openai/status` path and use only `http://127.0.0.1:64722`
+> as the base URL. Inference endpoints use `/v1/` prefix directly (not `/openai/v1/`).
 
 ### 4. TTS Architecture
 <a id="tts-architecture"></a>
@@ -109,7 +120,7 @@ Python library with a built-in fallback chain:
 
 | Priority | Engine | Package | Quality | Notes |
 |----------|--------|---------|---------|-------|
-| Primary | Kokoro v1.0 (ONNX) | `kokoro-onnx` + `soundfile` | Natural, neural | Requires `kokoro-v1.0-quantized.onnx` and `voices-v1.0.bin` from [HuggingFace](https://huggingface.co/hexgrad/Kokoro-82M) |
+| Primary | Kokoro v1.0 (ONNX) | `kokoro-onnx` + `soundfile` | Natural, neural | Requires `kokoro-v1.0.int8.onnx` and `voices-v1.0.bin` from [GitHub releases](https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.0) |
 | Fallback | pyttsx3 (SAPI5) | `pyttsx3` | Robotic but functional | Uses Windows built-in speech engine; no extra downloads needed |
 
 **Setup for Kokoro (primary TTS):**
@@ -117,9 +128,9 @@ Python library with a built-in fallback chain:
 pip install kokoro-onnx soundfile
 
 # Download model files into the windows-orchestration directory
-# - kokoro-v1.0-quantized.onnx
+# - kokoro-v1.0.int8.onnx
 # - voices-v1.0.bin
-# From: https://huggingface.co/hexgrad/Kokoro-82M
+# From: https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.0
 ```
 
 If Kokoro is not installed or fails at runtime, the service automatically falls
@@ -196,8 +207,8 @@ pip install kokoro-onnx soundfile
 
 # Download model files from HuggingFace into the orchestration directory
 cd src\windows-orchestration
-# Place these two files here (download from https://huggingface.co/hexgrad/Kokoro-82M):
-#   - kokoro-v1.0-quantized.onnx
+# Place these two files here (download from https://github.com/thewh1teagle/kokoro-onnx/releases/tag/model-files-v1.0):
+#   - kokoro-v1.0.int8.onnx
 #   - voices-v1.0.bin
 ```
 
@@ -266,81 +277,47 @@ Invoke-RestMethod -Uri http://<misty-ip>/api/device
 Invoke-RestMethod -Uri http://localhost:5000/api/health
 ```
 
-**2.3 Update Skill Configuration**
+**2.3 Start the Misty Controller**
 
-Edit `src/misty-skill/FoundryLocalSkill.js` and set `WINDOWS_HOST` to the
-Windows companion's local IP address and orchestration port:
-
-```javascript
-const CONFIG = {
-  WINDOWS_HOST: "http://192.168.1.XXX:5000",  // ← Replace with your Windows IP
-  // ... rest of config stays the same
-};
-```
-
-To find your Windows IP:
-```powershell
-(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias Wi-Fi).IPAddress
-```
-
-**2.4 Deploy Skill to Misty via REST API**
-
-Upload both skill files to Misty using its REST API:
+In a separate terminal, start the Misty controller:
 
 ```powershell
-# Set your Misty IP
-$MISTY_IP = "192.168.1.XXX"   # ← Replace with Misty's IP
+cd src\windows-orchestration
 
-# Upload the skill (both .json metadata and .js code)
-# Option A: Use Misty's Skill Runner web interface
-#   1. Open http://$MISTY_IP in a browser
-#   2. Navigate to the Skill Runner page
-#   3. Upload FoundryLocalSkill.json and FoundryLocalSkill.js
-#   4. Click "Upload & Run"
+# Set environment variables (or use defaults)
+$env:MISTY_IP = "10.0.0.44"          # ← Replace with your Misty's IP
+$env:ORCHESTRATION_URL = "http://10.0.0.58:5000"  # ← Replace with your laptop IP
 
-# Option B: Use the REST API to save the skill
-$metaJson = Get-Content -Raw "src\misty-skill\FoundryLocalSkill.json"
-$codeJs   = Get-Content -Raw "src\misty-skill\FoundryLocalSkill.js"
-$body = @{
-    Meta = ($metaJson | ConvertFrom-Json)
-    Code = $codeJs
-} | ConvertTo-Json -Depth 5
-
-Invoke-RestMethod -Uri "http://$MISTY_IP/api/skills" `
-    -Method Post `
-    -ContentType "application/json" `
-    -Body $body
+python misty_controller.py
 ```
 
-**2.5 Start the Skill on Misty**
+The controller will:
+1. Connect to Misty via WebSocket
+2. Subscribe to `KeyPhraseRecognized` events
+3. Start wake word recognition via REST API
+4. Set LED to green (ready)
+
+**Finding Misty's IP:**
 ```powershell
-# Run the skill by its unique ID (from FoundryLocalSkill.json)
-Invoke-RestMethod -Uri "http://$MISTY_IP/api/skills/start" `
-    -Method Post `
-    -ContentType "application/json" `
-    -Body '{"UniqueId": "5f2b3c2b-4d3c-4e2b-8f1a-9d8c7b6a5e4d"}'
-
-# Verify the skill is running
-Invoke-RestMethod -Uri "http://$MISTY_IP/api/skills/running"
+# Scan your local subnet for Misty (responds on port 80)
+1..254 | ForEach-Object -Parallel {
+    $ip = "10.0.0.$_"
+    if (Test-Connection $ip -Count 1 -Quiet -TimeoutSeconds 1) {
+        try {
+            $r = Invoke-RestMethod -Uri "http://$ip/api/device" -TimeoutSec 2
+            Write-Output "Misty found at $ip"
+        } catch {}
+    }
+} -ThrottleLimit 50
 ```
 
-**2.6 Test Wake Word Detection**
-1. Say **"Hey, Misty!"** near the robot
-2. Robot should respond with a confirmation beep or LED change
-3. Speak your question (up to 10 seconds; recording stops after 800ms of silence)
-4. Misty should play back a spoken response within ~6 seconds
-
-**2.7 Check Skill Logs (if something goes wrong)**
-```powershell
-# Get recent skill log messages from Misty
-Invoke-RestMethod -Uri "http://$MISTY_IP/api/skills/log?UniqueId=5f2b3c2b-4d3c-4e2b-8f1a-9d8c7b6a5e4d"
-
-# Look for:
-#   "FoundryLocalSkill initialized"   → skill started OK
-#   "Wake word detected"               → mic is working
-#   "Recording complete"               → audio captured
-#   "Orchestration response received"  → round-trip to Windows succeeded
-```
+**2.4 Test Wake Word Detection**
+1. LED should be **green** (IDLE state)
+2. Say **"Hey, Misty!"** near the robot
+3. Misty beeps and LED turns **orange** (recording for 4 seconds)
+4. LED turns **blue** (processing via orchestration)
+5. LED turns **purple** (playing response audio)
+6. LED returns to **green** (ready for next interaction)
 
 ---
 
@@ -418,73 +395,84 @@ python orchestration_service.py
 ```
 
 ### Issue: Foundry Local Not Responding
-**Symptom**: Orchestration service logs "Foundry Local unreachable"
+**Symptom**: Orchestration service logs "Foundry Local unreachable" or health returns "degraded"
 **Causes**:
-- Foundry Local process crashed
-- Port conflict (5000 in use)
+- Foundry Local process not running
+- Wrong endpoint URL (auto-discovery extracts path — must strip to base URL)
 - Models not fully loaded
 
 **Solution**:
 ```powershell
-# Check Foundry Local is running
-tasklist | findstr python  # Look for foundry process
+# Check Foundry Local status
+foundry service status
+# Output: "Model management service is running on http://127.0.0.1:<PORT>/openai/status"
+# NOTE: The orchestration service should use only http://127.0.0.1:<PORT> (no path)
 
-# Restart Foundry Local
-foundry --port 5000 --host 0.0.0.0
+# If not running, start it
+foundry
 
-# Wait 30s for models to initialize
-Start-Sleep -Seconds 30
+# Verify models are loaded
+curl http://127.0.0.1:<PORT>/openai/models
+# Should list whisper-tiny and phi-3.5-mini model IDs
 
-# Verify
-Invoke-RestMethod -Uri http://localhost:5000/api/health
+# Verify orchestration can reach it
+curl http://localhost:5000/api/health
 ```
 
 ### Issue: High Latency (p95 > 6s)
 **Causes**:
 - Large model sizes
-- Network latency between Misty and Windows
-- Silence detection timeout on Misty
+- Network latency between laptop and Misty
+- Recording duration too long
 - Slow disk I/O for audio files
 
 **Solutions**:
 1. Verify warm-cache behavior: second request should be ~2s faster
 2. Reduce output token limit in orchestration service (line ~200)
-3. Trim silence aggressively in Misty skill
+3. Reduce `RECORDING_DURATION_S` env var (default 4s)
 4. Use SSD for response audio storage on Windows
 
 ### Issue: Wake Word Not Triggering
 **Causes**:
-- Skill not deployed correctly
-- Microphone muted or disconnected
-- Wake word model not initialized
+- Keyphrase recognition not started or in stale state
+- Misty controller not connected (check WebSocket status)
+- Interfering on-robot skills (e.g., built-in faceDetection)
+- Microphone muted
 
 **Solution**:
 ```powershell
-# SSH into Misty (if available)
-# Check skill logs for errors
-# Verify microphone level via Misty API
+$MISTY_IP = "10.0.0.44"
 
-# Re-deploy skill from scratch
-# Restart Misty if needed
+# Cancel any running on-robot skills (they can interfere)
+Invoke-RestMethod -Uri "http://$MISTY_IP/api/skills/cancel" -Method POST
+
+# Stop then restart keyphrase (always stop-start, never just start)
+Invoke-RestMethod -Uri "http://$MISTY_IP/api/audio/keyphrase/stop" -Method POST
+Start-Sleep 1
+Invoke-RestMethod -Uri "http://$MISTY_IP/api/audio/keyphrase/start" -Method POST
+
+# If still not working, reboot Misty (both params required!)
+Invoke-RestMethod -Uri "http://$MISTY_IP/api/reboot" -Method POST `
+    -ContentType "application/json" -Body '{"Core": true, "SensoryServices": true}'
 ```
 
----
+### Issue: Skill Runtime Stuck (legacy — if using JS skills)
+**Symptom**: Skills deploy successfully but don't execute. LED doesn't change. No skills in running list.
+**Cause**: Rapid deploy/cancel cycles can break the skill runtime.
+**Solution**: Reboot Misty. Cancel all skills first, then reboot.
 
-## Latency Tuning
+<a id="why-not-on-robot-skills"></a>
+### Why Not On-Robot JavaScript Skills?
 
-**Latency Budget Breakdown** (target p50 < 3s):
-- Audio recording (user): 1000ms (user talks)
-- Network transmission: 100ms
-- STT processing: 1500ms
-- LLM inference: 2000ms
-- TTS synthesis: 1500ms
-- Audio playback: 500ms (starts immediately)
-- **Total: ~5.2s for p50** (achievable with warm models)
+We initially tried Misty's JavaScript SDK but abandoned it due to:
+- **Silent crashes**: `SkillImageUri: null` in metadata crashes skills with no error
+- **Runtime instability**: Rapid deploy/cancel cycles break the skill runtime entirely
+- **API inconsistencies**: `BroadcastMode` must be string `"off"` not boolean; `StartupRules` values undocumented
+- **No debug logging**: `/api/skills/log` endpoint returns 404 on firmware v2.0.2
+- **StartKeyPhraseRecognition crashes** inside skills — only works via REST API
+- **Unreliable event model**: Callback naming conventions (`_eventName`) are fragile
 
-**Optimization Knobs**:
-1. **Silence trimming**: Adjust `SILENCE_THRESHOLD_MS` in Misty skill
-2. **LLM token limit**: Reduce `max_tokens` in orchestration service
-3. **Model selection**: Use smaller models (Phi-3.5-mini is already minimal)
+The REST API + WebSocket approach is more reliable, easier to debug (all output on laptop), and avoids all skill runtime issues.
 4. **Caching**: Foundry Local caches models in memory; warmup in advance
 
 ---

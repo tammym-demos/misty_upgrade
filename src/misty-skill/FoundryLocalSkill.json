@@ -1,12 +1,11 @@
 {
   "UniqueId": "5f2b3c2b-4d3c-4e2b-8f1a-9d8c7b6a5e4d",
   "Name": "FoundryLocalSkill",
-  "Title": "Foundry Local Integration Skill",
-  "Description": "Integrates Misty with Windows-based Foundry Local inference. Handles wake word detection, audio recording, STT/LLM/TTS orchestration, and playback.",
-  "StartupRules": ["Manual", "Robot"],
-  "TimeoutInSeconds": 300,
-  "SkillImageUri": null,
-  "BroadcastMode": false,
+  "Title": "Foundry Local Skill",
+  "Description": "Wake word and Foundry Local inference",
+  "StartupRules": ["Manual"],
+  "TimeoutInSeconds": 7200,
+  "BroadcastMode": "off",
   "AllowedClients": ["Web", "Mobile", "Command"],
   "ManagedProperties": []
 }

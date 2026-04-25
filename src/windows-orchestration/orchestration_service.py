@@ -73,6 +73,10 @@ def _discover_foundry_endpoint() -> str:
         match = re.search(r'https?://[^\s\'"]+', output)
         if match:
             url = match.group(0).rstrip('/')
+            # Strip any path component — we only want the base URL (host:port)
+            from urllib.parse import urlparse, urlunparse
+            parsed = urlparse(url)
+            url = urlunparse((parsed.scheme, parsed.netloc, '', '', '', ''))
             logger.info(f"Foundry endpoint discovered: {url}")
             return url
         logger.warning("Could not parse Foundry endpoint from service status output")
@@ -196,7 +200,11 @@ def orchestrate():
         
         # Calculate total latency
         total_latency_ms = (time.time() - start_time) * 1000
-        logger.info(f"Orchestration completed in {total_latency_ms:.0f}ms")
+        tts_fallback = tts_result.get("tts_fallback", False)
+        if tts_fallback:
+            logger.warning(f"⚠️ Orchestration completed in {total_latency_ms:.0f}ms (TTS FALLBACK active)")
+        else:
+            logger.info(f"Orchestration completed in {total_latency_ms:.0f}ms")
         
         return jsonify({
             "status": "ok",
@@ -204,6 +212,7 @@ def orchestrate():
             "inferenceResponse": response_text,
             "responseAudio": response_audio_uri,
             "latencyMs": total_latency_ms,
+            "ttsFallback": tts_fallback,
         }), 200
         
     except Exception as e:
@@ -335,7 +344,7 @@ def _get_kokoro():
         return _kokoro_instance
     try:
         from kokoro_onnx import Kokoro  # noqa: PLC0415
-        _kokoro_instance = Kokoro("kokoro-v1.0-quantized.onnx", "voices-v1.0.bin")
+        _kokoro_instance = Kokoro("kokoro-v1.0.int8.onnx", "voices-v1.0.bin")
         logger.info("kokoro-onnx TTS engine initialised")
         return _kokoro_instance
     except Exception as e:
@@ -386,17 +395,20 @@ def text_to_speech(text: str, start_time: float) -> Dict[str, Any]:
                 logger.debug(f"kokoro-onnx TTS saved: {audio_path}")
                 return {"status": "ok", "audio_uri": f"/api/audio/{audio_filename}"}
             except Exception as e:
-                logger.warning(f"kokoro-onnx synthesis failed, falling back to pyttsx3: {e}")
+                logger.warning(f"⚠️ TTS FALLBACK: kokoro-onnx synthesis failed ({e}), switching to pyttsx3 SAPI5")
+        else:
+            logger.warning("⚠️ TTS FALLBACK: kokoro-onnx unavailable, switching to pyttsx3 SAPI5")
 
         # --- Fallback: pyttsx3 SAPI5 (robotic but guaranteed on Windows) ---
         engine = _get_pyttsx3()
         if engine is not None:
+            logger.warning("⚠️ TTS FALLBACK ACTIVE: using pyttsx3 SAPI5 (reduced voice quality)")
             engine.save_to_file(text, audio_path)
             engine.runAndWait()
             logger.debug(f"pyttsx3 TTS saved: {audio_path}")
-            return {"status": "ok", "audio_uri": f"/api/audio/{audio_filename}"}
+            return {"status": "ok", "audio_uri": f"/api/audio/{audio_filename}", "tts_fallback": True}
 
-        logger.error("No TTS engine available (kokoro-onnx and pyttsx3 both failed)")
+        logger.error("❌ No TTS engine available (kokoro-onnx and pyttsx3 both failed)")
         return {"status": "error", "error": "tts_no_engine"}
 
     except Exception as e:
