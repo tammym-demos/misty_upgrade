@@ -1,7 +1,7 @@
 
 # Misty II + Foundry Local — Conversational AI Robot
 
-> Turn a Misty II robot into a conversational AI assistant using fully local inference — no cloud, no API keys, no internet required after setup.
+> Turn a Misty II robot into a conversational AI assistant using fully local inference — no cloud, no API keys, no internet required after initial model downloads.
 
 ## Project Scope
 
@@ -25,11 +25,11 @@ This project integrates a **Misty II** social robot with **Microsoft Foundry Loc
 │  REST API + WebSocket from   │         │        PLAYING → REARMING)       │
 │  companion device            │         │                                  │
 │                              │         │  Orchestration Service (Flask)   │
-│                              │         │    ├─ STT  (Whisper-tiny)        │
-│                              │         │    ├─ LLM  (Phi-3.5-mini)        │
-│                              │         │    └─ TTS  (Kokoro / pyttsx3)    │
+│                              │         │    ├─ STT  (faster-whisper)      │
+│                              │         │    ├─ LLM  (Phi-3.5-mini)  ───► Foundry Local
+│                              │         │    └─ TTS  (Kokoro / pyttsx3)   │
 │                              │         │                                  │
-│                              │         │  Foundry Local (model server)    │
+│                              │         │  Foundry Local (LLM inference)   │
 └──────────────────────────────┘         └──────────────────────────────────┘
 ```
 
@@ -81,12 +81,21 @@ Misty II's onboard Snapdragon 212 (4× Cortex-A7, 2 GB RAM) cannot run modern in
 |----------|--------|-----------|
 | Inference location | Companion device (laptop) | Misty hardware too constrained; laptop already in travel kit |
 | Model server | Foundry Local | Local-only, OpenAI-compatible API, no cloud dependency |
-| Chat model | Phi-3.5-mini (3.8B) | Fast, high-quality, fits CPU inference budget |
-| STT model | Whisper-tiny | Minimal latency, CPU-friendly |
-| TTS model | Kokoro v0.19 | Fast synthesis with natural voice quality |
+| Chat model | Phi-3.5-mini (3.8B) via **Foundry Local** | Fast, high-quality, fits CPU inference budget. Served by Foundry Local at `/v1/chat/completions`. |
+| STT model | Whisper-tiny via **faster-whisper** (in-process) | Foundry Local has no REST endpoint for Whisper — only C#/Rust SDK. We use [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2) which loads the model directly in the orchestration Python process. Model auto-downloaded from HuggingFace on first run (~75 MB). |
+| TTS model | Kokoro v1.0 ONNX (in-process), pyttsx3 fallback | [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) runs inference in the orchestration process via ONNX Runtime. Model files (`kokoro-v1.0.int8.onnx` 88 MB + `voices-v1.0.bin` 27 MB) stored locally. Falls back to pyttsx3 (Windows SAPI5) if Kokoro unavailable. |
 | Latency SLO | p50 < 3s, p95 < 6s | Must feel conversational |
 | Network | Local Wi-Fi only | Privacy-first, offline-capable after initial model download |
 | Hardware | CPU-only (GPU optional) | Broad laptop compatibility |
+
+### Model Runtime Summary
+
+| Model | Purpose | Runtime | Origin |
+|-------|---------|---------|--------|
+| Phi-3.5-mini | Chat / LLM | **Foundry Local** (HTTP API) | Bundled with Foundry Local, managed via `foundry model` CLI |
+| Whisper-tiny | Speech-to-text | **faster-whisper** (in-process) | Auto-downloaded from [HuggingFace](https://huggingface.co/Systran/faster-whisper-tiny) on first run |
+| Kokoro v1.0 | Text-to-speech | **kokoro-onnx** (in-process) | Manually downloaded ONNX model files in `src/windows-orchestration/` |
+| pyttsx3 | TTS fallback | **pyttsx3** (in-process) | Windows built-in SAPI5 voices, no model files needed |
 
 ---
 
