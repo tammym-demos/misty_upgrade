@@ -5,6 +5,9 @@
 # Logs
 *.log
 
+# Generated response audio
+src/windows-orchestration/responses/
+
 # Python
 __pycache__/
 *.pyc

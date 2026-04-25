@@ -9,36 +9,26 @@
 
 ## What Was Built
 
-### 1. Misty Skill (FoundryLocalSkill)
-**Type**: JavaScript skill for Misty II robot  
+### 1. Misty Skill (FoundryLocalSkill) — DEPRECATED
+**Type**: JavaScript skill for Misty II robot (abandoned — see ADR-001)  
 **Location**: `src/misty-skill/`  
-**Files**:
-- `FoundryLocalSkill.json` — Metadata (skill ID, timeout, startup rules)
-- `FoundryLocalSkill.js` — Main logic (≈350 lines)
+**Status**: Replaced by the Misty Controller below. The on-robot JavaScript skill runtime is unreliable.
+
+### 1b. Misty Controller (REST + WebSocket)
+**Type**: Python script on companion device  
+**Location**: `src/windows-orchestration/misty_controller.py`
 
 **Functionality**:
-- Registers for "Hey, Misty!" wake word detection
-- Records audio on demand (max 10s, ends on 800ms silence)
-- Sends WAV to Windows orchestration service
-- Parses JSON response and plays audio back
-- Handles 4 fallback scenarios (service unreachable, timeout, model failure, empty response)
-- Re-arms wake word after each interaction
+- Connects to Misty via WebSocket for wake word events, REST API for all commands
+- State machine: `IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING →]* REARMING → IDLE`
+- Records 4s of audio after wake word, sends to orchestration service
+- **Follow-up listening**: after playing a response, enters LISTENING state (cyan LED) and records short clips. If speech is detected, processes and responds (up to 60s). Silence ends the conversation.
+- Battery management: auto-enters charging mode at 10%, resumes at 25%+charging
+- LED color feedback at each state, auto-reconnect, periodic health checks
 
-**Configuration Parameters**:
-```javascript
-WINDOWS_HOST: "http://192.168.1.100:5000"     // Update with actual IP
-MAX_RECORDING_DURATION_MS: 10000             // 10 seconds
-RESPONSE_TIMEOUT_MS: 6000                    // 6 second SLO
-SILENCE_THRESHOLD_MS: 800                    // Stop recording after 800ms silence
-MIN_RECORDING_MS: 500                        // Reject recordings < 500ms
-```
-
-**Key Features**:
-- ✅ Wake word detection loop
-- ✅ Silence-based recording termination
-- ✅ REST request with WAV multipart encoding
-- ✅ Deterministic fallback responses
-- ✅ Graceful error handling
+**Key Configuration** (environment variables):
+- `MISTY_IP` (default: `10.0.0.44`), `ORCHESTRATION_URL` (default: `http://10.0.0.58:5000`)
+- `FOLLOWUP_LISTEN_S` (default: `4`), `FOLLOWUP_TIMEOUT_S` (default: `60`)
 
 ---
 
@@ -54,7 +44,7 @@ MIN_RECORDING_MS: 500                        // Reject recordings < 500ms
 ```
 POST /api/orchestrate [WAV file]
   ↓
-  ├─ Step 1: STT (Foundry Local /v1/audio/transcriptions)
+  ├─ Step 1: STT (faster-whisper in-process, whisper-tiny model)
   │   • Input: WAV bytes
   │   • Output: transcribed text
   │   • Timeout: 1500ms
@@ -197,20 +187,25 @@ LATENCY_BUDGET = {
 ## File Structure
 
 ```
-c:\Users\tmcclell\OneDrive - Microsoft\Source\Misty\
+misty-upgrade/
 │
 ├── README.md                           # Quick start and overview
+│
+├── misty-skills-backup/
+│   ├── README.md                       # Why skills were removed, restoration notes
+│   └── all_skills_metadata.json        # Metadata for all 11 skills (pre-cleanup)
 │
 ├── plans/
 │   └── planWindowsFoundry.prompt.md   # Architecture & design (v1)
 │
 ├── src/
-│   ├── misty-skill/
+│   ├── misty-skill/                   # DEPRECATED — on-robot JS skills (abandoned)
 │   │   ├── FoundryLocalSkill.json     # Skill metadata
 │   │   └── FoundryLocalSkill.js       # Main skill logic (~350 lines)
 │   │
 │   └── windows-orchestration/
-│       ├── orchestration_service.py   # Flask service (~450 lines)
+│       ├── orchestration_service.py   # Flask service (~500 lines)
+│       ├── misty_controller.py        # WebSocket + REST controller (~800 lines)
 │       ├── requirements.txt           # Dependencies
 │       └── .env.example              # Configuration template
 │
@@ -218,7 +213,10 @@ c:\Users\tmcclell\OneDrive - Microsoft\Source\Misty\
 │   └── test_integration.py           # Integration test suite
 │
 └── docs/
-    └── IMPLEMENTATION_GUIDE.md       # Full setup & troubleshooting guide
+    ├── IMPLEMENTATION_GUIDE.md       # Full setup & troubleshooting guide
+    ├── IMPLEMENTATION_SUMMARY.md     # Architecture summary
+    ├── FOUNDRY_LOCAL_SETUP.md        # Foundry Local setup & model management
+    └── ADR-001-companion-device-over-onrobot-inference.md
 ```
 
 ---

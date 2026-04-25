@@ -98,14 +98,17 @@ The service reports a running state and a local endpoint URL
 
 **Optional alternative:** `phi-4-mini` can improve response quality, but it is more likely to increase latency. Only switch to it if you benchmark the full wake-word-to-response path and confirm the user experience is still acceptable.
 
-**Important TTS note:** `kokoro-v0_19` is not currently present in the Foundry catalog on this machine. Treat TTS as a separate decision instead of assuming Foundry can supply it.
+**Important TTS note:** Kokoro TTS is **not** a Foundry model — it runs in-process in the orchestration service via `kokoro-onnx`. Similarly, **STT uses faster-whisper in-process**, not Foundry Local's Whisper. Foundry Local only serves the **chat/LLM** model.
 
-Download the models that are confirmed for this setup:
+Download the chat model that Foundry serves:
 
 ```powershell
 foundry model download phi-3.5-mini
-foundry model download whisper-tiny
 ```
+
+> **Note:** You do not need to download whisper-tiny via Foundry. The orchestration
+> service uses `faster-whisper` (CTranslate2) which auto-downloads the whisper-tiny
+> model from HuggingFace on first run (~75 MB).
 
 Then inspect the catalog before choosing a TTS path:
 
@@ -126,7 +129,7 @@ Check what is now cached locally:
 foundry cache list
 ```
 
-**Recommended resolution for TTS right now:** keep Foundry for chat + STT, and use a separate approved local TTS component unless a supported Foundry speech model is visible in your catalog.
+**Recommended resolution for TTS right now:** Kokoro-ONNX runs in-process in the orchestration service. pyttsx3 (Windows SAPI5) is the fallback. Neither requires Foundry.
 
 **⏱️ Estimated time: 10-15 minutes**
 
@@ -148,18 +151,18 @@ If the service was already installed but looks unhealthy:
 foundry service restart
 ```
 
-### Load the models into the service
+### Load the chat model into the service
 
 ```powershell
 foundry model load phi-3.5-mini
-foundry model load whisper-tiny
 ```
+
+> **Note:** Do not load whisper-tiny into Foundry — STT runs via faster-whisper
+> in the orchestration service process, not through Foundry Local.
 
 If you decide to test the quality-first option later, replace `phi-3.5-mini` with `phi-4-mini` in both the download and load steps, then recheck latency before using it with Misty.
 
-For TTS, do one of these two things:
-- If a supported speech model appears in `foundry model list`, download and load that model explicitly.
-- If no speech model appears, keep Foundry for chat + STT only and use a separate local TTS component on Windows.
+TTS and STT both run in-process in the orchestration service and do not require Foundry.
 
 ### Confirm the endpoint and loaded models
 
@@ -260,8 +263,8 @@ python orchestration_service.py
 
 This will:
 - Start the orchestration API locally
-- Call Foundry Local internally for STT → LLM
-- Use either a supported Foundry speech model or a separate local Windows TTS component
+- Call Foundry Local internally for LLM chat completions
+- Run STT (faster-whisper) and TTS (kokoro-onnx / pyttsx3) in-process
 - Expose orchestration endpoints to Misty robot
 
 Replace `PORT` with the port shown by `foundry service status`.
