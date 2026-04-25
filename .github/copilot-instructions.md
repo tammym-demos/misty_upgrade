@@ -16,12 +16,15 @@ The robot's hardware (Snapdragon 820 + 410, 2 GB RAM) cannot run inference — 2
 ```
 [Misty Controller]                           [Orchestration Service]
   WebSocket ← KeyPhraseRecognized               Foundry Local
-  REST → StartRecordingAudio (4s)                  ├─ STT (Whisper-tiny)
+  REST → StartRecordingAudio (4s)                  ├─ STT (faster-whisper)
   REST → GetAudio (base64)                         ├─ LLM (Phi-3.5-mini)
   HTTP POST /api/orchestrate ───────────────────►  └─ TTS (Kokoro / pyttsx3)
   HTTP GET /api/audio/<file> ◄──────────────────
   REST → SaveAudio (base64, ImmediatelyApply)
-  REST → StartKeyPhraseRecognition (re-arm)
+  ┌─ Follow-up: listen 4s, send to orchestrate
+  │  Speech detected? → repeat (up to 60s)
+  │  Silence? → fall through to re-arm
+  └→ REST → StartKeyPhraseRecognition (re-arm)
 ```
 
 ### Locked model stack (v1)
@@ -171,8 +174,8 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 ## Key Conventions
 
 - **Latency SLO**: p50 < 3s, p95 < 6s end-to-end. The orchestration service enforces per-stage latency budgets (STT: 1500ms, LLM: 2000ms, TTS: 1500ms). Keep responses short (`max_tokens: 150`) to stay within budget.
-- **Misty controller state machine**: DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → REARMING → IDLE. IDLE ↔ CHARGING (auto-enters at 10% battery, exits at 25%+charging). All state transitions are logged.
-- **LED color scheme**: 🟢 Green = ready/idle, 🟠 Orange = recording, 🔵 Blue = processing, 🟣 Purple = playing response, 🟡 Yellow = low battery warning, ⚫ Off = charging mode, 🔴 Red = error.
+- **Misty controller state machine**: DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING → PROCESSING → PLAYING →]* REARMING → IDLE. After each response, enters LISTENING state (cyan LED) for up to 60s of follow-up conversation without requiring wake word. Silence ends the loop. IDLE ↔ CHARGING (auto-enters at 10% battery, exits at 25%+charging). All state transitions are logged.
+- **LED color scheme**: 🟢 Green = ready/idle, 🟠 Orange = recording, 🔵 Blue = processing, 🟣 Purple = playing response, 🩵 Cyan = follow-up listening, 🟡 Yellow = low battery warning, ⚫ Off = charging mode, 🔴 Red = error.
 - **TTS fallback chain**: Kokoro-ONNX is primary TTS. If unavailable, pyttsx3 (Windows SAPI5) is used as fallback. Both are lazily initialized. The API response includes `"ttsFallback": true` when fallback is used.
 - **Conversation history**: Maintained in-memory, capped at the last 10 messages. System prompt is prepended on every call but not stored in history.
 - **Configuration**: The orchestration service reads from `.env` (copy `.env.example`). The Misty controller reads `MISTY_IP` and `ORCHESTRATION_URL` from environment.

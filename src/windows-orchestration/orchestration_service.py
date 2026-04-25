@@ -45,7 +45,13 @@ SYSTEM_PROMPT = os.getenv(
 )
 
 # Locked v1 model stack
+# Foundry Local requires full model IDs for inference calls
 MODELS = {
+    "chat": "Phi-3.5-mini-instruct-openvino-gpu:2",
+    "stt": "whisper-tiny",
+}
+# Short aliases for display/diagnostics
+MODEL_ALIASES = {
     "chat": "phi-3.5-mini",
     "stt": "whisper-tiny",
 }
@@ -138,7 +144,7 @@ def health_check():
         "status": "ok" if foundry_ok else "degraded",
         "orchestration": "ready",
         "foundry_local": "ok" if foundry_ok else "unreachable",
-        "models": MODELS,
+        "models": MODEL_ALIASES,
         "timestamp": datetime.utcnow().isoformat(),
     }), 200 if foundry_ok else 503
 
@@ -165,7 +171,8 @@ def orchestrate():
         audio_bytes = audio_file.read()
         
         # Step 1: Speech-to-Text
-        stt_result = speech_to_text(audio_bytes, start_time)
+        stt_start = time.time()
+        stt_result = speech_to_text(audio_bytes, stt_start)
         if stt_result.get("status") == "error":
             return jsonify(stt_result), 400
         
@@ -177,7 +184,8 @@ def orchestrate():
         logger.info(f"Transcribed text: {user_text}")
         
         # Step 2: Language Model Inference
-        llm_result = language_model_inference(user_text, start_time)
+        llm_start = time.time()
+        llm_result = language_model_inference(user_text, llm_start)
         if llm_result.get("status") == "error":
             return jsonify(llm_result), 500
         
@@ -189,7 +197,8 @@ def orchestrate():
         logger.info(f"LLM response: {response_text}")
         
         # Step 3: Text-to-Speech
-        tts_result = text_to_speech(response_text, start_time)
+        tts_start = time.time()
+        tts_result = text_to_speech(response_text, tts_start)
         if tts_result.get("status") == "error":
             return jsonify(tts_result), 500
         
@@ -472,7 +481,7 @@ def diagnostics():
         "service": "FoundryLocal Orchestration",
         "version": "1.0.0",
         "foundry_host": FOUNDRY_LOCAL_HOST,
-        "models": MODELS,
+        "models": MODEL_ALIASES,
         "tts": {
             "engine": tts_engine or "kokoro-onnx",
             "fallback": "pyttsx3",
@@ -502,5 +511,12 @@ def internal_error(error):
 if __name__ == "__main__":
     logger.info("Starting Foundry Local Orchestration Service")
     logger.info(f"Foundry Local: {FOUNDRY_LOCAL_HOST}")
-    logger.info(f"Models: {MODELS}")
+    logger.info(f"Models: {MODEL_ALIASES} (full IDs: {MODELS})")
+
+    # Pre-warm models so first request doesn't pay cold-start cost
+    logger.info("Pre-warming STT model (faster-whisper)...")
+    _get_whisper_model()
+    logger.info("Pre-warming TTS model (kokoro-onnx)...")
+    _get_kokoro()
+
     app.run(host="0.0.0.0", port=5000, debug=False)

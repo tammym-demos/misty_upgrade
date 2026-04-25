@@ -41,12 +41,13 @@ This implementation integrates Misty II robot with Microsoft Foundry Local for o
 
 The Misty controller runs on the companion device and drives the robot entirely via REST API + WebSocket. This replaces the on-robot JavaScript skill, which proved unreliable (see [Why Not On-Robot Skills?](#why-not-on-robot-skills) below).
 
-**State Machine**: `DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → REARMING → IDLE`
+**State Machine**: `DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING →]* REARMING → IDLE`
 
 **Functionality**:
 - Connects to Misty via WebSocket (`ws://<ip>/pubsub`) for `KeyPhraseRecognized` events
 - Issues REST API calls for recording, audio upload/download, LED, display
 - Manages the full conversation turn cycle in a worker thread
+- **Follow-up listening**: after each response, enters LISTENING state for up to 60s — records short clips and sends them through the pipeline. If speech is detected, processes and responds; if silence, ends the conversation and re-arms the wake word.
 - Auto-reconnects on WebSocket disconnect with exponential backoff
 - Periodic health checks for Misty and orchestration service
 
@@ -55,12 +56,15 @@ The Misty controller runs on the companion device and drives the robot entirely 
 - 🟠 Orange = RECORDING (capturing user speech)
 - 🔵 Blue = PROCESSING (STT → LLM → TTS)
 - 🟣 Purple = PLAYING (speaking response)
+- 🩵 Cyan = LISTENING (follow-up listening window)
 - 🔴 Red = ERROR (will auto-recover)
 
 **Key Configuration** (environment variables):
 - `MISTY_IP`: Robot IP address (default: `10.0.0.44`)
 - `ORCHESTRATION_URL`: Orchestration service URL (default: `http://10.0.0.58:5000`)
 - `RECORDING_DURATION_S`: How long to record after wake word (default: `4` seconds)
+- `FOLLOWUP_LISTEN_S`: Duration of each follow-up listen clip (default: `4` seconds)
+- `FOLLOWUP_TIMEOUT_S`: Max follow-up conversation window (default: `60` seconds)
 
 ### 2. Windows Orchestration Service (Python/Flask)
 **Location**: `src/windows-orchestration/`
@@ -333,7 +337,9 @@ The controller will:
 3. Misty beeps and LED turns **orange** (recording for 4 seconds)
 4. LED turns **blue** (processing via orchestration)
 5. LED turns **purple** (playing response audio)
-6. LED returns to **green** (ready for next interaction)
+6. LED turns **cyan** (follow-up listening — speak to continue, or wait for silence)
+7. If you speak: repeats steps 4-6 for the follow-up (up to 60s total)
+8. If silence: LED returns to **green** (re-armed, ready for next "Hey, Misty!")
 
 ---
 

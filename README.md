@@ -22,8 +22,8 @@ This project integrates a **Misty II** social robot with **Microsoft Foundry Loc
 │  LED / Display               │  WS     │    ├─ REST API commands          │
 │                              │         │    └─ State machine (IDLE →      │
 │  Controlled entirely via     │         │        RECORDING → PROCESSING →  │
-│  REST API + WebSocket from   │         │        PLAYING → REARMING)       │
-│  companion device            │         │                                  │
+│  REST API + WebSocket from   │         │        PLAYING → LISTENING →     │
+│  companion device            │         │        REARMING)                 │
 │                              │         │  Orchestration Service (Flask)   │
 │                              │         │    ├─ STT  (faster-whisper)      │
 │                              │         │    ├─ LLM  (Phi-3.5-mini)  ───► Foundry Local
@@ -123,7 +123,7 @@ Invoke-RestMethod -Uri http://localhost:5000/api/health
 python misty_controller.py
 ```
 
-The Misty controller connects to Misty via WebSocket and REST API — no skill deployment needed. Misty's LED turns green when ready. Say **"Hey, Misty!"** followed by your question.
+The Misty controller connects to Misty via WebSocket and REST API — no skill deployment needed. Misty's LED turns green when ready. Say **"Hey, Misty!"** followed by your question. After Misty responds, she'll keep listening (cyan LED) for up to 60 seconds — just keep talking without saying the wake word again. Silence ends the conversation and re-arms the wake word.
 
 ### Startup Verification
 

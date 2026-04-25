@@ -6,7 +6,9 @@ Architecture:
   - WebSocket subscription for KeyPhraseRecognized and BatteryCharge events
   - REST API calls for LED, recording, audio upload/playback
   - Calls orchestration service for STT→LLM→TTS pipeline
-  - State machine: IDLE → RECORDING → PROCESSING → PLAYING → REARMING
+  - State machine: IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING → ...] → REARMING
+  - Follow-up listening: after each response, listens for continued speech (up to 60s)
+    without requiring the wake word again. Silence ends the conversation.
   - Battery management: IDLE ↔ CHARGING (auto at 10%/25%)
 """
 
@@ -37,6 +39,9 @@ RECORDING_DURATION_S = float(os.getenv("RECORDING_DURATION_S", "4"))
 RECORDING_FILENAME = "foundry_input.wav"
 RESPONSE_FILENAME = "foundry_response.wav"
 REARM_DELAY_S = 1.0  # delay after playback before re-arming wake word
+FOLLOWUP_LISTEN_S = float(os.getenv("FOLLOWUP_LISTEN_S", "4"))  # seconds to listen for follow-up
+FOLLOWUP_TIMEOUT_S = float(os.getenv("FOLLOWUP_TIMEOUT_S", "60"))  # max follow-up window
+FOLLOWUP_SILENCE_THRESHOLD = 1000  # audio bytes below this = silence (no speech)
 WS_RECONNECT_BASE_S = 2.0
 WS_RECONNECT_MAX_S = 30.0
 HEALTH_CHECK_INTERVAL_S = 30.0
@@ -89,6 +94,7 @@ class State(Enum):
     RECORDING = "RECORDING"
     PROCESSING = "PROCESSING"
     PLAYING = "PLAYING"
+    LISTENING = "LISTENING"  # follow-up listening after response
     REARMING = "REARMING"
     CHARGING = "CHARGING"
     ERROR = "ERROR"
@@ -554,78 +560,22 @@ class MistyController:
             time.sleep(2.0)
 
         try:
-            # 1. Visual feedback — recording
-            self.set_state(State.RECORDING)
-            self.set_led(255, 140, 0)  # orange
-            self.display_image("e_SystemCamera.jpg")
+            self._do_conversation_exchange(turn, turn_start)
 
-            # 2. Record audio
-            self.start_recording(RECORDING_FILENAME)
-            time.sleep(RECORDING_DURATION_S)
-            self.stop_recording()
-            logger.info(f"[Turn {turn}] Recorded {RECORDING_DURATION_S}s")
+            # Follow-up listening loop — listen for continued conversation
+            # without requiring the wake word again
+            followup_start = time.time()
+            followup_count = 0
+            while (time.time() - followup_start) < FOLLOWUP_TIMEOUT_S:
+                followup_count += 1
+                remaining = FOLLOWUP_TIMEOUT_S - (time.time() - followup_start)
+                logger.info(f"[Turn {turn}] Follow-up listen #{followup_count} "
+                            f"({remaining:.0f}s remaining in window)")
 
-            # Small delay for Misty to finalize the file
-            time.sleep(0.5)
-
-            # 3. Retrieve recorded audio
-            self.set_state(State.PROCESSING)
-            self.set_led(0, 0, 255)  # blue = processing
-            self.display_image("e_SystemLogoPrompt.jpg")
-
-            audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
-            if not audio_b64:
-                raise RuntimeError("Failed to retrieve recorded audio from Misty")
-
-            audio_bytes = base64.b64decode(audio_b64)
-            logger.info(f"[Turn {turn}] Retrieved {len(audio_bytes)} bytes of audio")
-
-            if len(audio_bytes) < 1000:
-                raise RuntimeError(f"Recording too small ({len(audio_bytes)} bytes) — likely empty")
-
-            # 4. Send to orchestration service
-            response = requests.post(
-                f"{ORCHESTRATION_URL}/api/orchestrate",
-                files={"file": (RECORDING_FILENAME, audio_bytes, "audio/wav")},
-                timeout=30.0,
-            )
-            response.raise_for_status()
-            result = response.json()
-
-            if result.get("status") != "ok":
-                raise RuntimeError(f"Orchestration error: {result.get('error', 'unknown')}")
-
-            transcribed = result.get("transcribedText", "")
-            llm_response = result.get("inferenceResponse", "")
-            audio_uri = result.get("responseAudio", "")
-            latency = result.get("latencyMs", 0)
-            logger.info(f"[Turn {turn}] User: '{transcribed}' → Misty: '{llm_response}' ({latency:.0f}ms)")
-
-            if result.get("ttsFallback"):
-                logger.warning(f"[Turn {turn}] WARNING: TTS FALLBACK was used")
-
-            # 5. Download response audio
-            if not audio_uri:
-                raise RuntimeError("No response audio URI")
-
-            audio_url = f"{ORCHESTRATION_URL}{audio_uri}"
-            audio_resp = requests.get(audio_url, timeout=10.0)
-            audio_resp.raise_for_status()
-            response_wav = audio_resp.content
-            logger.info(f"[Turn {turn}] Downloaded response audio: {len(response_wav)} bytes")
-
-            # 6. Upload to Misty and play
-            self.set_state(State.PLAYING)
-            self.set_led(148, 0, 211)  # purple = speaking
-            self.display_image("e_Joy2.jpg")
-
-            play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
-
-            # Wait for playback to finish
-            time.sleep(play_duration + 0.5)
-
-            elapsed = time.time() - turn_start
-            logger.info(f"[Turn {turn}] Complete in {elapsed:.1f}s")
+                had_speech = self._listen_for_followup(turn)
+                if not had_speech:
+                    logger.info(f"[Turn {turn}] No follow-up speech — ending conversation")
+                    break
 
         except Exception as e:
             logger.error(f"[Turn {turn}] Error: {e}", exc_info=True)
@@ -634,8 +584,169 @@ class MistyController:
             time.sleep(2)
 
         finally:
-            # Always re-arm
+            # Always re-arm wake word
             self._rearm()
+
+    def _do_conversation_exchange(self, turn: int, turn_start: float):
+        """Record from Misty, orchestrate STT→LLM→TTS, play response."""
+        # 1. Visual feedback — recording
+        self.set_state(State.RECORDING)
+        self.set_led(255, 140, 0)  # orange
+        self.display_image("e_SystemCamera.jpg")
+
+        # 2. Record audio
+        self.start_recording(RECORDING_FILENAME)
+        time.sleep(RECORDING_DURATION_S)
+        self.stop_recording()
+        logger.info(f"[Turn {turn}] Recorded {RECORDING_DURATION_S}s")
+
+        # Small delay for Misty to finalize the file
+        time.sleep(0.5)
+
+        # 3. Retrieve recorded audio
+        self.set_state(State.PROCESSING)
+        self.set_led(0, 0, 255)  # blue = processing
+        self.display_image("e_SystemLogoPrompt.jpg")
+
+        audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
+        if not audio_b64:
+            raise RuntimeError("Failed to retrieve recorded audio from Misty")
+
+        audio_bytes = base64.b64decode(audio_b64)
+        logger.info(f"[Turn {turn}] Retrieved {len(audio_bytes)} bytes of audio")
+
+        if len(audio_bytes) < FOLLOWUP_SILENCE_THRESHOLD:
+            raise RuntimeError(f"Recording too small ({len(audio_bytes)} bytes) — likely empty")
+
+        # 4-6. Orchestrate and play response
+        self._do_orchestrate_and_respond(turn, audio_bytes, turn_start)
+
+    def _do_orchestrate_and_respond(self, turn: int, audio_bytes: bytes, turn_start: float):
+        """Send audio to orchestration service and play response on Misty."""
+        # Processing state
+        self.set_state(State.PROCESSING)
+        self.set_led(0, 0, 255)  # blue = processing
+        self.display_image("e_SystemLogoPrompt.jpg")
+
+        # Send to orchestration service
+        response = requests.post(
+            f"{ORCHESTRATION_URL}/api/orchestrate",
+            files={"file": (RECORDING_FILENAME, audio_bytes, "audio/wav")},
+            timeout=30.0,
+        )
+        response.raise_for_status()
+        result = response.json()
+
+        if result.get("status") != "ok":
+            raise RuntimeError(f"Orchestration error: {result.get('error', 'unknown')}")
+
+        transcribed = result.get("transcribedText", "")
+        llm_response = result.get("inferenceResponse", "")
+        audio_uri = result.get("responseAudio", "")
+        latency = result.get("latencyMs", 0)
+        logger.info(f"[Turn {turn}] User: '{transcribed}' → Misty: '{llm_response}' ({latency:.0f}ms)")
+
+        if result.get("ttsFallback"):
+            logger.warning(f"[Turn {turn}] WARNING: TTS FALLBACK was used")
+
+        # Download response audio
+        if not audio_uri:
+            raise RuntimeError("No response audio URI")
+
+        audio_url = f"{ORCHESTRATION_URL}{audio_uri}"
+        audio_resp = requests.get(audio_url, timeout=10.0)
+        audio_resp.raise_for_status()
+        response_wav = audio_resp.content
+        logger.info(f"[Turn {turn}] Downloaded response audio: {len(response_wav)} bytes")
+
+        # Upload to Misty and play
+        self.set_state(State.PLAYING)
+        self.set_led(148, 0, 211)  # purple = speaking
+        self.display_image("e_Joy2.jpg")
+
+        play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
+
+        # Wait for playback to finish
+        time.sleep(play_duration + 0.5)
+
+        elapsed = time.time() - turn_start
+        logger.info(f"[Turn {turn}] Exchange complete in {elapsed:.1f}s")
+
+    def _listen_for_followup(self, turn: int) -> bool:
+        """Listen briefly for follow-up speech. Returns True if speech was detected and responded to."""
+        self.set_state(State.LISTENING)
+        self.set_led(0, 200, 200)  # cyan = listening for follow-up
+        self.display_image("e_ContentRight.jpg")
+
+        # Record a short clip
+        self.start_recording(RECORDING_FILENAME)
+        time.sleep(FOLLOWUP_LISTEN_S)
+        self.stop_recording()
+        time.sleep(0.5)  # finalize
+
+        audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
+        if not audio_b64:
+            logger.warning(f"[Turn {turn}] Follow-up: failed to retrieve audio")
+            return False
+
+        audio_bytes = base64.b64decode(audio_b64)
+        logger.info(f"[Turn {turn}] Follow-up recording: {len(audio_bytes)} bytes")
+
+        # Very small recordings are certainly silence
+        if len(audio_bytes) < FOLLOWUP_SILENCE_THRESHOLD:
+            return False
+
+        # Send through the full pipeline — orchestration returns empty_stt error
+        # if no speech was detected, which we treat as silence
+        try:
+            response = requests.post(
+                f"{ORCHESTRATION_URL}/api/orchestrate",
+                files={"file": (RECORDING_FILENAME, audio_bytes, "audio/wav")},
+                timeout=30.0,
+            )
+            result = response.json()
+
+            # empty_stt = silence, not an error
+            if result.get("error") == "empty_stt":
+                logger.info(f"[Turn {turn}] Follow-up: silence (empty STT)")
+                return False
+
+            if response.status_code != 200 or result.get("status") != "ok":
+                logger.warning(f"[Turn {turn}] Follow-up: orchestration error: {result.get('error', 'unknown')}")
+                return False
+
+            # Speech detected — download and play the response
+            transcribed = result.get("transcribedText", "")
+            llm_response = result.get("inferenceResponse", "")
+            audio_uri = result.get("responseAudio", "")
+            latency = result.get("latencyMs", 0)
+            logger.info(f"[Turn {turn}] Follow-up: '{transcribed}' → '{llm_response}' ({latency:.0f}ms)")
+
+            if result.get("ttsFallback"):
+                logger.warning(f"[Turn {turn}] WARNING: TTS FALLBACK was used")
+
+            if not audio_uri:
+                logger.error(f"[Turn {turn}] Follow-up: no response audio URI")
+                return False
+
+            audio_url = f"{ORCHESTRATION_URL}{audio_uri}"
+            audio_resp = requests.get(audio_url, timeout=10.0)
+            audio_resp.raise_for_status()
+            response_wav = audio_resp.content
+            logger.info(f"[Turn {turn}] Follow-up audio: {len(response_wav)} bytes")
+
+            # Play the response
+            self.set_state(State.PLAYING)
+            self.set_led(148, 0, 211)  # purple = speaking
+            self.display_image("e_Joy2.jpg")
+
+            play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
+            time.sleep(play_duration + 0.5)
+            return True
+
+        except Exception as e:
+            logger.error(f"[Turn {turn}] Follow-up error: {e}")
+            return False
 
     def _rearm(self):
         self.set_state(State.REARMING)
