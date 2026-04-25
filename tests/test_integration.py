@@ -4,16 +4,39 @@ Tests communication between components and validates latency SLO.
 """
 
 import unittest
+import re
+import subprocess
 import requests
 import json
 import time
 import os
 from io import BytesIO
+from urllib.parse import urlparse, urlunparse
+
+
+def _discover_foundry_endpoint() -> str:
+    """Discover the Foundry Local endpoint, same logic as orchestration_service.py."""
+    env_host = os.getenv("FOUNDRY_LOCAL_HOST", "")
+    if env_host:
+        return env_host
+    try:
+        result = subprocess.run(
+            ["foundry", "service", "status"],
+            capture_output=True, text=True, timeout=10,
+        )
+        match = re.search(r'https?://[^\s\'"]+', result.stdout + result.stderr)
+        if match:
+            parsed = urlparse(match.group(0).rstrip('/'))
+            return urlunparse((parsed.scheme, parsed.netloc, '', '', '', ''))
+    except Exception as e:
+        print(f"Failed to discover Foundry endpoint via CLI: {e}")
+    return ""
+
 
 # Configuration for testing
 MISTY_HOST = os.getenv("MISTY_HOST", "http://10.0.0.44")
 WINDOWS_HOST = os.getenv("WINDOWS_HOST", "http://localhost:5000")
-FOUNDRY_HOST = os.getenv("FOUNDRY_LOCAL_HOST", "http://localhost:5000")
+FOUNDRY_HOST = _discover_foundry_endpoint()
 
 class TestWindowsOrchestration(unittest.TestCase):
     """Test Windows orchestration service."""
@@ -34,7 +57,9 @@ class TestWindowsOrchestration(unittest.TestCase):
         self.assertEqual(data["service"], "FoundryLocal Orchestration")
         self.assertIn("chat", data["models"])
         self.assertIn("stt", data["models"])
-        self.assertIn("tts", data["models"])
+        # TTS is not a Foundry model — it's reported separately
+        self.assertIn("tts", data)
+        self.assertIn("engine", data["tts"])
 
 class TestMistyConnectivity(unittest.TestCase):
     """Test Misty robot connectivity."""
@@ -59,21 +84,30 @@ class TestMistyConnectivity(unittest.TestCase):
 
 class TestFoundryLocalIntegration(unittest.TestCase):
     """Test Foundry Local endpoints."""
-    
+
+    def setUp(self):
+        if not FOUNDRY_HOST:
+            self.skipTest(
+                "Foundry Local endpoint not discovered. "
+                "Set FOUNDRY_LOCAL_HOST or ensure `foundry service status` works."
+            )
+
     def test_foundry_models_endpoint(self):
         """Verify Foundry Local models API."""
         try:
             response = requests.get(f"{FOUNDRY_HOST}/openai/models", timeout=2)
             self.assertEqual(response.status_code, 200)
             data = response.json()
-            self.assertIn("data", data)
+            # Foundry returns a plain array of model ID strings
+            self.assertIsInstance(data, list)
+            self.assertGreater(len(data), 0)
         except requests.exceptions.RequestException as e:
             self.fail(f"Foundry Local models endpoint unreachable: {e}")
-    
+
     def test_foundry_chat_completions(self):
         """Test basic LLM inference."""
         payload = {
-            "model": "phi-3.5-mini",
+            "model": "Phi-3.5-mini-instruct-openvino-gpu:2",
             "messages": [{"role": "user", "content": "Hello"}],
             "max_tokens": 50,
         }

@@ -189,7 +189,15 @@ foundry model load whisper-tiny
 
 **1.5 Verify Foundry Local Models**
 ```powershell
+# Check which models are actually loaded in the service
+foundry service ps
+
+# Expected: only phi-3.5-mini loaded. Whisper-tiny loads on demand.
+# If stray models are loaded (e.g., phi-4-mini), unload them:
+#   foundry model unload phi-4-mini
+
 # Check the models endpoint (replace PORT with your actual port)
+# Returns a plain JSON array of model ID strings
 Invoke-RestMethod -Uri http://localhost:PORT/openai/models
 
 # Should list phi-3.5-mini and whisper-tiny.

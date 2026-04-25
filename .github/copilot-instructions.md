@@ -77,6 +77,32 @@ python -m pytest test_integration.py::TestWindowsOrchestration::test_health_chec
 
 Tests require live services (orchestration service, Foundry Local, and optionally Misty on the network). Configure via environment variables: `MISTY_HOST`, `WINDOWS_HOST`, `FOUNDRY_LOCAL_HOST`.
 
+### Services & Startup Checks
+
+The system uses three services. They must be started in this order:
+
+| # | Service | Port | Health check | Required by |
+|---|---------|------|-------------|-------------|
+| 1 | **Foundry Local** | Dynamic (e.g., 64722) | `foundry service status` / `foundry service ps` | Orchestration service, Foundry tests |
+| 2 | **Orchestration service** | 5000 | `curl http://localhost:5000/api/health` | Orchestration tests, Misty controller |
+| 3 | **Misty controller** | — (outbound only) | Misty LED turns green | End-to-end interaction |
+
+**Foundry Local** runs on a dynamic port — never hardcode it. Both the orchestration service and the test suite auto-discover it by running `foundry service status` and parsing the URL. Override with the `FOUNDRY_LOCAL_HOST` env var.
+
+**Model management:** Only `phi-3.5-mini` should be loaded (`foundry service ps`). Whisper-tiny loads on demand for STT. If stray models are present from prior testing (e.g., phi-4-mini), unload them with `foundry model unload <alias>` to free resources.
+
+**TTS (Kokoro-ONNX)** is **not** a Foundry model. It runs as a standalone Python library inside the orchestration service process, with pyttsx3 (Windows SAPI5) as fallback. TTS status is reported in `/api/diagnostics` under the `tts` key, separate from the Foundry `models` dict.
+
+### Test prerequisites by class
+
+| Test class | Requires |
+|-----------|----------|
+| `TestWindowsOrchestration` | Orchestration service |
+| `TestFoundryLocalIntegration` | Foundry Local (auto-discovered or `FOUNDRY_LOCAL_HOST` env var) |
+| `TestMistyConnectivity` | Misty robot on the network |
+| `TestLatencySLO` | Orchestration service |
+| `TestVerificationChecklist` | Varies — some skip automatically |
+
 ## Misty REST API Reference
 
 Key endpoints used by the controller (all at `http://<MISTY_IP>/api/`):

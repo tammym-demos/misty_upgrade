@@ -466,11 +466,18 @@ def fallback_tts():
 @app.route("/api/diagnostics", methods=["GET"])
 def diagnostics():
     """Return current service diagnostics."""
+    tts_engine = "kokoro-onnx" if _kokoro_instance is not None else None
+    tts_fallback = "pyttsx3" if _pyttsx3_engine is not None else None
     return jsonify({
         "service": "FoundryLocal Orchestration",
         "version": "1.0.0",
         "foundry_host": FOUNDRY_LOCAL_HOST,
         "models": MODELS,
+        "tts": {
+            "engine": tts_engine or "kokoro-onnx",
+            "fallback": "pyttsx3",
+            "initialized": tts_engine is not None or tts_fallback is not None,
+        },
         "latency_budget_ms": LATENCY_BUDGET,
         "timestamp": datetime.utcnow().isoformat(),
     }), 200

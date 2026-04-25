@@ -192,13 +192,34 @@ The response should include the current endpoint list and model directory path.
 ## Step 8: Verify Models Are Available
 
 ```powershell
-# Example only - replace PORT with the actual port from 'foundry service status'
+# Check which models are currently loaded in the service
+foundry service ps
+
+# Expected output:
+# Models running in service:
+#     Alias                          Model ID
+# 🟢  phi-3.5-mini                   Phi-3.5-mini-instruct-openvino-gpu:2
+
+# Check the full model catalog (replace PORT with the actual port)
 Invoke-RestMethod -Uri http://localhost:PORT/openai/models
 
-# Should return models including:
-# - phi-3.5-mini (chat/inference)
-# - whisper-tiny (speech-to-text)
-# It may or may not include a TTS model on this machine.
+# Returns a plain JSON array of model ID strings, e.g.:
+# ["openai-whisper-tiny-generic-cpu:3", "Phi-3.5-mini-instruct-openvino-gpu:2"]
+#
+# NOTE: Kokoro TTS will NOT appear here — it runs in-process in the
+# orchestration service, not through Foundry Local.
+```
+
+### Verify only expected models are loaded
+
+Only `phi-3.5-mini` should be loaded at startup. Whisper-tiny loads on demand for STT requests. If stray models are loaded (e.g., phi-4-mini from prior testing), unload them to free resources:
+
+```powershell
+# Check what's running
+foundry service ps
+
+# If unexpected models appear, unload them
+foundry model unload <model-alias-or-id>
 ```
 
 ---
@@ -255,7 +276,8 @@ Replace `PORT` with the port shown by `foundry service status`.
 | `Request to local service failed` | Run `foundry service restart`, then `foundry service status` |
 | Models not downloading | Check internet connection; first-time model and EP downloads can take 10-15 minutes |
 | No models listed in cache | Run `foundry model download <model>` or `foundry model run <model>` |
-| `kokoro-v0_19` not found | This machine's Foundry catalog does not currently include it; use Foundry for chat + STT and choose a separate local TTS component unless another supported speech model is listed |
+| `kokoro-v0_19` not found | Kokoro TTS is **not** a Foundry model. It runs in-process in the orchestration service via `kokoro-onnx`. See the Implementation Guide for setup. |
+| Stray models loaded | Run `foundry service ps` to check; `foundry model unload <alias>` to remove unwanted models (e.g., phi-4-mini from prior testing) |
 | Service endpoint changed | Run `foundry service status` again and update `FOUNDRY_LOCAL_HOST` |
 | Out of disk space | Need ~10 GB total; clear models with `foundry cache list` and `foundry cache remove <model>` |
 | Windows on ARM cpuinfo warning | If commands still succeed, treat it as non-fatal and continue |
