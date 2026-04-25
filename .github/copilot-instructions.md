@@ -93,10 +93,12 @@ Key endpoints used by the controller (all at `http://<MISTY_IP>/api/`):
 | POST | `/api/images/display` | Change face display (`{"FileName": "e_Joy2.jpg"}`) |
 | POST | `/api/reboot` | Reboot Misty (`{"Core": true, "SensoryServices": true}` — both params required) |
 | GET | `/api/device` | Device info / health check |
+| GET | `/api/battery` | Battery status (`chargePercent`, `isCharging`, `healthPercent`, `temperature`) |
+| GET | `/api/audio/list` | List audio files stored on Misty |
 | GET | `/api/skills/running` | List running on-robot skills |
 | POST | `/api/skills/cancel` | Cancel all running skills |
 
-**WebSocket**: `ws://<MISTY_IP>/pubsub` — subscribe to `KeyPhraseRecognized` events.
+**WebSocket**: `ws://<MISTY_IP>/pubsub` — subscribe to `KeyPhraseRecognized`, `BatteryCharge`, etc.
 
 ### Misty SDK Gotchas
 
@@ -126,8 +128,16 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 - **Base URL**: Auto-discovered from `foundry service status`. The CLI reports a URL like `http://127.0.0.1:64722/openai/status` — strip the path component, use only `http://127.0.0.1:<port>`.
 - **Chat**: `POST /v1/chat/completions` — works with full model ID (e.g., `Phi-3.5-mini-instruct-openvino-gpu:2`)
 - **Models list**: `GET /openai/models` — returns array of model ID strings
-- **STT**: `POST /v1/audio/transcriptions` — standard Whisper API format
+- **STT**: Foundry Local does **NOT** expose a REST endpoint for Whisper. We use `faster-whisper` (CTranslate2) locally in Python instead.
 - **No `/openai/v1/` prefix** — use `/v1/` directly for inference endpoints
+
+## Misty Hardware Notes
+
+- **Tally light**: Blue LED on side of head indicates camera/mic is active (PII collection indicator). Turns off when keyphrase/recording is stopped.
+- **Battery**: Monitor via `GET /api/battery`. At very low charge (~5%), mic and keyphrase **silently fail** — APIs return success but produce no data. Minimum ~10% recommended for operation.
+- **Charging**: When not in use, stop keyphrase, cancel skills, and turn LED off (`{"red":0,"green":0,"blue":0}`) to reduce power draw and charge faster.
+- **Fans**: Run continuously — may be firmware-controlled with no user override. Under investigation (issue #8).
+- **Firmware**: v2.0.2.140 / robot OS 2.0.2.11660. Misty Robotics was acquired by Furhat Robotics; no further firmware updates expected.
 
 ## Key Conventions
 
