@@ -1,3 +1,4 @@
+
 # Misty II + Foundry Local — Conversational AI Robot
 
 > Turn a Misty II robot into a conversational AI assistant using fully local inference — no cloud, no API keys, no internet required after setup.

@@ -24,16 +24,12 @@ This implementation integrates Misty II robot with Microsoft Foundry Local for o
 │   skill      │                                  │ • TTS synthesis  │
 └──────────────┘                                  └────────┬─────────┘
                                                            │
-                                                   localhost:5000
-                                                           │
-                                                   ┌───────▼─────────┐
-                                                   │ Foundry Local   │
-                                                   │ • Model server  │
-                                                   │ • Endpoints:    │
-                                                   │   /chat/compl   │
-                                                   │   /transcribe   │
-                                                   │   /speech       │
-                                                   └─────────────────┘
+                                              ┌────────────┼────────────┐
+                                              │            │            │
+                                      Foundry Local    kokoro-onnx  pyttsx3
+                                      (localhost)      (standalone) (fallback)
+                                       ├─ /chat/compl    └─ ONNX       └─ SAPI5
+                                       └─ /transcribe      model
 ```
 
 ---
@@ -76,10 +72,15 @@ This implementation integrates Misty II robot with Microsoft Foundry Local for o
 
 **Pipeline**:
 1. Receives WAV file from Misty
-2. Calls Foundry Local `/v1/audio/transcriptions` (STT)
-3. Calls Foundry Local `/v1/chat/completions` (LLM)
-4. Calls Foundry Local `/v1/audio/speech` (TTS)
+2. Calls Foundry Local `/v1/audio/transcriptions` (STT — Whisper-tiny)
+3. Calls Foundry Local `/v1/chat/completions` (LLM — Phi-3.5-mini)
+4. Synthesises speech locally via kokoro-onnx (TTS — Kokoro); falls back to pyttsx3/SAPI5 if unavailable
 5. Returns response audio URI to Misty
+
+> **Note:** Kokoro is **not** a Foundry Local model. It runs as a standalone
+> Python library (`kokoro-onnx`) with its own ONNX model file and voice pack
+> downloaded from HuggingFace. See the [TTS Architecture](#tts-architecture)
+> section below for details.
 
 **Error Handling**:
 - Timeout detection at each stage
@@ -91,15 +92,38 @@ This implementation integrates Misty II robot with Microsoft Foundry Local for o
 **Deployment**: Local machine (same as Windows companion)
 
 **Model Stack (Locked v1)**:
-- Chat: `phi-3.5-mini` — Lightweight LLM (~3.8B params)
-- STT: `whisper-tiny` — Fast speech-to-text
-- TTS: `kokoro-v0_19` — Voice synthesis
+- Chat: `phi-3.5-mini` — Lightweight LLM (~3.8B params) — **via Foundry Local**
+- STT: `whisper-tiny` — Fast speech-to-text — **via Foundry Local**
 
 **Endpoints Used**:
 - `POST /v1/chat/completions` — OpenAI-compatible LLM
 - `POST /v1/audio/transcriptions` — Speech-to-text
-- `POST /v1/audio/speech` — Text-to-speech
 - `GET /openai/models` — Model availability
+
+### 4. TTS Architecture
+<a id="tts-architecture"></a>
+
+**Kokoro is not served by Foundry Local.** It is not present in the Foundry
+model catalog. Instead, the orchestration service runs Kokoro as a standalone
+Python library with a built-in fallback chain:
+
+| Priority | Engine | Package | Quality | Notes |
+|----------|--------|---------|---------|-------|
+| Primary | Kokoro v1.0 (ONNX) | `kokoro-onnx` + `soundfile` | Natural, neural | Requires `kokoro-v1.0-quantized.onnx` and `voices-v1.0.bin` from [HuggingFace](https://huggingface.co/hexgrad/Kokoro-82M) |
+| Fallback | pyttsx3 (SAPI5) | `pyttsx3` | Robotic but functional | Uses Windows built-in speech engine; no extra downloads needed |
+
+**Setup for Kokoro (primary TTS):**
+```powershell
+pip install kokoro-onnx soundfile
+
+# Download model files into the windows-orchestration directory
+# - kokoro-v1.0-quantized.onnx
+# - voices-v1.0.bin
+# From: https://huggingface.co/hexgrad/Kokoro-82M
+```
+
+If Kokoro is not installed or fails at runtime, the service automatically falls
+back to pyttsx3 with no manual intervention required.
 
 ---
 
@@ -118,43 +142,79 @@ python -m pip install --upgrade pip
 
 **1.2 Install Foundry Local**
 ```powershell
-# Follow Microsoft's Foundry Local setup guide
-# https://learn.microsoft.com/en-us/azure/foundry-local/
+# Install via winget (recommended)
+winget install Microsoft.FoundryLocal
 
-# Typical installation
-pip install foundry-local
+# Verify installation
+foundry --version
+foundry --help
 ```
 
-**1.3 Configure Foundry Local**
+See [FOUNDRY_LOCAL_SETUP.md](FOUNDRY_LOCAL_SETUP.md) for detailed Foundry
+installation and troubleshooting.
+
+**1.3 Start the Foundry Local Service**
 ```powershell
-# Set Foundry to serve on all interfaces (not just localhost)
-# Edit Foundry Local config to expose port 5000
+foundry service start
+foundry service status
 
-# Start Foundry Local
-foundry --port 5000 --host 0.0.0.0
+# Note the endpoint URL printed — you will need it later.
+# Do NOT assume localhost:5000; the port may vary.
 ```
 
-**1.4 Verify Foundry Local is Running**
+**1.4 Download Foundry Local Models (First-Run Only)**
+
+⚠️ Requires internet. Downloads can take 5-15 minutes.
+
 ```powershell
-# Check models endpoint
-Invoke-RestMethod -Uri http://localhost:5000/openai/models
+# Download the two models served by Foundry Local
+foundry model download phi-3.5-mini
+foundry model download whisper-tiny
 
-# Should return list of available models including:
-# - phi-3.5-mini
-# - whisper-tiny
-# - kokoro-v0_19
+# Load them into the running service
+foundry model load phi-3.5-mini
+foundry model load whisper-tiny
 ```
 
-**1.5 Install Orchestration Service**
+**1.5 Verify Foundry Local Models**
+```powershell
+# Check the models endpoint (replace PORT with your actual port)
+Invoke-RestMethod -Uri http://localhost:PORT/openai/models
+
+# Should list phi-3.5-mini and whisper-tiny.
+# Kokoro TTS will NOT appear here — it runs outside Foundry Local.
+```
+
+**1.6 Install Kokoro TTS (Primary Voice Engine)**
+
+Kokoro is **not** a Foundry Local model. Install it as a standalone Python
+library alongside its ONNX model file and voice pack.
+
+```powershell
+# Install the Python packages
+pip install kokoro-onnx soundfile
+
+# Download model files from HuggingFace into the orchestration directory
+cd src\windows-orchestration
+# Place these two files here (download from https://huggingface.co/hexgrad/Kokoro-82M):
+#   - kokoro-v1.0-quantized.onnx
+#   - voices-v1.0.bin
+```
+
+> **If you skip this step**, the orchestration service will automatically fall
+> back to pyttsx3 (Windows SAPI5) — functional but robotic-sounding.
+
+**1.7 Install Orchestration Service Dependencies**
 ```powershell
 cd src\windows-orchestration
 pip install -r requirements.txt
 
-# Copy .env.example to .env and update FOUNDRY_LOCAL_HOST if needed
+# Copy .env.example to .env and update FOUNDRY_LOCAL_HOST with the
+# endpoint URL from step 1.3
 copy .env.example .env
 ```
 
-**1.6 Start Orchestration Service**
+**1.8 Start Orchestration Service**
 ```powershell
 cd src\windows-orchestration
 python orchestration_service.py
@@ -164,49 +224,123 @@ python orchestration_service.py
 # * WARNING: This is a development server
 ```
 
-**1.7 Verify Orchestration Service**
+**1.9 Verify Orchestration Service**
 ```powershell
 # In another terminal
 Invoke-RestMethod -Uri http://localhost:5000/api/health
 
-# Should return:
+# Expected response:
 # {
 #   "status": "ok",
 #   "orchestration": "ready",
-#   "models": { "chat": "phi-3.5-mini", "stt": "whisper-tiny", "tts": "kokoro-v0_19" }
+#   "foundry_local": "ok",
+#   "models": { "chat": "phi-3.5-mini", "stt": "whisper-tiny" }
 # }
 ```
 
 ### Phase 2: Misty Robot Setup
 
-**2.1 Verify Network Connectivity**
-```powershell
-# Ping Misty (replace IP as needed)
-ping 192.168.1.100
+**2.1 Connect Misty to the Same Wi-Fi Network**
 
-# Verify REST API is reachable
-Invoke-RestMethod -Uri http://192.168.1.100/api/device
+Misty and the Windows companion must be on the same local network. Use the
+Misty companion app or Misty's web interface to connect the robot to Wi-Fi.
+
+Find Misty's IP address:
+```powershell
+# Option A: Check the Misty companion app — it shows the IP on the home screen
+# Option B: Look at your router's DHCP client list
+# Option C: If Misty is already connected, query it directly
+Invoke-RestMethod -Uri http://<misty-ip>/api/device
 ```
 
-**2.2 Update Skill Configuration**
-Edit `src/misty-skill/FoundryLocalSkill.js`:
+**2.2 Verify Network Connectivity**
+```powershell
+# Ping Misty from the Windows companion
+ping <misty-ip>
+
+# Verify Misty REST API is reachable
+Invoke-RestMethod -Uri http://<misty-ip>/api/device
+
+# Verify Misty can reach the Windows companion (test from Misty's perspective
+# by checking that the orchestration service is listening)
+Invoke-RestMethod -Uri http://localhost:5000/api/health
+```
+
+**2.3 Update Skill Configuration**
+
+Edit `src/misty-skill/FoundryLocalSkill.js` and set `WINDOWS_HOST` to the
+Windows companion's local IP address and orchestration port:
+
 ```javascript
 const CONFIG = {
-  WINDOWS_HOST: "http://192.168.1.XXX:5000",  // Update with Windows companion IP
-  // ... rest of config
+  WINDOWS_HOST: "http://192.168.1.XXX:5000",  // ← Replace with your Windows IP
+  // ... rest of config stays the same
 };
 ```
 
-**2.3 Deploy Skill to Misty**
-Using Misty's skill deployment tool (web interface or SDK):
-1. Upload `FoundryLocalSkill.json` and `FoundryLocalSkill.js`
-2. Set skill to start on robot startup
-3. Verify skill appears in skill list
+To find your Windows IP:
+```powershell
+(Get-NetIPAddress -AddressFamily IPv4 -InterfaceAlias Wi-Fi).IPAddress
+```
 
-**2.4 Test Wake Word Detection**
-1. Say "Hey, Misty!" near the robot
+**2.4 Deploy Skill to Misty via REST API**
+
+Upload both skill files to Misty using its REST API:
+
+```powershell
+# Set your Misty IP
+$MISTY_IP = "192.168.1.XXX"   # ← Replace with Misty's IP
+
+# Upload the skill (both .json metadata and .js code)
+# Option A: Use Misty's Skill Runner web interface
+#   1. Open http://$MISTY_IP in a browser
+#   2. Navigate to the Skill Runner page
+#   3. Upload FoundryLocalSkill.json and FoundryLocalSkill.js
+#   4. Click "Upload & Run"
+
+# Option B: Use the REST API to save the skill
+$metaJson = Get-Content -Raw "src\misty-skill\FoundryLocalSkill.json"
+$codeJs   = Get-Content -Raw "src\misty-skill\FoundryLocalSkill.js"
+$body = @{
+    Meta = ($metaJson | ConvertFrom-Json)
+    Code = $codeJs
+} | ConvertTo-Json -Depth 5
+
+Invoke-RestMethod -Uri "http://$MISTY_IP/api/skills" `
+    -Method Post `
+    -ContentType "application/json" `
+    -Body $body
+```
+
+**2.5 Start the Skill on Misty**
+```powershell
+# Run the skill by its unique ID (from FoundryLocalSkill.json)
+Invoke-RestMethod -Uri "http://$MISTY_IP/api/skills/start" `
+    -Method Post `
+    -ContentType "application/json" `
+    -Body '{"UniqueId": "5f2b3c2b-4d3c-4e2b-8f1a-9d8c7b6a5e4d"}'
+
+# Verify the skill is running
+Invoke-RestMethod -Uri "http://$MISTY_IP/api/skills/running"
+```
+
+**2.6 Test Wake Word Detection**
+1. Say **"Hey, Misty!"** near the robot
 2. Robot should respond with a confirmation beep or LED change
-3. Check robot logs for `"Wake word detected"` messages
+3. Speak your question (up to 10 seconds; recording stops after 800ms of silence)
+4. Misty should play back a spoken response within ~6 seconds
+
+**2.7 Check Skill Logs (if something goes wrong)**
+```powershell
+# Get recent skill log messages from Misty
+Invoke-RestMethod -Uri "http://$MISTY_IP/api/skills/log?UniqueId=5f2b3c2b-4d3c-4e2b-8f1a-9d8c7b6a5e4d"
+
+# Look for:
+#   "FoundryLocalSkill initialized"   → skill started OK
+#   "Wake word detected"               → mic is working
+#   "Recording complete"               → audio captured
+#   "Orchestration response received"  → round-trip to Windows succeeded
+```
 
 ---
 
@@ -359,15 +493,16 @@ Invoke-RestMethod -Uri http://localhost:5000/api/health
 
 All versions are locked for v1 reproducibility:
 
-| Component | Model | Version | Provider | Size |
-|-----------|-------|---------|----------|------|
-| Chat | Phi-3.5-mini | latest | Microsoft/Hugging Face | ~3.8B |
-| STT | Whisper-tiny | latest | OpenAI/Hugging Face | ~39M |
-| TTS | Kokoro | v0_19 | Hugging Face | ~100M |
+| Component | Model | Version | Provider | Size | Runtime |
+|-----------|-------|---------|----------|------|---------|
+| Chat | Phi-3.5-mini | latest | Microsoft/Hugging Face | ~3.8B | Foundry Local |
+| STT | Whisper-tiny | latest | OpenAI/Hugging Face | ~39M | Foundry Local |
+| TTS | Kokoro | v1.0 (ONNX) | Hugging Face | ~82M | Standalone (`kokoro-onnx`) |
+| TTS (fallback) | SAPI5 | — | Windows built-in | — | `pyttsx3` |
 
 To update model versions:
-1. Edit `MODELS` dict in `orchestration_service.py`
-2. Verify new model is available in Foundry Local
+1. For Chat/STT: Edit `MODELS` dict in `orchestration_service.py`, verify new model is available in Foundry Local
+2. For TTS: Update the Kokoro ONNX model file and voice pack, or swap the TTS backend in the `text_to_speech()` function
 3. Test latency against SLO
 4. Update this document and `plans/planWindowsFoundry.prompt.md`
 
@@ -422,6 +557,6 @@ taskkill /PID <pid> /F
 
 ---
 
-**Document Version**: 1.0  
-**Last Updated**: 2026-04-19  
+**Document Version**: 1.1  
+**Last Updated**: 2026-04-24  
 **Status**: Implementation Ready
