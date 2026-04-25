@@ -44,7 +44,11 @@ FOLLOWUP_TIMEOUT_S = float(os.getenv("FOLLOWUP_TIMEOUT_S", "60"))  # max follow-
 FOLLOWUP_SILENCE_THRESHOLD = 1000  # audio bytes below this = silence (no speech)
 WS_RECONNECT_BASE_S = 2.0
 WS_RECONNECT_MAX_S = 30.0
-HEALTH_CHECK_INTERVAL_S = 30.0
+HEALTH_CHECK_INTERVAL_S = 10.0  # reduced from 30s for watchdog responsiveness
+
+# Keyphrase watchdog — detects silent failures and auto-recovers
+WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", "120"))  # 2 min after rearm with no wake event
+WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", "60"))  # 1 min after recovery attempt
 
 # Battery thresholds (as fractions 0.0–1.0)
 BATTERY_LOW_WARN = 0.20       # yellow LED warning
@@ -55,9 +59,6 @@ BATTERY_TEMP_THROTTLE_C = 50.0  # add delay between turns
 
 # Idle timeout
 IDLE_TIMEOUT_S = float(os.getenv("IDLE_TIMEOUT_S", "900"))  # 15 minutes
-
-# Unused sensor services to disable on startup for power savings
-DISABLE_SERVICES = ["LocomotionService", "3DToFService"]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -120,6 +121,12 @@ class MistyController:
         self.last_activity_time = time.time()
         self._is_dimmed = False
 
+        # Keyphrase watchdog — detect silent failures
+        self._last_wake_event_time = 0.0       # last ACTUAL wake word event received
+        self._last_keyphrase_armed_time = 0.0   # last time keyphrase was started/re-armed
+        self._watchdog_recovery_level = 0       # 0=none, 1=soft reset done, 2=sensory reboot done
+        self._watchdog_recovery_time = 0.0      # when the last recovery attempt was made
+
     # --- State transitions ---
 
     def set_state(self, new_state: State):
@@ -171,6 +178,21 @@ class MistyController:
     def display_image(self, filename: str):
         self.misty_post("/api/images/display", {"FileName": filename, "Alpha": 1})
 
+    def move_head(self, pitch: float = 0, roll: float = 0, yaw: float = 0, velocity: float = 50):
+        """Move Misty's head. Pitch: -40(up) to 26(down). Roll: -40 to 40. Yaw: -81(right) to 81(left)."""
+        self.misty_post("/api/head", {
+            "Pitch": pitch, "Roll": roll, "Yaw": yaw, "Velocity": velocity
+        })
+
+    def move_arms(self, left: float = None, right: float = None, velocity: float = 50):
+        """Move arms. Position: -29(up) to 90(down)."""
+        body = {"Velocity": velocity}
+        if left is not None:
+            body["LeftArmPosition"] = left
+        if right is not None:
+            body["RightArmPosition"] = right
+        self.misty_post("/api/arms", body)
+
     def start_keyphrase(self, force_restart=False):
         if force_restart:
             self.misty_post("/api/audio/keyphrase/stop")
@@ -178,9 +200,24 @@ class MistyController:
         result = self.misty_post("/api/audio/keyphrase/start")
         if result and result.get("status") == "Success":
             logger.info("Wake word listening active")
+            self._last_keyphrase_armed_time = time.time()
             return True
         logger.error(f"Failed to start keyphrase: {result}")
         return False
+
+    def _cancel_all_skills(self):
+        """Cancel all running on-robot skills (e.g., faceDetection auto-start)."""
+        try:
+            running = self.misty_get("/api/skills/running")
+            if running and running.get("result"):
+                names = [s.get("name", "unknown") for s in running["result"]]
+                logger.info(f"Cancelling {len(names)} running skill(s): {names}")
+                self.misty_post("/api/skills/cancel")
+                time.sleep(1.0)  # let skills stop before we start keyphrase
+            else:
+                logger.info("No on-robot skills running")
+        except Exception as e:
+            logger.warning(f"Failed to cancel skills: {e}")
 
     def start_recording(self, filename: str):
         return self.misty_post("/api/audio/record/start", {"FileName": filename})
@@ -331,6 +368,63 @@ class MistyController:
         if self.get_state() == State.IDLE:
             self.set_led(0, 255, 0)
 
+    # --- Keyphrase watchdog ---
+
+    def _watchdog_check(self):
+        """Detect silent keyphrase failure and auto-recover with escalating strategy.
+
+        Only runs when state is IDLE and keyphrase has been armed. Uses the gap
+        between keyphrase-armed time and now (with no wake events) as the signal,
+        NOT just "no wake events in N minutes" — avoids false positives when
+        nobody is talking to Misty.
+        """
+        if self.get_state() != State.IDLE:
+            return
+        if self._last_keyphrase_armed_time == 0.0:
+            return
+
+        now = time.time()
+
+        # The watchdog window starts from whichever is later:
+        # the last actual wake event, or the last keyphrase arm/recovery
+        baseline = max(self._last_wake_event_time, self._last_keyphrase_armed_time,
+                       self._watchdog_recovery_time)
+        idle_since = now - baseline
+
+        if self._watchdog_recovery_level == 0:
+            # Level 0 → 1: Soft reset (stop/start keyphrase + cancel skills)
+            if idle_since > WATCHDOG_IDLE_TIMEOUT_S:
+                logger.warning(f"Watchdog: no wake events in {idle_since:.0f}s — soft-resetting keyphrase")
+                self.set_led(255, 200, 0)  # yellow flash
+                self._cancel_all_skills()
+                self.start_keyphrase(force_restart=True)
+                self._watchdog_recovery_level = 1
+                self._watchdog_recovery_time = time.time()
+                # Restore LED after brief flash
+                threading.Timer(2.0, self._restore_idle_led).start()
+
+        elif self._watchdog_recovery_level == 1:
+            # Level 1 → 2: Sensory services reboot
+            if idle_since > WATCHDOG_ESCALATE_TIMEOUT_S:
+                logger.error("Watchdog: soft reset failed — rebooting sensory services")
+                self.set_led(255, 0, 0)  # red flash
+                self.misty_post("/api/reboot", {"Core": False, "SensoryServices": True})
+                self._watchdog_recovery_level = 2
+                self._watchdog_recovery_time = time.time()
+                # Sensory reboot may kill WS — let _on_ws_close/reconnect handle it
+                # If WS stays alive, we'll re-arm keyphrase on next health check cycle
+
+        elif self._watchdog_recovery_level == 2:
+            # Level 2 → full reboot (nuclear option)
+            if idle_since > WATCHDOG_ESCALATE_TIMEOUT_S:
+                logger.critical("Watchdog: sensory reboot failed — full reboot")
+                self.set_led(255, 0, 0)
+                self.misty_post("/api/reboot", {"Core": True, "SensoryServices": True})
+                # Full reboot kills WS — controller auto-reconnects via existing logic
+                # Reset watchdog so it starts fresh after reboot
+                self._watchdog_recovery_level = 0
+                self._watchdog_recovery_time = time.time()
+
     def get_battery_snapshot(self) -> BatteryState:
         with self.battery_lock:
             return BatteryState(
@@ -370,23 +464,6 @@ class MistyController:
             logger.error("Failed to resume from charging mode")
             self.set_state(State.ERROR)
 
-    # --- Sensor service management ---
-
-    def _disable_unused_services(self):
-        """Disable sensor services not needed for conversation to reduce power/heat."""
-        for service in DISABLE_SERVICES:
-            result = self.misty_post("/api/services", {"Name": service, "Enabled": False})
-            if result:
-                logger.info(f"Disabled service: {service}")
-            else:
-                logger.warning(f"Failed to disable service: {service}")
-
-    def _restore_services(self):
-        """Re-enable sensor services on shutdown."""
-        for service in DISABLE_SERVICES:
-            self.misty_post("/api/services", {"Name": service, "Enabled": True})
-            logger.info(f"Re-enabled service: {service}")
-
     # --- Shutdown ---
 
     def _shutdown(self):
@@ -397,8 +474,7 @@ class MistyController:
         battery = self.check_battery()
         if battery:
             logger.info(f"Final battery: {battery.charge_percent*100:.0f}% | {battery.voltage:.1f}V")
-        # Restore services, stop keyphrase, LED off
-        self._restore_services()
+        # Stop keyphrase, LED off
         self.misty_post("/api/audio/keyphrase/stop")
         if self.ws:
             self.ws.close()
@@ -454,6 +530,10 @@ class MistyController:
             logger.info("WebSocket reconnected in CHARGING mode — not restarting keyphrase")
             return
 
+        # Normal startup: cancel any auto-started skills (e.g., faceDetection)
+        # that conflict with our wake word + recording pipeline
+        self._cancel_all_skills()
+
         # Normal startup: start keyphrase recognition
         if self.start_keyphrase():
             self.set_led(0, 255, 0)
@@ -486,6 +566,9 @@ class MistyController:
 
         if event_name == "WakeWord":
             self.last_activity_time = time.time()
+            self._last_wake_event_time = time.time()
+            # Wake event received — keyphrase is working, reset watchdog
+            self._watchdog_recovery_level = 0
             # Restore from dimmed state on activity
             if self._is_dimmed and self.get_state() == State.IDLE:
                 self._is_dimmed = False
@@ -589,10 +672,11 @@ class MistyController:
 
     def _do_conversation_exchange(self, turn: int, turn_start: float):
         """Record from Misty, orchestrate STT→LLM→TTS, play response."""
-        # 1. Visual feedback — recording
+        # 1. Visual feedback — listening attentively
         self.set_state(State.RECORDING)
         self.set_led(255, 140, 0)  # orange
-        self.display_image("e_SystemCamera.jpg")
+        self.display_image("e_Admiration.jpg")  # wide-eyed, attentive
+        self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # look up slightly — eye contact
 
         # 2. Record audio
         self.start_recording(RECORDING_FILENAME)
@@ -603,10 +687,11 @@ class MistyController:
         # Small delay for Misty to finalize the file
         time.sleep(0.5)
 
-        # 3. Retrieve recorded audio
+        # 3. Retrieve recorded audio — thinking face
         self.set_state(State.PROCESSING)
         self.set_led(0, 0, 255)  # blue = processing
-        self.display_image("e_SystemLogoPrompt.jpg")
+        self.display_image("e_ContentRight.jpg")  # looking to the side — "thinking"
+        self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)  # tilt head — pondering
 
         audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
         if not audio_b64:
@@ -623,10 +708,11 @@ class MistyController:
 
     def _do_orchestrate_and_respond(self, turn: int, audio_bytes: bytes, turn_start: float):
         """Send audio to orchestration service and play response on Misty."""
-        # Processing state
+        # Processing state — thinking
         self.set_state(State.PROCESSING)
         self.set_led(0, 0, 255)  # blue = processing
-        self.display_image("e_SystemLogoPrompt.jpg")
+        self.display_image("e_ContentRight.jpg")  # thinking face
+        self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)  # head tilt — pondering
 
         # Send to orchestration service
         response = requests.post(
@@ -644,7 +730,7 @@ class MistyController:
         llm_response = result.get("inferenceResponse", "")
         audio_uri = result.get("responseAudio", "")
         latency = result.get("latencyMs", 0)
-        logger.info(f"[Turn {turn}] User: '{transcribed}' → Misty: '{llm_response}' ({latency:.0f}ms)")
+        logger.info(f"[Turn {turn}] User: '{transcribed}' -> Misty: '{llm_response}' ({latency:.0f}ms)")
 
         if result.get("ttsFallback"):
             logger.warning(f"[Turn {turn}] WARNING: TTS FALLBACK was used")
@@ -659,10 +745,11 @@ class MistyController:
         response_wav = audio_resp.content
         logger.info(f"[Turn {turn}] Downloaded response audio: {len(response_wav)} bytes")
 
-        # Upload to Misty and play
+        # Upload to Misty and play — animated, looking at user
         self.set_state(State.PLAYING)
         self.set_led(148, 0, 211)  # purple = speaking
-        self.display_image("e_Joy2.jpg")
+        self.display_image("e_EcstacyHilarious.jpg")  # big expressive face
+        self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # face forward — eye contact
 
         play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
 
@@ -676,7 +763,8 @@ class MistyController:
         """Listen briefly for follow-up speech. Returns True if speech was detected and responded to."""
         self.set_state(State.LISTENING)
         self.set_led(0, 200, 200)  # cyan = listening for follow-up
-        self.display_image("e_ContentRight.jpg")
+        self.display_image("e_Joy.jpg")  # warm, expectant — "go on..."
+        self.move_head(pitch=-10, roll=-3, yaw=-10, velocity=40)  # slight head tilt — attentive
 
         # Record a short clip
         self.start_recording(RECORDING_FILENAME)
@@ -720,7 +808,7 @@ class MistyController:
             llm_response = result.get("inferenceResponse", "")
             audio_uri = result.get("responseAudio", "")
             latency = result.get("latencyMs", 0)
-            logger.info(f"[Turn {turn}] Follow-up: '{transcribed}' → '{llm_response}' ({latency:.0f}ms)")
+            logger.info(f"[Turn {turn}] Follow-up: '{transcribed}' -> '{llm_response}' ({latency:.0f}ms)")
 
             if result.get("ttsFallback"):
                 logger.warning(f"[Turn {turn}] WARNING: TTS FALLBACK was used")
@@ -738,7 +826,8 @@ class MistyController:
             # Play the response
             self.set_state(State.PLAYING)
             self.set_led(148, 0, 211)  # purple = speaking
-            self.display_image("e_Joy2.jpg")
+            self.display_image("e_EcstacyHilarious.jpg")  # animated speaking face
+            self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # face forward
 
             play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
             time.sleep(play_duration + 0.5)
@@ -750,6 +839,7 @@ class MistyController:
 
     def _rearm(self):
         self.set_state(State.REARMING)
+        self.move_head(pitch=0, roll=0, yaw=0, velocity=40)  # center head
         time.sleep(REARM_DELAY_S)
         if self.start_keyphrase(force_restart=True):
             self.set_led(0, 255, 0)  # green = ready
@@ -772,6 +862,7 @@ class MistyController:
         logger.info(f"  Orchestration: {ORCHESTRATION_URL}")
         logger.info(f"  Recording:     {RECORDING_DURATION_S}s")
         logger.info(f"  Idle timeout:  {IDLE_TIMEOUT_S}s")
+        logger.info(f"  Watchdog:      soft={WATCHDOG_IDLE_TIMEOUT_S}s, escalate={WATCHDOG_ESCALATE_TIMEOUT_S}s")
         logger.info("=" * 60)
 
         # Pre-flight checks
@@ -788,9 +879,6 @@ class MistyController:
         orch_ok = self.check_orchestration_health()
         if not orch_ok:
             logger.warning("Orchestration service not reachable — will retry during turns")
-
-        # Disable unused sensor services to reduce power/heat
-        self._disable_unused_services()
 
         # Cancel any lingering skills (e.g., built-in faceDetection)
         self.misty_post("/api/skills/cancel")
@@ -829,6 +917,10 @@ class MistyController:
                     if not self.check_misty_health():
                         logger.warning("Misty health check failed")
                         self.set_state(State.DISCONNECTED)
+
+                # Keyphrase watchdog (only when idle)
+                if state == State.IDLE:
+                    self._watchdog_check()
         except KeyboardInterrupt:
             self._shutdown()
 

@@ -36,12 +36,20 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()  # Load .env before reading any env vars
 
-FOUNDRY_API_TIMEOUT = float(os.getenv("FOUNDRY_API_TIMEOUT", "5.0"))
-SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", "6.0"))
-KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_heart")
+FOUNDRY_API_TIMEOUT = float(os.getenv("FOUNDRY_API_TIMEOUT", "10.0"))
+SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", "15.0"))
+KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_sky")
+KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.2"))
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
-    "You are Misty, a helpful and friendly robot assistant. Keep answers concise and conversational — no more than 2-3 sentences. Be warm and engaging."
+    (
+        "You are Misty, a sassy little robot with BIG personality. "
+        "You're witty, cheeky, and always ready with a comeback — but never mean-spirited. "
+        "Use casual language, contractions, and expressive phrases like 'Oh please', 'Honey...', 'I mean, obviously', 'Not gonna lie'. "
+        "React with personality — gasp at surprises, eye-roll at silly questions, get excited about cool things. "
+        "CRITICAL: Keep answers to ONE short sentence. 15 words max. Be punchy, not wordy. "
+        "Never say you're an AI, language model, or assistant. You're Misty. Period."
+    )
 )
 
 # Locked v1 model stack
@@ -97,10 +105,10 @@ FOUNDRY_LOCAL_HOST = _discover_foundry_endpoint()
 
 # Latency budget decomposition (milliseconds)
 LATENCY_BUDGET = {
-    "stt": 1500,  # Speech-to-text
-    "llm": 2000,  # LLM inference
-    "tts": 1500,  # Text-to-speech synthesis
-    "overhead": 500,  # Network, serialization, etc.
+    "stt": 3000,  # Speech-to-text (faster-whisper, usually ~500ms warm)
+    "llm": 8000,  # LLM inference (Phi-3.5-mini, depends on output length)
+    "tts": 3000,  # Text-to-speech synthesis (Kokoro ~1-2s)
+    "overhead": 1000,  # Network, serialization, etc.
 }
 
 # Global conversation context (in-memory for v1; stateless per utterance for MVP)
@@ -173,6 +181,7 @@ def orchestrate():
         # Step 1: Speech-to-Text
         stt_start = time.time()
         stt_result = speech_to_text(audio_bytes, stt_start)
+        stt_ms = (time.time() - stt_start) * 1000
         if stt_result.get("status") == "error":
             return jsonify(stt_result), 400
         
@@ -181,11 +190,12 @@ def orchestrate():
             logger.warning("STT returned empty text")
             return jsonify({"status": "error", "error": "empty_stt"}), 400
         
-        logger.info(f"Transcribed text: {user_text}")
+        logger.info(f"[STT {stt_ms:.0f}ms] {user_text}")
         
         # Step 2: Language Model Inference
         llm_start = time.time()
         llm_result = language_model_inference(user_text, llm_start)
+        llm_ms = (time.time() - llm_start) * 1000
         if llm_result.get("status") == "error":
             return jsonify(llm_result), 500
         
@@ -194,11 +204,12 @@ def orchestrate():
             logger.warning("LLM returned empty response")
             return jsonify({"status": "error", "error": "empty_llm"}), 400
         
-        logger.info(f"LLM response: {response_text}")
+        logger.info(f"[LLM {llm_ms:.0f}ms] {response_text}")
         
         # Step 3: Text-to-Speech
         tts_start = time.time()
         tts_result = text_to_speech(response_text, tts_start)
+        tts_ms = (time.time() - tts_start) * 1000
         if tts_result.get("status") == "error":
             return jsonify(tts_result), 500
         
@@ -210,10 +221,7 @@ def orchestrate():
         # Calculate total latency
         total_latency_ms = (time.time() - start_time) * 1000
         tts_fallback = tts_result.get("tts_fallback", False)
-        if tts_fallback:
-            logger.warning(f"⚠️ Orchestration completed in {total_latency_ms:.0f}ms (TTS FALLBACK active)")
-        else:
-            logger.info(f"Orchestration completed in {total_latency_ms:.0f}ms")
+        logger.info(f"[Pipeline {total_latency_ms:.0f}ms] STT={stt_ms:.0f} LLM={llm_ms:.0f} TTS={tts_ms:.0f} history={len(conversation_history)} fallback={tts_fallback}")
         
         return jsonify({
             "status": "ok",
@@ -294,9 +302,9 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         # Build message history
         conversation_history.append({"role": "user", "content": user_text})
         
-        # Keep history limited to last 5 turns to control context size
-        if len(conversation_history) > 10:
-            conversation_history = conversation_history[-10:]
+        # Keep history limited to last 3 turns (6 messages) to control LLM latency
+        if len(conversation_history) > 6:
+            conversation_history = conversation_history[-6:]
         
         url = f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions"
         # Prepend system prompt on every call; not stored in history
@@ -304,8 +312,8 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         payload = {
             "model": MODELS["chat"],
             "messages": messages,
-            "max_tokens": 150,  # Keep output short for latency
-            "temperature": 0.7,
+            "max_tokens": 40,  # Force very short responses — TTS is the bottleneck
+            "temperature": 0.85,  # Higher for more personality
         }
         
         response = requests.post(
@@ -398,7 +406,7 @@ def text_to_speech(text: str, start_time: float) -> Dict[str, Any]:
             try:
                 import soundfile as sf  # noqa: PLC0415
                 samples, sample_rate = kokoro.create(
-                    text, voice=KOKORO_VOICE, speed=1.0, lang="en-us"
+                    text, voice=KOKORO_VOICE, speed=KOKORO_SPEED, lang="en-us"
                 )
                 sf.write(audio_path, samples, sample_rate)
                 logger.debug(f"kokoro-onnx TTS saved: {audio_path}")

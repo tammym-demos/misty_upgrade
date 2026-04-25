@@ -187,20 +187,25 @@ LATENCY_BUDGET = {
 ## File Structure
 
 ```
-c:\Users\tmcclell\OneDrive - Microsoft\Source\Misty\
+misty-upgrade/
 │
 ├── README.md                           # Quick start and overview
+│
+├── misty-skills-backup/
+│   ├── README.md                       # Why skills were removed, restoration notes
+│   └── all_skills_metadata.json        # Metadata for all 11 skills (pre-cleanup)
 │
 ├── plans/
 │   └── planWindowsFoundry.prompt.md   # Architecture & design (v1)
 │
 ├── src/
-│   ├── misty-skill/
+│   ├── misty-skill/                   # DEPRECATED — on-robot JS skills (abandoned)
 │   │   ├── FoundryLocalSkill.json     # Skill metadata
 │   │   └── FoundryLocalSkill.js       # Main skill logic (~350 lines)
 │   │
 │   └── windows-orchestration/
-│       ├── orchestration_service.py   # Flask service (~450 lines)
+│       ├── orchestration_service.py   # Flask service (~500 lines)
+│       ├── misty_controller.py        # WebSocket + REST controller (~800 lines)
 │       ├── requirements.txt           # Dependencies
 │       └── .env.example              # Configuration template
 │
@@ -208,7 +213,10 @@ c:\Users\tmcclell\OneDrive - Microsoft\Source\Misty\
 │   └── test_integration.py           # Integration test suite
 │
 └── docs/
-    └── IMPLEMENTATION_GUIDE.md       # Full setup & troubleshooting guide
+    ├── IMPLEMENTATION_GUIDE.md       # Full setup & troubleshooting guide
+    ├── IMPLEMENTATION_SUMMARY.md     # Architecture summary
+    ├── FOUNDRY_LOCAL_SETUP.md        # Foundry Local setup & model management
+    └── ADR-001-companion-device-over-onrobot-inference.md
 ```
 
 ---
