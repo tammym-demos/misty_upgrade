@@ -94,12 +94,15 @@ POST /api/orchestrate [WAV file]
 
 **Configuration**:
 ```python
-FOUNDRY_LOCAL_HOST = "http://localhost:5000"
+# Auto-discovered from `foundry service status` at startup (dynamic port)
+FOUNDRY_LOCAL_HOST = _discover_foundry_endpoint()
+
+# Foundry-served models only — TTS is handled separately
 MODELS = {
     "chat": "phi-3.5-mini",
     "stt": "whisper-tiny",
-    "tts": "kokoro-v0_19"
 }
+
 LATENCY_BUDGET = {
     "stt": 1500,      # Speech-to-text (ms)
     "llm": 2000,      # LLM inference (ms)
@@ -107,6 +110,8 @@ LATENCY_BUDGET = {
     "overhead": 500   # Network + serialization (ms)
 }
 ```
+
+**TTS**: Kokoro-ONNX (v1.0) runs in-process as a standalone Python library — it is **not** a Foundry model and does not appear in `foundry model list` or `/openai/models`. Falls back to pyttsx3 (Windows SAPI5) if Kokoro is unavailable. TTS status is reported in `/api/diagnostics` under the `tts` key, separate from the Foundry `models` dict.
 
 **Key Features**:
 - ✅ Pipeline orchestration with timeout tracking
@@ -122,12 +127,14 @@ LATENCY_BUDGET = {
 **Type**: Python unittest suite  
 **Location**: `tests/test_integration.py`  
 **Test Classes**:
-- `TestWindowsOrchestration` — Service health and diagnostics
-- `TestMistyConnectivity` — Misty REST and skill endpoints
-- `TestFoundryLocalIntegration` — Foundry models and chat API
-- `TestLatencySLO` — Latency benchmark placeholders
-- `TestFallbackBehavior` — Error handling scenarios
-- `TestVerificationChecklist` — Maps to 9-item verification checklist from plan
+| Test class | Requires |
+|-----------|----------|
+| `TestWindowsOrchestration` | Orchestration service |
+| `TestFoundryLocalIntegration` | Foundry Local (auto-discovered via `foundry service status` or `FOUNDRY_LOCAL_HOST` env var) |
+| `TestMistyConnectivity` | Misty robot on the network |
+| `TestLatencySLO` | Orchestration service |
+| `TestFallbackBehavior` | None (self-contained) |
+| `TestVerificationChecklist` | Varies — some skip automatically |
 
 **Tests Implemented**:
 - ✅ Service health check (`/api/health`)
@@ -180,7 +187,7 @@ LATENCY_BUDGET = {
 | **Hardware** | CPU-only (GPU optional) | Broad device compatibility |
 | **Chat Model** | Phi-3.5-mini | Lightweight (3.8B), fast, high-quality |
 | **STT Model** | Whisper-tiny | Minimal latency, CPU-compatible |
-| **TTS Model** | Kokoro v0_19 | Fast synthesis, voice quality |
+| **TTS Model** | Kokoro v1.0 ONNX (in-process, not a Foundry model) | Fast synthesis, voice quality; pyttsx3 fallback |
 | **Network** | Local Wi-Fi only | Privacy, offline-capable |
 | **Context** | Last 10 messages | Multi-turn conversation support |
 | **Recording** | Up to 10s with silence termination | User-friendly, bounds latency |

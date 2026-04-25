@@ -106,20 +106,36 @@ Misty II's onboard Snapdragon 820 + 410 (2 GB RAM) cannot run modern inference w
 pip install foundry-local
 foundry
 
-# 2. Install and run the orchestration service
+# 2. Verify only the expected model is loaded (unload strays from prior testing)
+foundry service ps
+# Expected: phi-3.5-mini only. If others appear: foundry model unload <alias>
+
+# 3. Install and run the orchestration service
 cd src\windows-orchestration
 pip install -r requirements.txt
 python orchestration_service.py
 
-# 3. Verify the service is healthy (port is auto-discovered from `foundry service status`)
+# 4. Verify the service is healthy (port is auto-discovered from `foundry service status`)
 Invoke-RestMethod -Uri http://localhost:5000/api/health
 
-# 4. Start the Misty controller (separate terminal)
+# 5. Start the Misty controller (separate terminal)
 #    Set MISTY_IP and ORCHESTRATION_URL env vars if not using defaults
 python misty_controller.py
 ```
 
 The Misty controller connects to Misty via WebSocket and REST API — no skill deployment needed. Misty's LED turns green when ready. Say **"Hey, Misty!"** followed by your question.
+
+### Startup Verification
+
+All three services must be running. Start them in order — each depends on the previous:
+
+| # | Service | Verify | Notes |
+|---|---------|--------|-------|
+| 1 | **Foundry Local** | `foundry service status` / `foundry service ps` | Dynamic port; auto-discovered by orchestration service |
+| 2 | **Orchestration service** | `curl http://localhost:5000/api/health` | Reports Foundry and TTS status |
+| 3 | **Misty controller** | Misty LED turns green | Connects via WebSocket + REST |
+
+**Model management:** Only `phi-3.5-mini` should be loaded in Foundry (`foundry service ps`). Whisper-tiny loads on demand for STT. Kokoro TTS runs in-process in the orchestration service — it is **not** a Foundry model and won't appear in `foundry model list`.
 
 ---
 
