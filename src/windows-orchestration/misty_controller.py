@@ -19,6 +19,8 @@ import time
 import base64
 import wave
 import struct
+import signal
+import atexit
 import logging
 import threading
 import requests
@@ -507,7 +509,9 @@ class MistyController:
     # --- Shutdown ---
 
     def _shutdown(self):
-        """Centralized cleanup on exit."""
+        """Centralized cleanup on exit. Stops keyphrase to release mic lock."""
+        if not self.running:
+            return  # Already shut down
         logger.info("Shutting down...")
         self.running = False
         # Log final battery state
@@ -1068,6 +1072,16 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     controller = MistyController()
     controller._start_time = time.time()
+
+    # Graceful shutdown on SIGTERM/SIGINT — stops keyphrase to prevent mic lock
+    def _signal_handler(signum, frame):
+        logger.info(f"Received signal {signum}, shutting down gracefully...")
+        controller._shutdown()
+        sys.exit(0)
+
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+    atexit.register(controller._shutdown)
 
     # Start test API server in background thread
     ControllerAPIHandler.controller = controller
