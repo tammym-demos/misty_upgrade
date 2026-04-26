@@ -41,7 +41,7 @@ This implementation integrates Misty II robot with Microsoft Foundry Local for o
 
 The Misty controller runs on the companion device and drives the robot entirely via REST API + WebSocket. This replaces the on-robot JavaScript skill, which proved unreliable (see [Why Not On-Robot Skills?](#why-not-on-robot-skills) below).
 
-**State Machine**: `DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING →]* REARMING → IDLE`
+**State Machine**: `DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING →]* REARMING (sensory reboot ~20s) → IDLE`
 
 **Functionality**:
 - Connects to Misty via WebSocket (`ws://<ip>/pubsub`) for `KeyPhraseRecognized` events
@@ -59,6 +59,7 @@ The Misty controller runs on the companion device and drives the robot entirely 
 - 🔵 Blue = PROCESSING (STT → LLM → TTS)
 - 🟣 Purple = PLAYING (speaking response)
 - 🩵 Cyan = LISTENING (follow-up listening window)
+- 🩵 Light blue = REARMING (sensory reboot in progress)
 - 🔴 Red = ERROR (will auto-recover)
 
 **Expressive Behavior** (per state):
@@ -77,14 +78,17 @@ The Misty controller runs on the companion device and drives the robot entirely 
 - `RECORDING_DURATION_S`: How long to record after wake word (default: `4` seconds)
 - `FOLLOWUP_LISTEN_S`: Duration of each follow-up listen clip (default: `4` seconds)
 - `FOLLOWUP_TIMEOUT_S`: Max follow-up conversation window (default: `60` seconds)
-- `WATCHDOG_IDLE_TIMEOUT_S`: Time before watchdog soft-resets keyphrase (default: `120` seconds)
+- `WATCHDOG_IDLE_TIMEOUT_S`: Time before watchdog soft-resets keyphrase (default: `60` seconds)
 - `WATCHDOG_ESCALATE_TIMEOUT_S`: Time before watchdog escalates recovery (default: `60` seconds)
 
-**Keyphrase Watchdog**:
+**Sensory Reboot on Re-arm**:
+After each conversation ends, `_rearm()` performs a sensory-services-only reboot (`POST /api/reboot {"SensoryServices": true, "Core": false}`) to fully reset the Snapdragon 410 audio subsystem. This adds ~20s dead time but is the only reliable way to restore keyphrase recognition after recording+playback cycles (#28). During reboot, Misty shows a gear icon face (`e_SystemGearPrompt.jpg`) and light-blue LED (`0, 100, 255`).
+
+**Keyphrase Watchdog** (safety net):
 The Snapdragon 410 sensory services silently stop firing `KeyPhraseRecognized` events while the REST API still returns "Success". The watchdog detects this and auto-recovers:
-1. **Soft reset** (after 2 min in IDLE with no wake events): 🟡 yellow LED → cancel skills → stop/start keyphrase
-2. **Sensory reboot** (if soft reset fails after 1 min): 🔴 red LED → reboot sensory services only
-3. **Full reboot** (if sensory reboot fails after 1 min): 🔴 red LED → full Core+Sensory reboot
+1. **Soft reset** (after 60s in IDLE with no wake events): 🟡 yellow LED → cancel skills → stop/start keyphrase
+2. **Sensory reboot** (if soft reset fails after 60s): 🔴 red LED → reboot sensory services only
+3. **Full reboot** (if sensory reboot fails after 60s): 🔴 red LED → full Core+Sensory reboot
 
 The watchdog only triggers when in IDLE state. It uses separate timestamps for actual wake events vs recovery attempts to avoid false positives. Health checks run every 10s.
 
