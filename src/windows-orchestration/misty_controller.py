@@ -26,6 +26,7 @@ import websocket
 from enum import Enum
 from dataclasses import dataclass
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ============================================================================
 # CONFIGURATION
@@ -38,7 +39,7 @@ ORCHESTRATION_URL = os.getenv("ORCHESTRATION_URL", "http://10.0.0.58:5000")
 RECORDING_DURATION_S = float(os.getenv("RECORDING_DURATION_S", "4"))
 RECORDING_FILENAME = "foundry_input.wav"
 RESPONSE_FILENAME = "foundry_response.wav"
-REARM_DELAY_S = 1.0  # delay after playback before re-arming wake word
+REARM_DELAY_S = 3.0  # delay after playback before re-arming wake word (increased from 1.0 for reliability)
 FOLLOWUP_LISTEN_S = float(os.getenv("FOLLOWUP_LISTEN_S", "4"))  # seconds to listen for follow-up
 FOLLOWUP_TIMEOUT_S = float(os.getenv("FOLLOWUP_TIMEOUT_S", "60"))  # max follow-up window
 FOLLOWUP_SILENCE_THRESHOLD = 1000  # audio bytes below this = silence (no speech)
@@ -47,7 +48,7 @@ WS_RECONNECT_MAX_S = 30.0
 HEALTH_CHECK_INTERVAL_S = 10.0  # reduced from 30s for watchdog responsiveness
 
 # Keyphrase watchdog — detects silent failures and auto-recovers
-WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", "120"))  # 2 min after rearm with no wake event
+WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", "60"))  # 1 min after rearm with no wake event
 WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", "60"))  # 1 min after recovery attempt
 
 # Battery thresholds (as fractions 0.0–1.0)
@@ -753,8 +754,8 @@ class MistyController:
 
         play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
 
-        # Wait for playback to finish
-        time.sleep(play_duration + 0.5)
+        # Wait for playback to finish (generous buffer — no completion callback from Misty)
+        time.sleep(play_duration + 2.0)
 
         elapsed = time.time() - turn_start
         logger.info(f"[Turn {turn}] Exchange complete in {elapsed:.1f}s")
@@ -840,11 +841,23 @@ class MistyController:
     def _rearm(self):
         self.set_state(State.REARMING)
         self.move_head(pitch=0, roll=0, yaw=0, velocity=40)  # center head
+
+        # Explicit audio resource cleanup before re-arming
+        self.stop_recording()
+        time.sleep(0.5)
+
+        # Soft re-arm: WS re-subscribe + keyphrase restart.
+        # Sensory reboot on every re-arm was DEGRADING the audio subsystem —
+        # repeated sensory reboots cause Misty's mic to return empty recordings (44 bytes).
+        # Instead, rely on the watchdog to escalate to sensory reboot only when needed.
+        self._ws_subscribe_keyphrase()
         time.sleep(REARM_DELAY_S)
+
         if self.start_keyphrase(force_restart=True):
             self.set_led(0, 255, 0)  # green = ready
             self.display_image("e_DefaultContent.jpg")
             self.set_state(State.IDLE)
+            logger.info("Re-arm complete — keyphrase active")
         else:
             logger.error("Failed to re-arm wake word")
             self.set_led(255, 0, 0)
@@ -926,9 +939,95 @@ class MistyController:
 
 
 # ============================================================================
+# TEST API — HTTP endpoint for programmatic test triggers
+# ============================================================================
+
+CONTROLLER_API_PORT = int(os.getenv("CONTROLLER_API_PORT", "5001"))
+
+
+class ControllerAPIHandler(BaseHTTPRequestHandler):
+    """Minimal HTTP handler for test triggers and status queries."""
+
+    controller: "MistyController" = None  # set before server starts
+
+    def log_message(self, format, *args):
+        logger.debug(f"API: {format % args}")
+
+    def _send_json(self, status: int, data: dict):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
+
+    def do_GET(self):
+        if self.path == "/api/status":
+            ctrl = self.controller
+            battery = ctrl.get_battery_snapshot()
+            self._send_json(200, {
+                "state": ctrl.get_state().name,
+                "turn_id": ctrl.turn_id,
+                "battery_percent": round(battery.charge_percent * 100),
+                "battery_charging": battery.is_charging,
+                "uptime_s": round(time.time() - ctrl._start_time) if hasattr(ctrl, "_start_time") else None,
+            })
+        else:
+            self._send_json(404, {"error": "not_found"})
+
+    def do_POST(self):
+        if self.path == "/api/test/trigger":
+            ctrl = self.controller
+            state = ctrl.get_state()
+
+            if state != State.IDLE:
+                self._send_json(409, {
+                    "error": "not_idle",
+                    "state": state.name,
+                    "message": f"Controller is in {state.name} state, must be IDLE to trigger",
+                })
+                return
+
+            # Simulate wake word event — start a conversation turn
+            # Stop keyphrase first (normally auto-stopped on wake word detection)
+            logger.info("[Test API] Triggering conversation turn via test endpoint")
+            ctrl.misty_post("/api/audio/keyphrase/stop")
+            time.sleep(0.5)
+
+            ctrl.last_activity_time = time.time()
+            ctrl._last_wake_event_time = time.time()
+            ctrl._is_dimmed = False
+            ctrl._watchdog_recovery_level = 0
+
+            # Run conversation in worker thread (same as wake word handler)
+            ctrl.turn_id += 1
+            t = threading.Thread(
+                target=ctrl._handle_conversation_turn,
+                name=f"turn-{ctrl.turn_id}",
+                daemon=True,
+            )
+            t.start()
+
+            self._send_json(200, {
+                "status": "triggered",
+                "turn_id": ctrl.turn_id,
+                "message": "Conversation turn started — Misty is recording",
+            })
+        else:
+            self._send_json(404, {"error": "not_found"})
+
+
+# ============================================================================
 # ENTRY POINT
 # ============================================================================
 
 if __name__ == "__main__":
     controller = MistyController()
+    controller._start_time = time.time()
+
+    # Start test API server in background thread
+    ControllerAPIHandler.controller = controller
+    api_server = HTTPServer(("0.0.0.0", CONTROLLER_API_PORT), ControllerAPIHandler)
+    api_thread = threading.Thread(target=api_server.serve_forever, name="api-server", daemon=True)
+    api_thread.start()
+    logger.info(f"Test API server on port {CONTROLLER_API_PORT}")
+
     controller.start()

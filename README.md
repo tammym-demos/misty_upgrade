@@ -207,7 +207,9 @@ See [IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md) for the full bui
 
 | Issue | Summary |
 |-------|---------|
-| [#22](https://github.com/tammym-demos/misty_upgrade/issues/22) | Keyphrase silently fails after conversation cycle — watchdog auto-recovers but with ~2 min downtime |
+| [#28](https://github.com/tammym-demos/misty_upgrade/issues/28) | Keyphrase re-arm: proactive sensory reboot after each conversation (~20s reset) |
+| [#27](https://github.com/tammym-demos/misty_upgrade/issues/27) | STT accuracy: beam_size=5 + VAD applied, whisper-tiny still garbles follow-ups |
+| [#22](https://github.com/tammym-demos/misty_upgrade/issues/22) | Keyphrase silently fails after conversation — mitigated by #28 sensory reboot |
 | [#21](https://github.com/tammym-demos/misty_upgrade/issues/21) | End-to-end latency ~23s (target <6s) — TTS is 82% of pipeline |
 | [#24](https://github.com/tammym-demos/misty_upgrade/issues/24) | LLM ignores brevity instructions, generates verbose responses |
 | [#20](https://github.com/tammym-demos/misty_upgrade/issues/20) | Fixed 4s recording — needs voice activity detection |

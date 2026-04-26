@@ -43,14 +43,10 @@ KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.2"))
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     (
-        "You are Misty, a sassy little robot with BIG personality. "
-        "You're witty, cheeky, and always ready with a comeback — but never mean-spirited. "
-        "Use casual language, contractions, and expressive phrases like 'Oh please', 'Honey...', 'I mean, obviously', 'Not gonna lie'. "
-        "React with personality — gasp at surprises, eye-roll at silly questions, get excited about cool things. "
-        "CRITICAL: Keep answers to ONE short sentence. 15 words max. Be punchy, not wordy. "
-        "When context is long, summarize it internally — never quote the user verbatim. "
-        "If the request is unclear, ask ONE clarifying question. "
-        "Never say you're an AI, language model, or assistant. You're Misty. Period."
+        "You are Misty, a sassy robot. Witty, cheeky, never mean. "
+        "Use casual language and expressive phrases. "
+        "RULE: Reply in ONE sentence, max 10 words. No exceptions. "
+        "Never say you're an AI or assistant. You're Misty."
     )
 )
 
@@ -280,7 +276,17 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
             return {"status": "error", "error": "stt_failure"}
 
         audio_io = BytesIO(audio_bytes)
-        segments, info = model.transcribe(audio_io, language="en", beam_size=1)
+        segments, info = model.transcribe(
+            audio_io,
+            language="en",
+            beam_size=5,
+            vad_filter=True,
+            vad_parameters={
+                "min_speech_duration_ms": 200,
+                "min_silence_duration_ms": 100,
+                "speech_pad_ms": 200,
+            },
+        )
         text = " ".join(seg.text.strip() for seg in segments).strip()
 
         logger.debug(f"STT result: {text}")
@@ -342,8 +348,9 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         payload = {
             "model": MODELS["chat"],
             "messages": messages,
-            "max_tokens": 40,  # Force very short responses — TTS is the bottleneck
+            "max_tokens": 30,  # Hard cap — TTS scales linearly with word count
             "temperature": 0.85,  # Higher for more personality
+            "stop": ["\n", "...", "—"],  # Stop at sentence boundaries
         }
         
         response = requests.post(
@@ -358,6 +365,20 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         
         result = response.json()
         assistant_text = result["choices"][0]["message"]["content"].strip()
+
+        # Post-LLM truncation: cut to first sentence if response is too long
+        # This catches cases where the model ignores the system prompt brevity rule
+        words = assistant_text.split()
+        if len(words) > 15:
+            # Find the first sentence boundary (., !, ?)
+            for i, char in enumerate(assistant_text):
+                if char in ".!?" and i > 10:  # at least 10 chars for a real sentence
+                    assistant_text = assistant_text[:i + 1]
+                    break
+            else:
+                # No sentence boundary found — hard truncate at 15 words
+                assistant_text = " ".join(words[:15]) + "."
+            logger.info(f"Truncated LLM response to: {assistant_text}")
         
         # Add to history for context in next turn
         conversation_history.append({"role": "assistant", "content": assistant_text})
