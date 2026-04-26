@@ -47,9 +47,7 @@ Misty II's onboard Snapdragon 820 + 410 (2 GB RAM) cannot run modern inference w
 
 ```
 ├── src/
-│   ├── misty-skill/                    # Legacy JavaScript skill (deprecated — kept for reference)
-│   │   ├── FoundryLocalSkill.json      #   Skill metadata
-│   │   └── FoundryLocalSkill.js        #   On-robot skill code (not used in current architecture)
+│   └── windows-orchestration/          # Companion device services
 │   │
 │   └── windows-orchestration/          # Python services on companion device
 │       ├── orchestration_service.py    #   STT → LLM → TTS pipeline (~500 LOC)
@@ -57,7 +55,7 @@ Misty II's onboard Snapdragon 820 + 410 (2 GB RAM) cannot run modern inference w
 │       ├── requirements.txt            #   Dependencies (Flask, requests, websocket-client, faster-whisper)
 │       └── .env.example                #   Configuration template
 │
-├── misty-skills-backup/                # Backup of deleted on-robot skills
+├── misty-skills-backup/                # Backup of legacy JavaScript skills and deleted on-robot skills
 │   ├── README.md                       #   Why skills were removed, restoration notes
 │   └── all_skills_metadata.json        #   Metadata for all 11 skills (pre-cleanup)
 │

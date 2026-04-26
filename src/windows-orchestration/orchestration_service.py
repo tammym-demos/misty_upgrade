@@ -123,7 +123,12 @@ conversation_history = []
 # ============================================================================
 
 app = Flask(__name__)
-CORS(app)
+CORS(app, origins=[
+    "http://localhost:5000", "http://127.0.0.1:5000",
+    "http://localhost:5001", "http://127.0.0.1:5001",
+    "http://10.0.0.44",    # Misty
+    "http://10.0.0.58:*",  # Companion device
+])
 
 @app.before_request
 def log_request():
@@ -181,6 +186,10 @@ def orchestrate():
         
         audio_file = request.files['file']
         audio_bytes = audio_file.read()
+
+        # Security: limit upload size (10MB max for WAV audio)
+        if len(audio_bytes) > 10 * 1024 * 1024:
+            return jsonify({"status": "error", "error": "file_too_large"}), 413
         
         # Step 1: Speech-to-Text
         stt_start = time.time()
@@ -439,6 +448,25 @@ def _get_pyttsx3():
         return None
 
 
+import glob as glob_module
+
+
+MAX_AUDIO_FILES = 50  # Keep at most 50 response files on disk
+
+
+def _cleanup_old_audio():
+    """Remove oldest audio files when exceeding MAX_AUDIO_FILES."""
+    try:
+        files = sorted(
+            glob_module.glob(os.path.join("responses", "response_*.wav")),
+            key=os.path.getctime, reverse=True
+        )
+        for f in files[MAX_AUDIO_FILES:]:
+            os.remove(f)
+    except Exception:
+        pass  # Non-critical — don't fail TTS over cleanup
+
+
 def text_to_speech(text: str, start_time: float) -> Dict[str, Any]:
     """Convert text to speech using kokoro-onnx (primary) or pyttsx3 (fallback)."""
     try:
@@ -450,6 +478,8 @@ def text_to_speech(text: str, start_time: float) -> Dict[str, Any]:
             return {"status": "error", "error": "timeout"}
 
         os.makedirs("responses", exist_ok=True)
+        # Clean up old audio files to prevent disk accumulation
+        _cleanup_old_audio()
         audio_filename = f"response_{int(time.time() * 1000)}.wav"
         audio_path = os.path.join("responses", audio_filename)
 
@@ -493,10 +523,16 @@ def text_to_speech(text: str, start_time: float) -> Dict[str, Any]:
 def get_audio(filename):
     """Retrieve generated response audio."""
     try:
-        audio_path = os.path.join("responses", filename)
-        
+        # Security: prevent path traversal
+        if not filename or "/" in filename or "\\" in filename or ".." in filename:
+            return jsonify({"error": "invalid_filename"}), 400
+        audio_path = os.path.abspath(os.path.join("responses", filename))
+        base_path = os.path.abspath("responses")
+        if not audio_path.startswith(base_path):
+            return jsonify({"error": "invalid_filename"}), 400
+
         if not os.path.exists(audio_path):
-            logger.error(f"Audio file not found: {audio_path}")
+            logger.error(f"Audio file not found: {filename}")
             return jsonify({"error": "not_found"}), 404
         
         return send_file(audio_path, mimetype='audio/wav')
@@ -517,6 +553,8 @@ def fallback_tts():
         
         if not text:
             return jsonify({"status": "error", "error": "no_text"}), 400
+        if len(text) > 500:
+            return jsonify({"status": "error", "error": "text_too_long"}), 400
         
         result = text_to_speech(text, time.time())
         
