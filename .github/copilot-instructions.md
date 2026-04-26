@@ -160,11 +160,12 @@ The controller still calls `_cancel_all_skills()` on WebSocket connect as a safe
 - **Recording auto-stops keyphrase** — they cannot run simultaneously.
 - **Always stop-then-start keyphrase** when re-arming (stale state causes silent failures).
 - Use a **1-second delay** between stop and start calls.
-- **Sensory reboot on re-arm**: After each conversation ends, `_rearm()` performs a **sensory-services-only reboot** (`POST /api/reboot {"SensoryServices": true, "Core": false}`) to fully reset the Snapdragon 410 audio subsystem. This adds ~20s dead time but is the only reliable way to restore keyphrase recognition after recording+playback cycles. During reboot, Misty shows a gear icon face and light-blue LED. See #28.
+- **Soft re-arm**: After each conversation ends, `_rearm()` performs a **soft re-arm** (WS re-subscribe + stop/start keyphrase + 3s delay). No sensory reboot.
+- **⚠️ NEVER use sensory-only reboots** (`POST /api/reboot {"SensoryServices": true, "Core": false}`). They permanently break Misty's microphone until physical power cycle. See #33. This was discovered during autonomous testing — repeated sensory reboots cause the Snapdragon 410 audio subsystem to return 44-byte empty WAV files.
 - **Silent keyphrase failure**: The Snapdragon 410 sensory services can silently stop firing `KeyPhraseRecognized` WebSocket events while REST API still returns "Success". A **keyphrase watchdog** in the controller auto-detects and recovers:
-  1. **Soft reset** (after 60s): yellow LED flash → cancel skills → stop/start keyphrase
-  2. **Sensory reboot** (after +60s): red LED → `POST /api/reboot {"SensoryServices": true, "Core": false}`
-  3. **Full reboot** (after +60s): red LED → `POST /api/reboot {"Core": true, "SensoryServices": true}`
+  1. **Soft reset** (after 300s): yellow LED flash → cancel skills → stop/start keyphrase
+  2. **Second soft reset** (after +120s): darker yellow LED → repeat
+  3. **Full reboot** (after +120s): red LED → `POST /api/reboot {"Core": true, "SensoryServices": true}`
 
 ## Foundry Local API
 
@@ -190,9 +191,9 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 ## Key Conventions
 
 - **Latency SLO**: p50 < 3s, p95 < 6s end-to-end (aspirational — currently achieving ~23s, see #21). The orchestration service logs per-stage timing: `[Pipeline Xms] STT=X LLM=X TTS=X history=N`. Measured breakdown: STT ~420ms, LLM ~1200ms, TTS ~6000ms. TTS scales linearly with response length — keep `max_tokens` low (currently 40).
-- **Misty controller state machine**: DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING → PROCESSING → PLAYING →]* REARMING (sensory reboot ~20s) → IDLE. After each response, enters LISTENING state (cyan LED) for up to 60s of follow-up conversation without requiring wake word. Silence ends the loop. Re-arm includes a sensory-services-only reboot to reliably reset the Snapdragon 410 audio subsystem (#28). IDLE ↔ CHARGING (auto-enters at 10% battery, exits at 25%+charging). All state transitions are logged.
-- **LED color scheme**: 🟢 Green = ready/idle, 🟠 Orange = recording, 🔵 Blue = processing, 🟣 Purple = playing response, 🩵 Cyan = follow-up listening, 🩵 Light blue = sensory reboot/re-arming, 🟡 Yellow = watchdog soft reset / low battery warning, ⚫ Off = charging mode, 🔴 Red = error / watchdog reboot.
-- **Keyphrase watchdog**: Detects silent keyphrase failure (Snapdragon 410 bug, see #22) and auto-recovers with 3-level escalation: soft reset (60s) → sensory reboot (+60s) → full reboot (+60s). Only active in IDLE state. Configurable via `WATCHDOG_IDLE_TIMEOUT_S` and `WATCHDOG_ESCALATE_TIMEOUT_S` env vars. Health check runs every 10s. The watchdog is a safety net — the primary fix is the proactive sensory reboot in `_rearm()` after each conversation (#28).
+- **Misty controller state machine**: DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING → PROCESSING → PLAYING →]* REARMING (soft re-arm ~3s) → IDLE. After each response, enters LISTENING state (cyan LED) for up to 60s of follow-up conversation without requiring wake word. Silence ends the loop. Re-arm uses soft reset only (WS re-subscribe + keyphrase restart). IDLE ↔ CHARGING (auto-enters at 10% battery, exits at 25%+charging). All state transitions are logged.
+- **LED color scheme**: 🟢 Green = ready/idle, 🟠 Orange = recording, 🔵 Blue = processing, 🟣 Purple = playing response, 🩵 Cyan = follow-up listening, 🟡 Yellow = watchdog soft reset / low battery warning, ⚫ Off = charging mode, 🔴 Red = error / watchdog full reboot.
+- **Keyphrase watchdog**: Detects silent keyphrase failure (Snapdragon 410 bug, see #22) and auto-recovers with 3-level escalation: soft reset (300s) → second soft reset (+120s) → full reboot (+120s). **Never uses sensory-only reboot** (permanently breaks mic, see #33). Only active in IDLE state. Configurable via `WATCHDOG_IDLE_TIMEOUT_S` and `WATCHDOG_ESCALATE_TIMEOUT_S` env vars. Health check runs every 10s.
 - **TTS fallback chain**: Kokoro-ONNX is primary TTS (speed 1.2x). If unavailable, pyttsx3 (Windows SAPI5) is used as fallback. Both are lazily initialized. The API response includes `"ttsFallback": true` when fallback is used.
 - **Conversation history**: Maintained in-memory, capped at the last 6 messages (3 turns). System prompt is prepended on every call but not stored in history. See #19 for smarter history approaches.
 - **System prompt**: Instructs Misty to keep responses to ONE short sentence, 15 words max. LLM (Phi-3.5-mini) often exceeds this — see #24.
@@ -205,11 +206,12 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 
 | Issue | Summary | Status |
 |-------|---------|--------|
-| #28 | Keyphrase re-arm: proactive sensory reboot after each conversation | Open — implemented, testing |
-| #22 | Keyphrase silently fails after conversation cycle — watchdog recovers but ~60s downtime | Open, mitigated by #28 |
+| #33 | **CRITICAL**: Sensory-only reboot permanently breaks mic until physical power cycle | Open — sensory reboot removed from all code paths |
+| #28 | Keyphrase re-arm: sensory reboot approach **abandoned** (breaks mic, see #33) | Closed — reverted to soft re-arm |
+| #22 | Keyphrase silently fails after conversation cycle — watchdog recovers (300s timeout) | Open, soft re-arm only |
 | #27 | STT accuracy: beam_size=5 + VAD applied, whisper-tiny still garbles follow-ups | Open |
-| #21 | End-to-end latency ~23s (TTS is 82% of pipeline) — target <10s | Open |
-| #24 | LLM ignores brevity instructions, generates 25-35 words despite "15 max" | Open |
+| #21 | End-to-end latency ~7s (TTS is 70% of pipeline) — target <3s | Open |
+| #24 | LLM ignores brevity — max_tokens=30, post-LLM truncation, tighter prompt applied | Mitigated via PR #31 |
 | #20 | Fixed 4s recording misses end of speech / records silence | Open |
 | #19 | Conversation history grows unbounded per session, increases LLM latency | Open |
 | #23 | Unicode arrow in log messages crashes on Windows cp1252 console | Fixed |

@@ -230,6 +230,16 @@ class AutonomousTestHarness:
         except Exception as e:
             errors.append(f"Misty unreachable: {e}")
 
+        # Check Misty mic health
+        try:
+            r = requests.get(f"{CONTROLLER_API_URL}/api/mic/health", timeout=10)
+            mic = r.json()
+            if not mic.get("mic_healthy"):
+                errors.append("Mic broken — needs physical power cycle (see #33)")
+                logger.error("MIC BROKEN — all test cycles will fail until physical power cycle")
+        except Exception as e:
+            logger.warning(f"Mic health check skipped: {e}")
+
         if errors:
             for e in errors:
                 logger.error(f"Service check failed: {e}")

@@ -331,15 +331,28 @@ class MistyController:
         self._evaluate_battery_thresholds(battery_snapshot)
 
     def _log_battery(self, b: BatteryState):
-        logger.info(
-            f"Battery: {b.charge_percent*100:.0f}% | {b.voltage:.1f}V | "
-            f"charging={b.is_charging} | health={b.health_percent*100:.0f}% | "
-            f"temp={b.temperature:.0f}°C"
+        # Only log battery when values change significantly (reduce log noise)
+        last = getattr(self, "_last_logged_battery", None)
+        charge_pct = round(b.charge_percent * 100)
+        should_log = (
+            last is None
+            or abs(charge_pct - last.get("charge", 0)) >= 5
+            or b.is_charging != last.get("charging")
+            or abs(b.voltage - last.get("voltage", 0)) >= 0.3
         )
+        if should_log:
+            logger.info(
+                f"Battery: {charge_pct}% | {b.voltage:.1f}V | "
+                f"charging={b.is_charging} | health={b.health_percent*100:.0f}% | "
+                f"temp={b.temperature:.0f}\u00b0C"
+            )
+            self._last_logged_battery = {
+                "charge": charge_pct, "charging": b.is_charging, "voltage": b.voltage
+            }
         if b.temperature >= BATTERY_TEMP_THROTTLE_C:
-            logger.warning(f"Battery temperature {b.temperature:.0f}°C exceeds throttle threshold ({BATTERY_TEMP_THROTTLE_C}°C)")
+            logger.warning(f"Battery temperature {b.temperature:.0f}\u00b0C exceeds throttle threshold ({BATTERY_TEMP_THROTTLE_C}\u00b0C)")
         elif b.temperature >= BATTERY_TEMP_WARN_C:
-            logger.warning(f"Battery temperature {b.temperature:.0f}°C exceeds warning threshold ({BATTERY_TEMP_WARN_C}°C)")
+            logger.warning(f"Battery temperature {b.temperature:.0f}\u00b0C exceeds warning threshold ({BATTERY_TEMP_WARN_C}\u00b0C)")
 
     def _evaluate_battery_thresholds(self, b: BatteryState):
         """Check battery levels and trigger state changes as needed."""
