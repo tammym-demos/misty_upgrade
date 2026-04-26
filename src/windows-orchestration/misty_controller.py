@@ -405,26 +405,51 @@ class MistyController:
                 threading.Timer(2.0, self._restore_idle_led).start()
 
         elif self._watchdog_recovery_level == 1:
-            # Level 1 → 2: Sensory services reboot
+            # Level 1 → 2: Second soft reset (skip sensory reboot — it breaks mic permanently, see #33)
             if idle_since > WATCHDOG_ESCALATE_TIMEOUT_S:
-                logger.error("Watchdog: soft reset failed — rebooting sensory services")
-                self.set_led(255, 0, 0)  # red flash
-                self.misty_post("/api/reboot", {"Core": False, "SensoryServices": True})
+                logger.warning("Watchdog: first soft reset failed — trying second soft reset")
+                self.set_led(255, 100, 0)  # darker yellow
+                self._cancel_all_skills()
+                self.start_keyphrase(force_restart=True)
                 self._watchdog_recovery_level = 2
                 self._watchdog_recovery_time = time.time()
-                # Sensory reboot may kill WS — let _on_ws_close/reconnect handle it
-                # If WS stays alive, we'll re-arm keyphrase on next health check cycle
+                threading.Timer(2.0, self._restore_idle_led).start()
 
         elif self._watchdog_recovery_level == 2:
-            # Level 2 → full reboot (nuclear option)
+            # Level 2 → full reboot (nuclear option, skips sensory-only reboot)
+            # NOTE: Sensory-only reboot permanently breaks the mic until physical power cycle (#33)
             if idle_since > WATCHDOG_ESCALATE_TIMEOUT_S:
-                logger.critical("Watchdog: sensory reboot failed — full reboot")
+                logger.critical("Watchdog: soft resets failed — full reboot (last resort)")
                 self.set_led(255, 0, 0)
                 self.misty_post("/api/reboot", {"Core": True, "SensoryServices": True})
                 # Full reboot kills WS — controller auto-reconnects via existing logic
                 # Reset watchdog so it starts fresh after reboot
                 self._watchdog_recovery_level = 0
                 self._watchdog_recovery_time = time.time()
+
+    def check_mic_health(self) -> bool:
+        """Quick mic health check: record 1s and verify we get real audio data.
+        Returns True if mic is working, False if it returns empty recordings."""
+        try:
+            resp = self.misty_post("/api/audio/record/start", {"FileName": "mic_health_check.wav"})
+            if not resp:
+                return False
+            time.sleep(1.5)
+            self.misty_post("/api/audio/record/stop")
+            time.sleep(0.5)
+            audio = self.misty_get("/api/audio", params={"FileName": "mic_health_check.wav", "Base64": "true"})
+            if not audio or "result" not in audio:
+                return False
+            b64 = audio["result"].get("base64", "")
+            byte_count = len(b64) * 3 // 4 if b64 else 0
+            if byte_count < 100:
+                logger.error(f"Mic health check FAILED: only {byte_count} bytes (mic likely broken, needs physical power cycle — see #33)")
+                return False
+            logger.info(f"Mic health check passed: {byte_count} bytes")
+            return True
+        except Exception as e:
+            logger.error(f"Mic health check error: {e}")
+            return False
 
     def get_battery_snapshot(self) -> BatteryState:
         with self.battery_lock:
@@ -969,6 +994,13 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
                 "battery_percent": round(battery.charge_percent * 100),
                 "battery_charging": battery.is_charging,
                 "uptime_s": round(time.time() - ctrl._start_time) if hasattr(ctrl, "_start_time") else None,
+            })
+        elif self.path == "/api/mic/health":
+            ctrl = self.controller
+            healthy = ctrl.check_mic_health()
+            self._send_json(200 if healthy else 503, {
+                "mic_healthy": healthy,
+                "message": "Mic OK" if healthy else "Mic broken — needs physical power cycle (see #33)",
             })
         else:
             self._send_json(404, {"error": "not_found"})
