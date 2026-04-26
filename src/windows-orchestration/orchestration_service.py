@@ -333,13 +333,17 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
 
         # Build message history
         conversation_history.append({"role": "user", "content": user_text})
-        # Keep history limited to last 6 messages (3 turns) to control LLM latency
-        if len(conversation_history) > 6:
-            del conversation_history[:-6]
+        # Keep history limited to last 4 messages (2 turns) to prevent brevity drift
+        if len(conversation_history) > 4:
+            del conversation_history[:-4]
 
         url = f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions"
         # Prepend system prompt on every call; not stored in history
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
+
+        # Inject brevity reminder when history is building up (model forgets rules)
+        if len(conversation_history) > 2:
+            messages.append({"role": "system", "content": "Remember: max 10 words, ONE short sentence."})
 
         # Enforce maximum total context character budget (trim oldest turns first)
         if MAX_CONTEXT_CHARS > 0:
@@ -359,7 +363,7 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         payload = {
             "model": MODELS["chat"],
             "messages": messages,
-            "max_tokens": 30,  # Hard cap — TTS scales linearly with word count
+            "max_tokens": 20,  # Hard cap — keeps responses ≤15 words for fast TTS
             "temperature": 0.85,  # Higher for more personality
             "stop": ["\n", "...", "—"],  # Stop at sentence boundaries
         }
@@ -380,15 +384,15 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         # Post-LLM truncation: cut to first sentence if response is too long
         # This catches cases where the model ignores the system prompt brevity rule
         words = assistant_text.split()
-        if len(words) > 15:
+        if len(words) > 10:
             # Find the first sentence boundary (., !, ?)
             for i, char in enumerate(assistant_text):
                 if char in ".!?" and i > 10:  # at least 10 chars for a real sentence
                     assistant_text = assistant_text[:i + 1]
                     break
             else:
-                # No sentence boundary found — hard truncate at 15 words
-                assistant_text = " ".join(words[:15]) + "."
+                # No sentence boundary found — hard truncate at 10 words
+                assistant_text = " ".join(words[:10]) + "."
             logger.info(f"Truncated LLM response to: {assistant_text}")
         
         # Add to history for context in next turn
