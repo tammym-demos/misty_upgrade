@@ -39,11 +39,11 @@ MISTY_IP = os.getenv("MISTY_IP", "10.0.0.44")
 MISTY_BASE = f"http://{MISTY_IP}"
 MISTY_WS = f"ws://{MISTY_IP}/pubsub"
 ORCHESTRATION_URL = os.getenv("ORCHESTRATION_URL", "http://10.0.0.58:5000")
-RECORDING_DURATION_S = float(os.getenv("RECORDING_DURATION_S", "4"))
+RECORDING_DURATION_S = float(os.getenv("RECORDING_DURATION_S", "6"))
 RECORDING_FILENAME = "foundry_input.wav"
 RESPONSE_FILENAME = "foundry_response.wav"
 REARM_DELAY_S = 3.0  # delay after playback before re-arming wake word (increased from 1.0 for reliability)
-FOLLOWUP_LISTEN_S = float(os.getenv("FOLLOWUP_LISTEN_S", "4"))  # seconds to listen for follow-up
+FOLLOWUP_LISTEN_S = float(os.getenv("FOLLOWUP_LISTEN_S", "5"))  # seconds to listen for follow-up
 FOLLOWUP_TIMEOUT_S = float(os.getenv("FOLLOWUP_TIMEOUT_S", "60"))  # max follow-up window
 FOLLOWUP_SILENCE_THRESHOLD = 1000  # audio bytes below this = silence (no speech)
 WS_RECONNECT_BASE_S = 2.0
@@ -51,8 +51,8 @@ WS_RECONNECT_MAX_S = 30.0
 HEALTH_CHECK_INTERVAL_S = 10.0  # reduced from 30s for watchdog responsiveness
 
 # Keyphrase watchdog — detects silent failures and auto-recovers
-WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", "300"))  # 5 min after rearm with no wake event
-WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", "120"))  # 2 min after recovery attempt
+WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", "90"))  # 90s after rearm with no wake event
+WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", "60"))  # 60s after recovery attempt
 
 # Battery thresholds (as fractions 0.0–1.0)
 BATTERY_LOW_WARN = 0.20       # yellow LED warning
