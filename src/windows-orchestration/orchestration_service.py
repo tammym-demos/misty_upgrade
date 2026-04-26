@@ -6,6 +6,7 @@ Serves OpenAI-compatible endpoints for Misty skill integration.
 
 import os
 import re
+import sys
 import json
 import logging
 import subprocess
@@ -24,8 +25,8 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('orchestration.log'),
-        logging.StreamHandler()
+        logging.FileHandler('orchestration.log', encoding='utf-8'),
+        logging.StreamHandler(open(sys.stdout.fileno(), mode='w', encoding='utf-8', closefd=False))
     ]
 )
 logger = logging.getLogger(__name__)

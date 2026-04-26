@@ -13,6 +13,7 @@ Architecture:
 """
 
 import os
+import sys
 import json
 import time
 import base64
@@ -65,8 +66,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("misty_controller.log"),
-        logging.StreamHandler(),
+        logging.FileHandler("misty_controller.log", encoding="utf-8"),
+        logging.StreamHandler(open(sys.stdout.fileno(), mode="w", encoding="utf-8", closefd=False)),
     ],
 )
 logger = logging.getLogger("misty_controller")
