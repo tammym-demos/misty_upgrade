@@ -11,7 +11,7 @@
 
 ### 1. Misty Skill (FoundryLocalSkill) — DEPRECATED
 **Type**: JavaScript skill for Misty II robot (abandoned — see ADR-001)  
-**Location**: `src/misty-skill/`  
+**Location**: `misty-skills-backup/` (moved from `src/misty-skill/`)  
 **Status**: Replaced by the Misty Controller below. The on-robot JavaScript skill runtime is unreliable.
 
 ### 1b. Misty Controller (REST + WebSocket)
