@@ -7,7 +7,7 @@ This implementation integrates Misty II robot with Microsoft Foundry Local for o
 - **Windows Companion**: Inference orchestration (STT → LLM → TTS)
 - **Foundry Local**: Local inference engine (models, endpoints)
 
-**Latency SLO**: p50 < 3s, p95 < 6s from wake word to audible response
+**Latency SLO**: p50 < 3s, p95 < 6s from wake word to audible response (aspirational — currently ~23s, see #21 for optimization plan)
 
 ---
 
@@ -41,12 +41,15 @@ This implementation integrates Misty II robot with Microsoft Foundry Local for o
 
 The Misty controller runs on the companion device and drives the robot entirely via REST API + WebSocket. This replaces the on-robot JavaScript skill, which proved unreliable (see [Why Not On-Robot Skills?](#why-not-on-robot-skills) below).
 
-**State Machine**: `DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → REARMING → IDLE`
+**State Machine**: `DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING →]* REARMING → IDLE`
 
 **Functionality**:
 - Connects to Misty via WebSocket (`ws://<ip>/pubsub`) for `KeyPhraseRecognized` events
-- Issues REST API calls for recording, audio upload/download, LED, display
+- Issues REST API calls for recording, audio upload/download, LED, display, head/arm movement
 - Manages the full conversation turn cycle in a worker thread
+- **Cancels all on-robot skills** on WebSocket connect to prevent microphone interference
+- **Expressive head movement + face animations** per state (attentive→thinking→animated→warm)
+- **Follow-up listening**: after each response, enters LISTENING state for up to 60s — records short clips and sends them through the pipeline. If speech is detected, processes and responds; if silence, ends the conversation and re-arms the wake word.
 - Auto-reconnects on WebSocket disconnect with exponential backoff
 - Periodic health checks for Misty and orchestration service
 
@@ -55,12 +58,35 @@ The Misty controller runs on the companion device and drives the robot entirely 
 - 🟠 Orange = RECORDING (capturing user speech)
 - 🔵 Blue = PROCESSING (STT → LLM → TTS)
 - 🟣 Purple = PLAYING (speaking response)
+- 🩵 Cyan = LISTENING (follow-up listening window)
 - 🔴 Red = ERROR (will auto-recover)
+
+**Expressive Behavior** (per state):
+| State | Face Expression | Head Position |
+|-------|----------------|---------------|
+| RECORDING | `e_Admiration.jpg` (wide-eyed attentive) | Pitch up — eye contact |
+| PROCESSING | `e_ContentRight.jpg` (thoughtful) | Tilted to side — pondering |
+| PLAYING | `e_EcstacyHilarious.jpg` (animated) | Forward — direct engagement |
+| LISTENING | `e_Joy.jpg` (warm expectant) | Slight tilt — attentive |
+| IDLE | `e_DefaultContent.jpg` (neutral) | Centered |
+| ERROR | `e_Sadness.jpg` (sad) | — |
 
 **Key Configuration** (environment variables):
 - `MISTY_IP`: Robot IP address (default: `10.0.0.44`)
 - `ORCHESTRATION_URL`: Orchestration service URL (default: `http://10.0.0.58:5000`)
 - `RECORDING_DURATION_S`: How long to record after wake word (default: `4` seconds)
+- `FOLLOWUP_LISTEN_S`: Duration of each follow-up listen clip (default: `4` seconds)
+- `FOLLOWUP_TIMEOUT_S`: Max follow-up conversation window (default: `60` seconds)
+- `WATCHDOG_IDLE_TIMEOUT_S`: Time before watchdog soft-resets keyphrase (default: `120` seconds)
+- `WATCHDOG_ESCALATE_TIMEOUT_S`: Time before watchdog escalates recovery (default: `60` seconds)
+
+**Keyphrase Watchdog**:
+The Snapdragon 410 sensory services silently stop firing `KeyPhraseRecognized` events while the REST API still returns "Success". The watchdog detects this and auto-recovers:
+1. **Soft reset** (after 2 min in IDLE with no wake events): 🟡 yellow LED → cancel skills → stop/start keyphrase
+2. **Sensory reboot** (if soft reset fails after 1 min): 🔴 red LED → reboot sensory services only
+3. **Full reboot** (if sensory reboot fails after 1 min): 🔴 red LED → full Core+Sensory reboot
+
+The watchdog only triggers when in IDLE state. It uses separate timestamps for actual wake events vs recovery attempts to avoid false positives. Health checks run every 10s.
 
 ### 2. Windows Orchestration Service (Python/Flask)
 **Location**: `src/windows-orchestration/`
@@ -79,15 +105,18 @@ The Misty controller runs on the companion device and drives the robot entirely 
 
 **Pipeline**:
 1. Receives WAV file from Misty
-2. Calls Foundry Local `/v1/audio/transcriptions` (STT — Whisper-tiny)
+2. Transcribes audio using **faster-whisper** in-process (STT — Whisper-tiny via CTranslate2)
 3. Calls Foundry Local `/v1/chat/completions` (LLM — Phi-3.5-mini)
 4. Synthesises speech locally via kokoro-onnx (TTS — Kokoro); falls back to pyttsx3/SAPI5 if unavailable
 5. Returns response audio URI to Misty
 
-> **Note:** Kokoro is **not** a Foundry Local model. It runs as a standalone
-> Python library (`kokoro-onnx`) with its own ONNX model file and voice pack
-> downloaded from HuggingFace. See the [TTS Architecture](#tts-architecture)
-> section below for details.
+> **Note:** STT and TTS both run **in-process** in the orchestration service —
+> they are **not** Foundry Local models. Foundry Local does not expose a REST
+> endpoint for Whisper. We use [faster-whisper](https://github.com/SYSTRAN/faster-whisper)
+> (CTranslate2) which loads the whisper-tiny model directly in the Python process.
+> The model is auto-downloaded from HuggingFace on first run (~75 MB).
+> Kokoro TTS runs as a standalone Python library (`kokoro-onnx`) with its own
+> ONNX model file and voice pack. See [TTS Architecture](#tts-architecture) below.
 
 **Error Handling**:
 - Timeout detection at each stage
@@ -112,12 +141,15 @@ The Misty controller runs on the companion device and drives the robot entirely 
 
 **Model Stack (Locked v1)**:
 - Chat: `phi-3.5-mini` — Lightweight LLM (~3.8B params) — **via Foundry Local**
-- STT: `whisper-tiny` — Fast speech-to-text — **via Foundry Local**
+- STT: `whisper-tiny` — Fast speech-to-text — **via faster-whisper (in-process, not Foundry)**
 
-**Endpoints Used**:
+**Foundry Local Endpoints Used**:
 - `POST /v1/chat/completions` — OpenAI-compatible LLM (use full model ID, e.g., `Phi-3.5-mini-instruct-openvino-gpu:2`)
-- `POST /v1/audio/transcriptions` — Speech-to-text (use full model ID, e.g., `openai-whisper-tiny-generic-cpu:3`)
 - `GET /openai/models` — List loaded models (returns array of model ID strings)
+
+> **Important:** Foundry Local does **not** expose a REST endpoint for Whisper STT.
+> The orchestration service uses `faster-whisper` (CTranslate2) to run whisper-tiny
+> in-process. The Foundry whisper-tiny download is not required for the current architecture.
 
 > **Important:** Foundry's `service status` CLI reports a URL like `http://127.0.0.1:64722/openai/status`.
 > The orchestration service must strip the `/openai/status` path and use only `http://127.0.0.1:64722`
@@ -190,13 +222,15 @@ foundry service status
 ⚠️ Requires internet. Downloads can take 5-15 minutes.
 
 ```powershell
-# Download the two models served by Foundry Local
+# Download the chat model served by Foundry Local
 foundry model download phi-3.5-mini
-foundry model download whisper-tiny
 
-# Load them into the running service
+# Load it into the running service
 foundry model load phi-3.5-mini
-foundry model load whisper-tiny
+
+# Note: whisper-tiny is NOT served by Foundry Local.
+# The orchestration service uses faster-whisper (CTranslate2) which
+# auto-downloads the model from HuggingFace on first run (~75 MB).
 ```
 
 **1.5 Verify Foundry Local Models**
@@ -337,7 +371,9 @@ The controller will:
 3. Misty beeps and LED turns **orange** (recording for 4 seconds)
 4. LED turns **blue** (processing via orchestration)
 5. LED turns **purple** (playing response audio)
-6. LED returns to **green** (ready for next interaction)
+6. LED turns **cyan** (follow-up listening — speak to continue, or wait for silence)
+7. If you speak: repeats steps 4-6 for the follow-up (up to 60s total)
+8. If silence: LED returns to **green** (re-armed, ready for next "Hey, Misty!")
 
 ---
 
@@ -440,30 +476,46 @@ curl http://localhost:5000/api/health
 ```
 
 ### Issue: High Latency (p95 > 6s)
-**Causes**:
-- Large model sizes
-- Network latency between laptop and Misty
-- Recording duration too long
-- Slow disk I/O for audio files
 
-**Solutions**:
-1. Verify warm-cache behavior: second request should be ~2s faster
-2. Reduce output token limit in orchestration service (line ~200)
-3. Reduce `RECORDING_DURATION_S` env var (default 4s)
-4. Use SSD for response audio storage on Windows
+> **Current state (2026-04-25):** End-to-end latency is ~23s (down from ~50s after tuning). TTS is 82% of the pipeline. See issue #21 for full optimization plan.
+
+**Measured pipeline breakdown:**
+
+| Stage | Time | Notes |
+|-------|------|-------|
+| STT (faster-whisper) | ~420ms | ✅ Fast |
+| LLM (Phi-3.5-mini) | ~1,200ms | ✅ Acceptable |
+| TTS (Kokoro-ONNX) | ~6,000ms | 🔴 Bottleneck — scales with response length |
+| Network + playback | ~15,000ms | Includes audio upload/download and playback |
+
+**Tuning applied:**
+- `max_tokens`: reduced from 150 → 100 → 40 (forces shorter responses)
+- System prompt: "ONE short sentence. 15 words max." (LLM often exceeds this — see #24)
+- Kokoro speed: 1.1x → 1.2x
+- Conversation history: capped at 6 messages (3 turns)
+
+**Further solutions (see #21):**
+1. Streaming TTS — synthesize in chunks as LLM tokens arrive
+2. Evaluate faster TTS engines (piper-tts)
+3. Pre-generate common responses
+4. Reduce `RECORDING_DURATION_S` env var (default 4s)
+5. Implement VAD to stop recording when user stops speaking (#20)
 
 ### Issue: Wake Word Not Triggering
 **Causes**:
 - Keyphrase recognition not started or in stale state
 - Misty controller not connected (check WebSocket status)
-- Interfering on-robot skills (e.g., built-in faceDetection)
-- Microphone muted
+- On-robot skills grabbing the microphone (all auto-start skills have been deleted, but check `GET /api/skills/running` to verify none are active)
+- Microphone muted or battery too low (<10%)
 
 **Solution**:
 ```powershell
 $MISTY_IP = "10.0.0.44"
 
-# Cancel any running on-robot skills (they can interfere)
+# Check for running skills (should be empty)
+Invoke-RestMethod -Uri "http://$MISTY_IP/api/skills/running"
+
+# Cancel any running on-robot skills (safety net)
 Invoke-RestMethod -Uri "http://$MISTY_IP/api/skills/cancel" -Method POST
 
 # Stop then restart keyphrase (always stop-start, never just start)
@@ -475,6 +527,10 @@ Invoke-RestMethod -Uri "http://$MISTY_IP/api/audio/keyphrase/start" -Method POST
 Invoke-RestMethod -Uri "http://$MISTY_IP/api/reboot" -Method POST `
     -ContentType "application/json" -Body '{"Core": true, "SensoryServices": true}'
 ```
+
+> **Note:** All auto-starting skills (faceDetection, kids, mistycog, MistyReads, AnnounceKnownPerson) have been deleted from Misty. The controller also calls `_cancel_all_skills()` on WebSocket connect as a safety net. If new skills are ever deployed, ensure their `StartupRules` are set to `["Manual"]` only.
+
+> **Keyphrase watchdog:** The controller now includes an automatic watchdog that detects silent keyphrase failure and self-recovers with escalating strategy (soft reset → sensory reboot → full reboot). If wake word stops working, wait up to 4 minutes for the watchdog to recover automatically before manual intervention.
 
 ### Issue: Skill Runtime Stuck (legacy — if using JS skills)
 **Symptom**: Skills deploy successfully but don't execute. LED doesn't change. No skills in running list.
@@ -488,6 +544,7 @@ We initially tried Misty's JavaScript SDK but abandoned it due to:
 - **Silent crashes**: `SkillImageUri: null` in metadata crashes skills with no error
 - **Runtime instability**: Rapid deploy/cancel cycles break the skill runtime entirely
 - **API inconsistencies**: `BroadcastMode` must be string `"off"` not boolean; `StartupRules` values undocumented
+- **Skills deleted**: All auto-start skills (faceDetection, kids, mistycog, MistyReads, AnnounceKnownPerson) have been removed. Metadata backed up to `misty-skills-backup/`
 - **No debug logging**: `/api/skills/log` endpoint returns 404 on firmware v2.0.2
 - **StartKeyPhraseRecognition crashes** inside skills — only works via REST API
 - **Unreliable event model**: Callback naming conventions (`_eventName`) are fragile
@@ -504,15 +561,16 @@ All versions are locked for v1 reproducibility:
 | Component | Model | Version | Provider | Size | Runtime |
 |-----------|-------|---------|----------|------|---------|
 | Chat | Phi-3.5-mini | latest | Microsoft/Hugging Face | ~3.8B | Foundry Local |
-| STT | Whisper-tiny | latest | OpenAI/Hugging Face | ~39M | Foundry Local |
+| STT | Whisper-tiny | latest | OpenAI/Hugging Face | ~39M | **faster-whisper** (in-process CTranslate2) |
 | TTS | Kokoro | v1.0 (ONNX) | Hugging Face | ~82M | Standalone (`kokoro-onnx`) |
 | TTS (fallback) | SAPI5 | — | Windows built-in | — | `pyttsx3` |
 
 To update model versions:
-1. For Chat/STT: Edit `MODELS` dict in `orchestration_service.py`, verify new model is available in Foundry Local
-2. For TTS: Update the Kokoro ONNX model file and voice pack, or swap the TTS backend in the `text_to_speech()` function
-3. Test latency against SLO
-4. Update this document and `plans/planWindowsFoundry.prompt.md`
+1. For Chat: Edit `MODELS` dict in `orchestration_service.py`, verify new model is available in Foundry Local
+2. For STT: Update the model name in `_get_whisper_model()` in `orchestration_service.py` (uses faster-whisper, auto-downloads from HuggingFace)
+3. For TTS: Update the Kokoro ONNX model file and voice pack, or swap the TTS backend in the `text_to_speech()` function
+4. Test latency against SLO
+5. Update this document and `plans/planWindowsFoundry.prompt.md`
 
 ---
 

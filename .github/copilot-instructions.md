@@ -16,12 +16,15 @@ The robot's hardware (Snapdragon 820 + 410, 2 GB RAM) cannot run inference — 2
 ```
 [Misty Controller]                           [Orchestration Service]
   WebSocket ← KeyPhraseRecognized               Foundry Local
-  REST → StartRecordingAudio (4s)                  ├─ STT (Whisper-tiny)
+  REST → StartRecordingAudio (4s)                  ├─ STT (faster-whisper)
   REST → GetAudio (base64)                         ├─ LLM (Phi-3.5-mini)
   HTTP POST /api/orchestrate ───────────────────►  └─ TTS (Kokoro / pyttsx3)
   HTTP GET /api/audio/<file> ◄──────────────────
   REST → SaveAudio (base64, ImmediatelyApply)
-  REST → StartKeyPhraseRecognition (re-arm)
+  ┌─ Follow-up: listen 4s, send to orchestrate
+  │  Speech detected? → repeat (up to 60s)
+  │  Silence? → fall through to re-arm
+  └→ REST → StartKeyPhraseRecognition (re-arm)
 ```
 
 ### Locked model stack (v1)
@@ -89,7 +92,7 @@ The system uses three services. They must be started in this order:
 
 **Foundry Local** runs on a dynamic port — never hardcode it. Both the orchestration service and the test suite auto-discover it by running `foundry service status` and parsing the URL. Override with the `FOUNDRY_LOCAL_HOST` env var.
 
-**Model management:** Only `phi-3.5-mini` should be loaded (`foundry service ps`). Whisper-tiny loads on demand for STT. If stray models are present from prior testing (e.g., phi-4-mini), unload them with `foundry model unload <alias>` to free resources.
+**Model management:** Only `phi-3.5-mini` should be loaded (`foundry service ps`). Whisper-tiny runs in-process via faster-whisper (not through Foundry). If stray models are present from prior testing (e.g., phi-4-mini), unload them with `foundry model unload <alias>` to free resources.
 
 **TTS (Kokoro-ONNX)** is **not** a Foundry model. It runs as a standalone Python library inside the orchestration service process, with pyttsx3 (Windows SAPI5) as fallback. TTS status is reported in `/api/diagnostics` under the `tts` key, separate from the Foundry `models` dict.
 
@@ -123,22 +126,33 @@ Key endpoints used by the controller (all at `http://<MISTY_IP>/api/`):
 | GET | `/api/audio/list` | List audio files stored on Misty |
 | GET | `/api/skills/running` | List running on-robot skills |
 | POST | `/api/skills/cancel` | Cancel all running skills |
+| GET | `/api/skills` | List all installed skills (metadata only, no source code) |
+| DELETE | `/api/skills?Skill=<uniqueId>` | Delete an installed skill |
+| POST | `/api/head` | Move head (`Pitch` -40↑ to 26↓, `Roll` -40 to 40, `Yaw` -81→ to 81←, `Velocity`) |
+| POST | `/api/arms` | Move arms (`LeftArmPosition`/`RightArmPosition` -29↑ to 90↓, `Velocity`) |
 
 **WebSocket**: `ws://<MISTY_IP>/pubsub` — subscribe to `KeyPhraseRecognized`, `BatteryCharge`, etc.
 
-### Misty SDK Gotchas
+### On-Robot Skills — Cleaned Up
+
+All auto-starting on-robot skills have been **deleted** from Misty to prevent interference with the companion-device pipeline. The `faceDetection` skill (which had `StartupRules: ["Startup", "Robot"]`) was the primary offender — it grabbed the microphone on boot and caused silent keyphrase failures. Four other skills with `Robot` startup rules were also removed.
+
+Skill metadata was backed up to `misty-skills-backup/` before deletion. Skills cannot be restored from metadata alone — they would need to be redeployed from source.
+
+The controller still calls `_cancel_all_skills()` on WebSocket connect as a safety net, but no skills should auto-start after a reboot now.
+
+### Misty SDK Gotchas (historical reference)
 
 > **We abandoned the on-robot JavaScript skill approach** in favor of REST+WebSocket control from the laptop. The skill runtime is fragile and poorly documented. These notes are preserved for reference.
 
 - **SkillImageUri: null crashes skills silently.** Remove the field entirely from the JSON metadata.
 - **BroadcastMode** must be string `"off"`, not boolean `false`.
-- **StartupRules**: `["Robot"]` auto-starts on boot and conflicts; use `["Manual"]`.
+- **StartupRules**: `["Robot"]` auto-starts on boot and conflicts; use `["Manual"]`. All auto-start skills have been deleted from Misty.
 - **Rapid deploy/cancel cycles break the skill runtime.** Reboot Misty to recover.
 - **Skills exit the "running" list** after top-level code executes but still process events. This looks like a crash but is normal.
 - **StartKeyPhraseRecognition inside skills crashes** — use REST API instead.
 - **Event callbacks** must be `_eventName()` (underscore prefix matching registered name).
 - **Skill log API** (`/api/skills/log`) returns 404 — not functional on firmware v2.0.2.
-- **Cancel all skills on startup** — the built-in `faceDetection` skill can interfere.
 
 ### Misty Keyphrase Behavior
 
@@ -146,6 +160,10 @@ Key endpoints used by the controller (all at `http://<MISTY_IP>/api/`):
 - **Recording auto-stops keyphrase** — they cannot run simultaneously.
 - **Always stop-then-start keyphrase** when re-arming (stale state causes silent failures).
 - Use a **1-second delay** between stop and start calls.
+- **Silent keyphrase failure**: The Snapdragon 410 sensory services can silently stop firing `KeyPhraseRecognized` WebSocket events while REST API still returns "Success". A **keyphrase watchdog** in the controller auto-detects and recovers:
+  1. **Soft reset** (after 2 min): yellow LED flash → cancel skills → stop/start keyphrase
+  2. **Sensory reboot** (after +1 min): red LED → `POST /api/reboot {"SensoryServices": true, "Core": false}`
+  3. **Full reboot** (after +1 min): red LED → `POST /api/reboot {"Core": true, "SensoryServices": true}`
 
 ## Foundry Local API
 
@@ -164,18 +182,31 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 - **Charging**: Two methods — wireless pad (~6-7 hours full charge) and direct wired via port on bottom near power switch (~3-4 hours, ~2× faster). Different barrel jack sizes; each has its own adapter. Robot does NOT need to be on to charge.
 - **Tally light**: Blue LED on side of head indicates camera/mic is active (PII collection indicator). Turns off when keyphrase/recording is stopped.
 - **Battery monitoring**: `GET /api/battery` returns chargePercent, healthPercent, isCharging, voltage, temperature. At very low charge (~5%), mic and keyphrase **silently fail** — APIs return success but produce no data. Minimum ~10% recommended for operation.
-- **Power saving**: When not in use, stop keyphrase, cancel skills, disable unused sensor services, and turn LED off (`{"red":0,"green":0,"blue":0}`) to reduce power draw and charge faster.
-- **Fans**: Run continuously — firmware-controlled with no API or user override. Reducing compute load (disabling unused services) is the only lever to reduce thermal output.
+- **Power saving**: When not in use, stop keyphrase, cancel skills, and turn LED off (`{"red":0,"green":0,"blue":0}`) to reduce power draw and charge faster. Note: `/api/services` endpoint is not functional on firmware v2.0.2 — cannot disable individual sensor services via API.
+- **Fans**: Run continuously — firmware-controlled with no API or user override.
 - **Firmware**: v2.0.2.140 / robot OS 2.0.2.11660. Misty Robotics was acquired by Furhat Robotics; no further firmware updates expected. This is the final firmware.
 
 ## Key Conventions
 
-- **Latency SLO**: p50 < 3s, p95 < 6s end-to-end. The orchestration service enforces per-stage latency budgets (STT: 1500ms, LLM: 2000ms, TTS: 1500ms). Keep responses short (`max_tokens: 150`) to stay within budget.
-- **Misty controller state machine**: DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → REARMING → IDLE. IDLE ↔ CHARGING (auto-enters at 10% battery, exits at 25%+charging). All state transitions are logged.
-- **LED color scheme**: 🟢 Green = ready/idle, 🟠 Orange = recording, 🔵 Blue = processing, 🟣 Purple = playing response, 🟡 Yellow = low battery warning, ⚫ Off = charging mode, 🔴 Red = error.
-- **TTS fallback chain**: Kokoro-ONNX is primary TTS. If unavailable, pyttsx3 (Windows SAPI5) is used as fallback. Both are lazily initialized. The API response includes `"ttsFallback": true` when fallback is used.
-- **Conversation history**: Maintained in-memory, capped at the last 10 messages. System prompt is prepended on every call but not stored in history.
+- **Latency SLO**: p50 < 3s, p95 < 6s end-to-end (aspirational — currently achieving ~23s, see #21). The orchestration service logs per-stage timing: `[Pipeline Xms] STT=X LLM=X TTS=X history=N`. Measured breakdown: STT ~420ms, LLM ~1200ms, TTS ~6000ms. TTS scales linearly with response length — keep `max_tokens` low (currently 40).
+- **Misty controller state machine**: DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING → PROCESSING → PLAYING →]* REARMING → IDLE. After each response, enters LISTENING state (cyan LED) for up to 60s of follow-up conversation without requiring wake word. Silence ends the loop. IDLE ↔ CHARGING (auto-enters at 10% battery, exits at 25%+charging). All state transitions are logged.
+- **LED color scheme**: 🟢 Green = ready/idle, 🟠 Orange = recording, 🔵 Blue = processing, 🟣 Purple = playing response, 🩵 Cyan = follow-up listening, 🟡 Yellow = watchdog soft reset / low battery warning, ⚫ Off = charging mode, 🔴 Red = error / watchdog reboot.
+- **Keyphrase watchdog**: Detects silent keyphrase failure (Snapdragon 410 bug, see #22) and auto-recovers with 3-level escalation: soft reset (2 min) → sensory reboot (+1 min) → full reboot (+1 min). Only active in IDLE state. Configurable via `WATCHDOG_IDLE_TIMEOUT_S` and `WATCHDOG_ESCALATE_TIMEOUT_S` env vars. Health check runs every 10s. Soft reset alone rarely works — sensory reboot is usually needed.
+- **TTS fallback chain**: Kokoro-ONNX is primary TTS (speed 1.2x). If unavailable, pyttsx3 (Windows SAPI5) is used as fallback. Both are lazily initialized. The API response includes `"ttsFallback": true` when fallback is used.
+- **Conversation history**: Maintained in-memory, capped at the last 6 messages (3 turns). System prompt is prepended on every call but not stored in history. See #19 for smarter history approaches.
+- **System prompt**: Instructs Misty to keep responses to ONE short sentence, 15 words max. LLM (Phi-3.5-mini) often exceeds this — see #24.
 - **Configuration**: The orchestration service reads from `.env` (copy `.env.example`). The Misty controller reads `MISTY_IP` and `ORCHESTRATION_URL` from environment.
 - **Error responses**: The orchestration service returns structured JSON errors with a `status` field (`"ok"` or `"error"`) and an `error` code (e.g., `"timeout"`, `"stt_failure"`, `"model_load_failure"`).
 - **Python version**: Use Python 3.13. Note that Python 3.14 may also be installed — always use `python -m pip` to target the correct version.
 - **Official docs**: https://docs.mistyrobotics.com/ — REST API reference at `/misty-ii/reference/rest/`
+
+## Known Issues
+
+| Issue | Summary | Status |
+|-------|---------|--------|
+| #22 | Keyphrase silently fails after conversation cycle — watchdog recovers but ~2 min downtime | Open, #1 reliability issue |
+| #21 | End-to-end latency ~23s (TTS is 82% of pipeline) — target <10s | Open |
+| #24 | LLM ignores brevity instructions, generates 25-35 words despite "15 max" | Open |
+| #20 | Fixed 4s recording misses end of speech / records silence | Open |
+| #19 | Conversation history grows unbounded per session, increases LLM latency | Open |
+| #23 | Unicode arrow in log messages crashes on Windows cp1252 console | Fixed |

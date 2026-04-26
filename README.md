@@ -5,7 +5,7 @@
 
 ## Project Scope
 
-This project integrates a **Misty II** social robot with **Microsoft Foundry Local** running on a Windows companion device to deliver a complete voice-interactive AI experience over local Wi-Fi. The system handles the full conversational loop — wake-word detection, speech-to-text, LLM reasoning, text-to-speech, and audio playback — all with sub-6-second latency on commodity hardware.
+This project integrates a **Misty II** social robot with **Microsoft Foundry Local** running on a Windows companion device to deliver a complete voice-interactive AI experience over local Wi-Fi. The system handles the full conversational loop — wake-word detection, speech-to-text, LLM reasoning, text-to-speech, and audio playback — all running locally on commodity hardware.
 
 **Primary use case:** Travel demos for developer advocacy — a portable, self-contained AI robot setup that works offline at conferences and events.
 
@@ -22,8 +22,8 @@ This project integrates a **Misty II** social robot with **Microsoft Foundry Loc
 │  LED / Display               │  WS     │    ├─ REST API commands          │
 │                              │         │    └─ State machine (IDLE →      │
 │  Controlled entirely via     │         │        RECORDING → PROCESSING →  │
-│  REST API + WebSocket from   │         │        PLAYING → REARMING)       │
-│  companion device            │         │                                  │
+│  REST API + WebSocket from   │         │        PLAYING → LISTENING →     │
+│  companion device            │         │        REARMING)                 │
 │                              │         │  Orchestration Service (Flask)   │
 │                              │         │    ├─ STT  (faster-whisper)      │
 │                              │         │    ├─ LLM  (Phi-3.5-mini)  ───► Foundry Local
@@ -52,10 +52,14 @@ Misty II's onboard Snapdragon 820 + 410 (2 GB RAM) cannot run modern inference w
 │   │   └── FoundryLocalSkill.js        #   On-robot skill code (not used in current architecture)
 │   │
 │   └── windows-orchestration/          # Python services on companion device
-│       ├── orchestration_service.py    #   STT → LLM → TTS pipeline (~450 LOC)
-│       ├── misty_controller.py         #   REST+WebSocket controller for Misty (~400 LOC)
-│       ├── requirements.txt            #   Dependencies (Flask, requests, websocket-client)
+│       ├── orchestration_service.py    #   STT → LLM → TTS pipeline (~500 LOC)
+│       ├── misty_controller.py         #   REST+WebSocket controller for Misty (~800 LOC)
+│       ├── requirements.txt            #   Dependencies (Flask, requests, websocket-client, faster-whisper)
 │       └── .env.example                #   Configuration template
+│
+├── misty-skills-backup/                # Backup of deleted on-robot skills
+│   ├── README.md                       #   Why skills were removed, restoration notes
+│   └── all_skills_metadata.json        #   Metadata for all 11 skills (pre-cleanup)
 │
 ├── tests/
 │   └── test_integration.py             # Integration test suite (health, connectivity, latency)
@@ -84,7 +88,7 @@ Misty II's onboard Snapdragon 820 + 410 (2 GB RAM) cannot run modern inference w
 | Chat model | Phi-3.5-mini (3.8B) via **Foundry Local** | Fast, high-quality, fits CPU inference budget. Served by Foundry Local at `/v1/chat/completions`. |
 | STT model | Whisper-tiny via **faster-whisper** (in-process) | Foundry Local has no REST endpoint for Whisper — only C#/Rust SDK. We use [faster-whisper](https://github.com/SYSTRAN/faster-whisper) (CTranslate2) which loads the model directly in the orchestration Python process. Model auto-downloaded from HuggingFace on first run (~75 MB). |
 | TTS model | Kokoro v1.0 ONNX (in-process), pyttsx3 fallback | [kokoro-onnx](https://github.com/thewh1teagle/kokoro-onnx) runs inference in the orchestration process via ONNX Runtime. Model files (`kokoro-v1.0.int8.onnx` 88 MB + `voices-v1.0.bin` 27 MB) stored locally. Falls back to pyttsx3 (Windows SAPI5) if Kokoro unavailable. |
-| Latency SLO | p50 < 3s, p95 < 6s | Must feel conversational |
+| Latency SLO | p50 < 3s, p95 < 6s (aspirational) | Currently ~23s end-to-end; see [#21](https://github.com/tammym-demos/misty_upgrade/issues/21) |
 | Network | Local Wi-Fi only | Privacy-first, offline-capable after initial model download |
 | Hardware | CPU-only (GPU optional) | Broad laptop compatibility |
 
@@ -140,7 +144,32 @@ Invoke-RestMethod -Uri http://localhost:5000/api/health
 python misty_controller.py
 ```
 
-The Misty controller connects to Misty via WebSocket and REST API — no skill deployment needed. Misty's LED turns green when ready. Say **"Hey, Misty!"** followed by your question.
+The Misty controller connects to Misty via WebSocket and REST API — no skill deployment needed. Misty's LED turns green when ready. Say **"Hey, Misty!"** followed by your question. After Misty responds, she'll keep listening (cyan LED) for up to 60 seconds — just keep talking without saying the wake word again. Silence ends the conversation and re-arms the wake word.
+
+### Expressive Behavior
+
+During conversations, Misty uses head movement and face animations to signal her state:
+- **Listening**: Looks up for eye contact, wide-eyed attentive face
+- **Processing**: Tilts head to the side, thoughtful expression
+- **Speaking**: Faces forward, animated expression
+- **Follow-up**: Slight head tilt, warm expectant face
+- Head recenters when re-arming for the next wake word
+
+### On-Robot Skills — Cleaned Up
+
+All auto-starting on-robot skills have been **deleted** from Misty to prevent microphone interference. The `faceDetection` skill previously auto-started on boot, grabbed the mic, and caused silent keyphrase failures. The controller also cancels all running skills on connect as a safety net.
+
+Skill metadata was backed up to `misty-skills-backup/` before deletion.
+
+### Keyphrase Watchdog
+
+Misty's sensory services (Snapdragon 410) can silently stop firing wake word events — a known firmware bug with no programmatic detection. The controller includes an automatic watchdog that detects this and self-recovers:
+
+1. **Soft reset** (2 min): 🟡 Yellow LED flash → cancel skills → restart keyphrase
+2. **Sensory reboot** (+1 min): 🔴 Red LED → reboot sensory services only
+3. **Full reboot** (+1 min): 🔴 Red LED → full system reboot
+
+The watchdog only activates in IDLE state. Configure timeouts via `WATCHDOG_IDLE_TIMEOUT_S` and `WATCHDOG_ESCALATE_TIMEOUT_S` environment variables.
 
 ### Startup Verification
 
@@ -152,7 +181,7 @@ All three services must be running. Start them in order — each depends on the 
 | 2 | **Orchestration service** | `curl http://localhost:5000/api/health` | Reports Foundry and TTS status |
 | 3 | **Misty controller** | Misty LED turns green | Connects via WebSocket + REST |
 
-**Model management:** Only `phi-3.5-mini` should be loaded in Foundry (`foundry service ps`). Whisper-tiny loads on demand for STT. Kokoro TTS runs in-process in the orchestration service — it is **not** a Foundry model and won't appear in `foundry model list`.
+**Model management:** Only `phi-3.5-mini` should be loaded in Foundry (`foundry service ps`). Whisper-tiny STT runs in-process via faster-whisper (not through Foundry). Kokoro TTS runs in-process in the orchestration service — neither STT nor TTS are Foundry models and won't appear in `foundry model list`.
 
 ---
 
@@ -172,6 +201,16 @@ All three services must be running. Start them in order — each depends on the 
 The project has moved from on-robot JavaScript skills to a laptop-driven REST+WebSocket architecture. The Misty controller and orchestration service run on the companion device. Wake word detection, recording, and audio playback are all handled via Misty's REST API.
 
 See [IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md) for the full build log, known limitations, and future enhancement roadmap.
+
+### Known Issues
+
+| Issue | Summary |
+|-------|---------|
+| [#22](https://github.com/tammym-demos/misty_upgrade/issues/22) | Keyphrase silently fails after conversation cycle — watchdog auto-recovers but with ~2 min downtime |
+| [#21](https://github.com/tammym-demos/misty_upgrade/issues/21) | End-to-end latency ~23s (target <6s) — TTS is 82% of pipeline |
+| [#24](https://github.com/tammym-demos/misty_upgrade/issues/24) | LLM ignores brevity instructions, generates verbose responses |
+| [#20](https://github.com/tammym-demos/misty_upgrade/issues/20) | Fixed 4s recording — needs voice activity detection |
+| [#19](https://github.com/tammym-demos/misty_upgrade/issues/19) | Conversation history needs smarter management for latency |
 
 ---
 

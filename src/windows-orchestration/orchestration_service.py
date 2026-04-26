@@ -36,15 +36,22 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()  # Load .env before reading any env vars
 
-FOUNDRY_API_TIMEOUT = float(os.getenv("FOUNDRY_API_TIMEOUT", "5.0"))
-SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", "6.0"))
-KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_heart")
+FOUNDRY_API_TIMEOUT = float(os.getenv("FOUNDRY_API_TIMEOUT", "10.0"))
+SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", "15.0"))
+KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_sky")
+KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.2"))
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
-    "You are Misty, a helpful and friendly robot assistant. Keep answers concise and conversational — no more than 2-3 sentences. Be warm and engaging. "
-    "When the user message or conversation context is long, internally summarize it into 2-3 bullet points and answer only from that summary. "
-    "Never quote the user verbatim; paraphrase and quote at most 80 characters. "
-    "If a request is too long or unclear, ask a single clarifying question instead of guessing."
+    (
+        "You are Misty, a sassy little robot with BIG personality. "
+        "You're witty, cheeky, and always ready with a comeback — but never mean-spirited. "
+        "Use casual language, contractions, and expressive phrases like 'Oh please', 'Honey...', 'I mean, obviously', 'Not gonna lie'. "
+        "React with personality — gasp at surprises, eye-roll at silly questions, get excited about cool things. "
+        "CRITICAL: Keep answers to ONE short sentence. 15 words max. Be punchy, not wordy. "
+        "When context is long, summarize it internally — never quote the user verbatim. "
+        "If the request is unclear, ask ONE clarifying question. "
+        "Never say you're an AI, language model, or assistant. You're Misty. Period."
+    )
 )
 
 # Maximum characters for a single user prompt (truncated if exceeded)
@@ -53,7 +60,13 @@ MAX_USER_CHARS = int(os.getenv("MAX_USER_CHARS", "400"))
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "3000"))
 
 # Locked v1 model stack
+# Foundry Local requires full model IDs for inference calls
 MODELS = {
+    "chat": "Phi-3.5-mini-instruct-openvino-gpu:2",
+    "stt": "whisper-tiny",
+}
+# Short aliases for display/diagnostics
+MODEL_ALIASES = {
     "chat": "phi-3.5-mini",
     "stt": "whisper-tiny",
 }
@@ -99,10 +112,10 @@ FOUNDRY_LOCAL_HOST = _discover_foundry_endpoint()
 
 # Latency budget decomposition (milliseconds)
 LATENCY_BUDGET = {
-    "stt": 1500,  # Speech-to-text
-    "llm": 2000,  # LLM inference
-    "tts": 1500,  # Text-to-speech synthesis
-    "overhead": 500,  # Network, serialization, etc.
+    "stt": 3000,  # Speech-to-text (faster-whisper, usually ~500ms warm)
+    "llm": 8000,  # LLM inference (Phi-3.5-mini, depends on output length)
+    "tts": 3000,  # Text-to-speech synthesis (Kokoro ~1-2s)
+    "overhead": 1000,  # Network, serialization, etc.
 }
 
 # Global conversation context (in-memory for v1; stateless per utterance for MVP)
@@ -146,7 +159,7 @@ def health_check():
         "status": "ok" if foundry_ok else "degraded",
         "orchestration": "ready",
         "foundry_local": "ok" if foundry_ok else "unreachable",
-        "models": MODELS,
+        "models": MODEL_ALIASES,
         "timestamp": datetime.utcnow().isoformat(),
     }), 200 if foundry_ok else 503
 
@@ -173,7 +186,9 @@ def orchestrate():
         audio_bytes = audio_file.read()
         
         # Step 1: Speech-to-Text
-        stt_result = speech_to_text(audio_bytes, start_time)
+        stt_start = time.time()
+        stt_result = speech_to_text(audio_bytes, stt_start)
+        stt_ms = (time.time() - stt_start) * 1000
         if stt_result.get("status") == "error":
             return jsonify(stt_result), 400
         
@@ -182,10 +197,12 @@ def orchestrate():
             logger.warning("STT returned empty text")
             return jsonify({"status": "error", "error": "empty_stt"}), 400
         
-        logger.info(f"Transcribed text: {user_text}")
+        logger.info(f"[STT {stt_ms:.0f}ms] {user_text}")
         
         # Step 2: Language Model Inference
-        llm_result = language_model_inference(user_text, start_time)
+        llm_start = time.time()
+        llm_result = language_model_inference(user_text, llm_start)
+        llm_ms = (time.time() - llm_start) * 1000
         if llm_result.get("status") == "error":
             return jsonify(llm_result), 500
         
@@ -194,10 +211,12 @@ def orchestrate():
             logger.warning("LLM returned empty response")
             return jsonify({"status": "error", "error": "empty_llm"}), 400
         
-        logger.info(f"LLM response: {response_text}")
+        logger.info(f"[LLM {llm_ms:.0f}ms] {response_text}")
         
         # Step 3: Text-to-Speech
-        tts_result = text_to_speech(response_text, start_time)
+        tts_start = time.time()
+        tts_result = text_to_speech(response_text, tts_start)
+        tts_ms = (time.time() - tts_start) * 1000
         if tts_result.get("status") == "error":
             return jsonify(tts_result), 500
         
@@ -209,10 +228,7 @@ def orchestrate():
         # Calculate total latency
         total_latency_ms = (time.time() - start_time) * 1000
         tts_fallback = tts_result.get("tts_fallback", False)
-        if tts_fallback:
-            logger.warning(f"⚠️ Orchestration completed in {total_latency_ms:.0f}ms (TTS FALLBACK active)")
-        else:
-            logger.info(f"Orchestration completed in {total_latency_ms:.0f}ms")
+        logger.info(f"[Pipeline {total_latency_ms:.0f}ms] STT={stt_ms:.0f} LLM={llm_ms:.0f} TTS={tts_ms:.0f} history={len(conversation_history)} fallback={tts_fallback}")
         
         return jsonify({
             "status": "ok",
@@ -228,48 +244,48 @@ def orchestrate():
         return jsonify({"status": "error", "error": "internal_error"}), 500
 
 # ============================================================================
-# STEP 1: SPEECH-TO-TEXT
+# STEP 1: SPEECH-TO-TEXT (faster-whisper, in-process)
 # ============================================================================
 
+_whisper_model = None
+
+
+def _get_whisper_model():
+    """Return a cached faster-whisper model, or load on first use."""
+    global _whisper_model
+    if _whisper_model is not None:
+        return _whisper_model
+    try:
+        from faster_whisper import WhisperModel  # noqa: PLC0415
+        _whisper_model = WhisperModel("tiny", compute_type="int8", cpu_threads=4)
+        logger.info("faster-whisper model loaded (tiny, int8)")
+        return _whisper_model
+    except Exception as e:
+        logger.error(f"Failed to load faster-whisper: {e}")
+        return None
+
+
 def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
-    """Transcribe audio using Foundry Local."""
+    """Transcribe audio using faster-whisper (in-process CTranslate2)."""
     try:
         elapsed = (time.time() - start_time) * 1000
         remaining = LATENCY_BUDGET["stt"] - elapsed
-        
+
         if remaining <= 0:
             logger.error("STT timeout: no time remaining")
             return {"status": "error", "error": "timeout"}
-        
-        url = f"{FOUNDRY_LOCAL_HOST}/v1/audio/transcriptions"
-        files = {
-            'file': ('audio.wav', BytesIO(audio_bytes), 'audio/wav'),
-        }
-        data = {
-            'model': MODELS["stt"],
-            'language': 'en',
-        }
-        
-        response = requests.post(
-            url,
-            files=files,
-            data=data,
-            timeout=min(FOUNDRY_API_TIMEOUT, remaining / 1000.0)
-        )
-        
-        if response.status_code != 200:
-            logger.error(f"STT API error: {response.status_code} {response.text}")
+
+        model = _get_whisper_model()
+        if model is None:
             return {"status": "error", "error": "stt_failure"}
-        
-        result = response.json()
-        text = result.get("text", "")
-        
+
+        audio_io = BytesIO(audio_bytes)
+        segments, info = model.transcribe(audio_io, language="en", beam_size=1)
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+
         logger.debug(f"STT result: {text}")
         return {"status": "ok", "text": text}
-        
-    except requests.Timeout:
-        logger.error("STT request timed out")
-        return {"status": "error", "error": "timeout"}
+
     except Exception as e:
         logger.error(f"STT failed: {e}")
         return {"status": "error", "error": "stt_failure"}
@@ -300,10 +316,10 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
 
         # Build message history
         conversation_history.append({"role": "user", "content": user_text})
+        # Keep history limited to last 6 messages (3 turns) to control LLM latency
+        if len(conversation_history) > 6:
+            del conversation_history[:-6]
 
-        # Keep history limited to last 10 messages to control context size
-        if len(conversation_history) > 10:
-            del conversation_history[:-10]
 
         url = f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions"
         # Prepend system prompt on every call; not stored in history
@@ -327,8 +343,8 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         payload = {
             "model": MODELS["chat"],
             "messages": messages,
-            "max_tokens": 150,  # Keep output short for latency
-            "temperature": 0.7,
+            "max_tokens": 40,  # Force very short responses — TTS is the bottleneck
+            "temperature": 0.85,  # Higher for more personality
         }
         
         response = requests.post(
@@ -421,7 +437,7 @@ def text_to_speech(text: str, start_time: float) -> Dict[str, Any]:
             try:
                 import soundfile as sf  # noqa: PLC0415
                 samples, sample_rate = kokoro.create(
-                    text, voice=KOKORO_VOICE, speed=1.0, lang="en-us"
+                    text, voice=KOKORO_VOICE, speed=KOKORO_SPEED, lang="en-us"
                 )
                 sf.write(audio_path, samples, sample_rate)
                 logger.debug(f"kokoro-onnx TTS saved: {audio_path}")
@@ -504,7 +520,7 @@ def diagnostics():
         "service": "FoundryLocal Orchestration",
         "version": "1.0.0",
         "foundry_host": FOUNDRY_LOCAL_HOST,
-        "models": MODELS,
+        "models": MODEL_ALIASES,
         "tts": {
             "engine": tts_engine or "kokoro-onnx",
             "fallback": "pyttsx3",
@@ -534,5 +550,12 @@ def internal_error(error):
 if __name__ == "__main__":
     logger.info("Starting Foundry Local Orchestration Service")
     logger.info(f"Foundry Local: {FOUNDRY_LOCAL_HOST}")
-    logger.info(f"Models: {MODELS}")
+    logger.info(f"Models: {MODEL_ALIASES} (full IDs: {MODELS})")
+
+    # Pre-warm models so first request doesn't pay cold-start cost
+    logger.info("Pre-warming STT model (faster-whisper)...")
+    _get_whisper_model()
+    logger.info("Pre-warming TTS model (kokoro-onnx)...")
+    _get_kokoro()
+
     app.run(host="0.0.0.0", port=5000, debug=False)
