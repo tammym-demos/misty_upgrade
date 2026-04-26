@@ -321,6 +321,7 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
             del conversation_history[:-6]
 
 
+
         url = f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions"
         # Prepend system prompt on every call; not stored in history
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
