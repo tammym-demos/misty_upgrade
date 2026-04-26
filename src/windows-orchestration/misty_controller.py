@@ -48,8 +48,8 @@ WS_RECONNECT_MAX_S = 30.0
 HEALTH_CHECK_INTERVAL_S = 10.0  # reduced from 30s for watchdog responsiveness
 
 # Keyphrase watchdog — detects silent failures and auto-recovers
-WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", "60"))  # 1 min after rearm with no wake event
-WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", "60"))  # 1 min after recovery attempt
+WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", "300"))  # 5 min after rearm with no wake event
+WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", "120"))  # 2 min after recovery attempt
 
 # Battery thresholds (as fractions 0.0–1.0)
 BATTERY_LOW_WARN = 0.20       # yellow LED warning
