@@ -124,7 +124,19 @@ The watchdog only triggers when in IDLE state. It uses separate timestamps for a
 - Empty response detection
 - Graceful fallback to Misty-side error handling
 
-### 3. Foundry Local
+**Configuration (environment variables)**:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `FOUNDRY_LOCAL_HOST` | Auto-discovered | Foundry Local base URL (overrides CLI discovery) |
+| `FOUNDRY_API_TIMEOUT` | `5.0` | Per-request timeout (seconds) for Foundry API calls |
+| `SERVICE_TIMEOUT` | `6.0` | Overall orchestration pipeline timeout (seconds) |
+| `KOKORO_VOICE` | `af_heart` | Kokoro TTS voice ID |
+| `SYSTEM_PROMPT` | *(built-in Misty persona)* | Full system prompt for the LLM. Override to change persona without code changes. The default includes summarization and brevity instructions. |
+| `MAX_USER_CHARS` | `400` | Hard character limit on the transcribed user utterance. Inputs longer than this are silently truncated **before** being sent to Foundry, reducing input token count and LLM latency. Tune down for faster responses, up for richer context. |
+| `MAX_CONTEXT_CHARS` | `3000` | Maximum total characters across all messages (system prompt + conversation history) included in each LLM request. When exceeded, oldest turns are removed first while the system prompt and the latest user message are always kept. Set to `0` to disable trimming. |
+
+
 **Deployment**: Local machine (same as Windows companion)
 
 **Model Stack (Locked v1)**:

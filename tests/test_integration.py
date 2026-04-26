@@ -3,7 +3,9 @@ Integration Test Suite for Misty + Foundry Local
 Tests communication between components and validates latency SLO.
 """
 
+import sys
 import unittest
+import unittest.mock
 import re
 import subprocess
 import requests
@@ -12,6 +14,18 @@ import time
 import os
 from io import BytesIO
 from urllib.parse import urlparse, urlunparse
+
+# ---------------------------------------------------------------------------
+# Path setup for importing orchestration_service in unit tests.
+# Must be done before the module is imported so that FOUNDRY_LOCAL_HOST is
+# already in the environment when _discover_foundry_endpoint() runs.
+# ---------------------------------------------------------------------------
+os.environ.setdefault("FOUNDRY_LOCAL_HOST", "http://localhost:9999")
+_ORCHESTRATION_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration")
+)
+if _ORCHESTRATION_PATH not in sys.path:
+    sys.path.insert(0, _ORCHESTRATION_PATH)
 
 
 def _discover_foundry_endpoint() -> str:
@@ -201,6 +215,131 @@ class TestVerificationChecklist(unittest.TestCase):
     def test_item_9_end_to_end_interaction(self):
         """9. Confirm full Misty interaction under normal and degraded conditions."""
         self.skipTest("End-to-end validation on live robot")
+
+class TestPromptLimiting(unittest.TestCase):
+    """
+    Unit tests for prompt truncation and context capping.
+    These tests do NOT require Foundry Local or any live service —
+    all HTTP calls are mocked.
+    """
+
+    _svc = None  # orchestration_service module, lazily imported once
+
+    @classmethod
+    def setUpClass(cls):
+        """Import orchestration_service, skipping the class if unavailable."""
+        try:
+            import orchestration_service  # noqa: PLC0415
+            cls._svc = orchestration_service
+        except Exception as exc:  # pragma: no cover
+            cls._svc = None
+            print(f"[TestPromptLimiting] Could not import orchestration_service: {exc}")
+
+    def setUp(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported; skipping unit tests")
+        # Reset conversation history before every test to avoid cross-test pollution
+        self._svc.conversation_history = []
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _mock_llm_response(self, text="OK"):
+        """Return a mock requests.Response that looks like a successful LLM reply."""
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"choices": [{"message": {"content": text}}]}
+        return mock_resp
+
+    def _call_llm_and_capture_payload(self, user_text, mock_response_text="OK"):
+        """
+        Call language_model_inference with a mocked requests.post and return
+        (result_dict, payload_sent_to_foundry).
+        """
+        with unittest.mock.patch.object(
+            self._svc.requests, "post", return_value=self._mock_llm_response(mock_response_text)
+        ) as mock_post:
+            result = self._svc.language_model_inference(user_text, time.time())
+            payload = mock_post.call_args[1]["json"]  # keyword arg 'json'
+        return result, payload
+
+    # ------------------------------------------------------------------
+    # Tests
+    # ------------------------------------------------------------------
+
+    def test_overlong_user_text_is_truncated(self):
+        """User text longer than MAX_USER_CHARS must be truncated before the LLM call."""
+        max_chars = self._svc.MAX_USER_CHARS
+        long_text = "a" * (max_chars + 500)
+
+        _, payload = self._call_llm_and_capture_payload(long_text)
+
+        user_msgs = [m for m in payload["messages"] if m["role"] == "user"]
+        self.assertEqual(len(user_msgs), 1, "Expected exactly one user message in payload")
+        self.assertLessEqual(
+            len(user_msgs[0]["content"]),
+            max_chars,
+            f"Content length {len(user_msgs[0]['content'])} exceeds MAX_USER_CHARS={max_chars}",
+        )
+
+    def test_short_user_text_is_not_altered(self):
+        """User text within MAX_USER_CHARS must reach the LLM unchanged."""
+        short_text = "What time is it?"
+
+        _, payload = self._call_llm_and_capture_payload(short_text)
+
+        user_msgs = [m for m in payload["messages"] if m["role"] == "user"]
+        self.assertEqual(len(user_msgs), 1)
+        self.assertEqual(user_msgs[0]["content"], short_text)
+
+    def test_empty_user_text_is_handled_safely(self):
+        """Empty string user_text must not raise an exception."""
+        with unittest.mock.patch.object(
+            self._svc.requests, "post", return_value=self._mock_llm_response()
+        ):
+            try:
+                self._svc.language_model_inference("", time.time())
+            except Exception as exc:  # pragma: no cover
+                self.fail(f"language_model_inference raised on empty input: {exc}")
+
+    def test_context_trimming_respects_max_context_chars(self):
+        """
+        When total message content exceeds MAX_CONTEXT_CHARS, the payload sent to
+        Foundry must be trimmed so that total chars <= MAX_CONTEXT_CHARS.
+        The system prompt and the most recent user message must always be preserved.
+        """
+        max_ctx = self._svc.MAX_CONTEXT_CHARS
+        if max_ctx <= 0:
+            self.skipTest("MAX_CONTEXT_CHARS is disabled (0)")
+
+        # Stuff conversation_history with large old turns to exceed the budget
+        large_content = "x" * (max_ctx // 2 + 1)
+        self._svc.conversation_history = [
+            {"role": "user", "content": large_content},
+            {"role": "assistant", "content": large_content},
+        ]
+
+        latest_user_text = "short question"
+        _, payload = self._call_llm_and_capture_payload(latest_user_text)
+
+        total_chars = sum(len(m.get("content", "")) for m in payload["messages"])
+        self.assertLessEqual(
+            total_chars,
+            max_ctx,
+            f"Payload total chars {total_chars} exceeds MAX_CONTEXT_CHARS={max_ctx}",
+        )
+
+        # The most recent user message must always survive trimming
+        user_msgs = [m for m in payload["messages"] if m["role"] == "user"]
+        self.assertTrue(
+            any(m["content"] == latest_user_text for m in user_msgs),
+            "Most recent user message was removed during context trimming",
+        )
+
+        # The system prompt must always be the first message
+        self.assertEqual(payload["messages"][0]["role"], "system")
+
 
 if __name__ == "__main__":
     unittest.main()

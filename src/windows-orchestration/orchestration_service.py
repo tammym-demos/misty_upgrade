@@ -48,9 +48,16 @@ SYSTEM_PROMPT = os.getenv(
         "Use casual language, contractions, and expressive phrases like 'Oh please', 'Honey...', 'I mean, obviously', 'Not gonna lie'. "
         "React with personality — gasp at surprises, eye-roll at silly questions, get excited about cool things. "
         "CRITICAL: Keep answers to ONE short sentence. 15 words max. Be punchy, not wordy. "
+        "When context is long, summarize it internally — never quote the user verbatim. "
+        "If the request is unclear, ask ONE clarifying question. "
         "Never say you're an AI, language model, or assistant. You're Misty. Period."
     )
 )
+
+# Maximum characters for a single user prompt (truncated if exceeded)
+MAX_USER_CHARS = int(os.getenv("MAX_USER_CHARS", "400"))
+# Maximum total characters across all messages sent to the LLM (0 = disabled)
+MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "3000"))
 
 # Locked v1 model stack
 # Foundry Local requires full model IDs for inference calls
@@ -299,16 +306,39 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
             logger.error("LLM timeout: no time remaining")
             return {"status": "error", "error": "timeout"}
         
+        # Strip and enforce user prompt character limit
+        user_text = (user_text or "").strip()
+        if len(user_text) > MAX_USER_CHARS:
+            logger.warning(
+                f"User prompt truncated: {len(user_text)} -> {MAX_USER_CHARS} chars"
+            )
+            user_text = user_text[:MAX_USER_CHARS]
+
         # Build message history
         conversation_history.append({"role": "user", "content": user_text})
-        
-        # Keep history limited to last 3 turns (6 messages) to control LLM latency
+        # Keep history limited to last 6 messages (3 turns) to control LLM latency
         if len(conversation_history) > 6:
-            conversation_history = conversation_history[-6:]
-        
+            del conversation_history[:-6]
+
         url = f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions"
         # Prepend system prompt on every call; not stored in history
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
+
+        # Enforce maximum total context character budget (trim oldest turns first)
+        if MAX_CONTEXT_CHARS > 0:
+            total_chars = sum(len(m.get("content", "")) for m in messages)
+            if total_chars > MAX_CONTEXT_CHARS:
+                trimmed = 0
+                # messages[0] is the system prompt; messages[-1] is the latest user turn.
+                # Remove the oldest non-system messages (index 1) until within budget.
+                while len(messages) > 2 and total_chars > MAX_CONTEXT_CHARS:
+                    removed = messages.pop(1)
+                    total_chars -= len(removed.get("content", ""))
+                    trimmed += 1
+                logger.warning(
+                    f"Context trimmed: removed {trimmed} message(s); total={total_chars} chars"
+                )
+
         payload = {
             "model": MODELS["chat"],
             "messages": messages,
