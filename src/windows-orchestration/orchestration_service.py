@@ -310,7 +310,7 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         user_text = (user_text or "").strip()
         if len(user_text) > MAX_USER_CHARS:
             logger.warning(
-                f"User prompt truncated: {len(user_text)} → {MAX_USER_CHARS} chars"
+                f"User prompt truncated: {len(user_text)} -> {MAX_USER_CHARS} chars"
             )
             user_text = user_text[:MAX_USER_CHARS]
 
@@ -319,8 +319,6 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         # Keep history limited to last 6 messages (3 turns) to control LLM latency
         if len(conversation_history) > 6:
             del conversation_history[:-6]
-
-
 
         url = f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions"
         # Prepend system prompt on every call; not stored in history

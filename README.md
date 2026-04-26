@@ -121,6 +121,7 @@ The orchestration service is configured via environment variables (copy `.env.ex
 
 ---
 
+## Quick Start
 
 ```powershell
 # 1. Start Foundry Local on the companion device
