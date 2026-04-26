@@ -39,7 +39,7 @@ load_dotenv()  # Load .env before reading any env vars
 FOUNDRY_API_TIMEOUT = float(os.getenv("FOUNDRY_API_TIMEOUT", "10.0"))
 SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", "15.0"))
 KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_sky")
-KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.2"))
+KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.4"))
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     (
@@ -286,6 +286,7 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
                 "min_silence_duration_ms": 100,
                 "speech_pad_ms": 200,
             },
+            initial_prompt="Hey Misty, tell me about science, history, math, geography, and fun facts.",
         )
         text = " ".join(seg.text.strip() for seg in segments).strip()
 
