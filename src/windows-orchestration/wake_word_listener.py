@@ -38,7 +38,7 @@ logger = logging.getLogger("wake_word_listener")
 
 # openWakeWord settings
 OWW_MODEL_NAME = os.getenv("OWW_MODEL_NAME", "hey_jarvis_v0.1")
-OWW_THRESHOLD = float(os.getenv("OWW_THRESHOLD", "0.5"))
+OWW_THRESHOLD = float(os.getenv("OWW_THRESHOLD", "0.7"))
 OWW_VAD_THRESHOLD = float(os.getenv("OWW_VAD_THRESHOLD", "0"))  # 0 = disabled
 OWW_CUSTOM_MODEL_PATH = os.getenv("OWW_CUSTOM_MODEL_PATH", "")
 
