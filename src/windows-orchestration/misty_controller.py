@@ -31,13 +31,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# Wake word engine — import conditionally
-try:
-    from wake_word_listener import WakeWordListener
-    _OWW_AVAILABLE = True
-except ImportError:
-    _OWW_AVAILABLE = False
-
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -72,13 +65,9 @@ BATTERY_TEMP_THROTTLE_C = 50.0  # add delay between turns
 IDLE_TIMEOUT_S = float(os.getenv("IDLE_TIMEOUT_S", "900"))  # 15 minutes
 
 # Proactive reboot — keyphrase engine degrades after ~2 conversation cycles (#22)
-# Only relevant when using Misty's built-in keyphrase engine
 PROACTIVE_REBOOT_AFTER_CYCLES = int(os.getenv("PROACTIVE_REBOOT_AFTER_CYCLES", "2"))
 REBOOT_POLL_INTERVAL_S = 5.0   # poll interval while waiting for Misty to come back
 REBOOT_TIMEOUT_S = 120.0       # max wait for Misty to come back after reboot
-
-# Wake word engine: "openwakeword" (laptop-based, recommended) or "misty" (built-in, unreliable)
-WAKE_WORD_ENGINE = os.getenv("WAKE_WORD_ENGINE", "openwakeword" if _OWW_AVAILABLE else "misty")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -151,9 +140,6 @@ class MistyController:
         # Proactive reboot — counts successful conversation cycles (wake→response→rearm)
         self._conversation_cycles = 0
 
-        # Wake word listener (openWakeWord on laptop)
-        self._wake_word_listener: "WakeWordListener | None" = None
-
     # --- State transitions ---
 
     def set_state(self, new_state: State):
@@ -219,46 +205,6 @@ class MistyController:
         if right is not None:
             body["RightArmPosition"] = right
         self.misty_post("/api/arms", body)
-
-    def _on_oww_wake_word(self):
-        """Callback from openWakeWord listener when wake word is detected.
-        
-        Runs in the wake word listener thread — must be thread-safe.
-        Uses atomic state claim to prevent races with stale detections.
-        """
-        self.last_activity_time = time.time()
-        self._last_wake_event_time = time.time()
-
-        # Restore from dimmed state on activity
-        if self._is_dimmed and self.get_state() == State.IDLE:
-            self._is_dimmed = False
-            self.set_led(0, 255, 0)
-            self.display_image("e_DefaultContent.jpg")
-            logger.info("Restored from idle-dim on wake word")
-
-        # Atomic state claim: only proceed if we're in IDLE
-        if not self.try_set_state(State.IDLE, State.RECORDING):
-            logger.warning(f"openWakeWord: wake word during non-IDLE state "
-                           f"({self.get_state().value}) — ignoring")
-            return
-
-        logger.info("[Wake] Wake word detected (openWakeWord)!")
-
-        # Pause the listener immediately (we're about to use the mic)
-        if self._wake_word_listener:
-            self._wake_word_listener.pause()
-
-        # Play acknowledgment beep
-        self.misty_post("/api/audio/play", {"FileName": "s_SystemSuccess.wav"})
-        time.sleep(0.5)
-
-        self.turn_id += 1
-        # Start conversation in a new thread (we're in the listener thread)
-        threading.Thread(
-            target=self._handle_conversation_turn,
-            name=f"turn-{self.turn_id}",
-            daemon=True,
-        ).start()
 
     def start_keyphrase(self, force_restart=False):
         if force_restart:
@@ -566,25 +512,13 @@ class MistyController:
         """Apply charging mode side effects (call after state is already CHARGING)."""
         self.misty_post("/api/audio/keyphrase/stop")
         self.misty_post("/api/skills/cancel")
-        # Pause wake word listener if running (stop polling mic during charge)
-        if self._wake_word_listener:
-            self._wake_word_listener.pause()
         self.set_led(0, 0, 0)
         self.display_image("e_Sleeping.jpg")
-        logger.info("Charging mode active — wake word off, LED off, display sleeping")
+        logger.info("Charging mode active — keyphrase off, LED off, display sleeping")
 
     def exit_charging_mode(self):
         """Resume normal operation from charging mode."""
-        if WAKE_WORD_ENGINE == "openwakeword":
-            self.set_led(0, 255, 0)
-            self.display_image("e_DefaultContent.jpg")
-            self.last_activity_time = time.time()
-            self._is_dimmed = False
-            self.set_state(State.IDLE)
-            if self._wake_word_listener:
-                self._wake_word_listener.resume()
-            logger.info("Exited charging mode — openWakeWord listener resumed")
-        elif self.start_keyphrase(force_restart=True):
+        if self.start_keyphrase(force_restart=True):
             self.set_led(0, 255, 0)
             self.display_image("e_DefaultContent.jpg")
             self.last_activity_time = time.time()
@@ -609,9 +543,6 @@ class MistyController:
             logger.info(f"Final battery: {battery.charge_percent*100:.0f}% | {battery.voltage:.1f}V")
         # Stop keyphrase, LED off
         self.misty_post("/api/audio/keyphrase/stop")
-        # Stop wake word listener if running
-        if self._wake_word_listener:
-            self._wake_word_listener.stop()
         if self.ws:
             self.ws.close()
         self.set_led(0, 0, 0)
@@ -671,68 +602,38 @@ class MistyController:
     def _on_ws_open(self, ws):
         logger.info("WebSocket connected")
         self.reconnect_attempts = 0
-
-        # Always subscribe to battery events
+        # Always subscribe to events
+        self._ws_subscribe_keyphrase()
         self._ws_subscribe_battery()
-
-        # Only subscribe to keyphrase events if using Misty's built-in engine
-        if WAKE_WORD_ENGINE == "misty":
-            self._ws_subscribe_keyphrase()
 
         current_state = self.get_state()
         if current_state == State.CHARGING:
+            # Reconnected during charging — stay in charging mode
             logger.info("WebSocket reconnected in CHARGING mode — not restarting keyphrase")
             return
 
         # Cancel any auto-started skills (e.g., faceDetection)
         self._cancel_all_skills()
 
-        if WAKE_WORD_ENGINE == "openwakeword":
-            # openWakeWord mode — don't start Misty's keyphrase engine
-            # Stop any stale keyphrase that might be running from a previous session
-            self.misty_post("/api/audio/keyphrase/stop")
-
-            # Guard: don't resume listener if a conversation is active (WS dropped mid-turn)
-            if current_state in (State.RECORDING, State.PROCESSING, State.PLAYING, State.LISTENING):
-                logger.warning(f"WS reconnected during active turn ({current_state.value}) — NOT resuming listener")
-                return
-
+        # Start keyphrase recognition
+        # MUST use force_restart=True to stop stale keyphrase from previous
+        # controller sessions. Without stop-first, keyphrase/start returns
+        # "Success" but the engine doesn't actually reset (#22).
+        if self.start_keyphrase(force_restart=True):
             self.set_led(0, 255, 0)
             self.display_image("e_DefaultContent.jpg")
-            self.last_activity_time = time.time()
-
             if current_state in (State.REARMING, State.REBOOTING):
+                # Re-arm or post-reboot reconnect — no grace period, go straight to IDLE
+                self.last_activity_time = time.time()
                 self.set_state(State.IDLE)
-                if self._wake_word_listener:
-                    self._wake_word_listener.resume()
-                logger.info(f"{'Reboot' if current_state == State.REBOOTING else 'Re-arm'} complete — openWakeWord active")
+                logger.info(f"{'Reboot' if current_state == State.REBOOTING else 'Re-arm'} complete — keyphrase active (fresh WebSocket)")
             else:
-                # Initial startup or reconnect from DISCONNECTED/IDLE
-                if self._wake_word_listener and not self._wake_word_listener.is_running:
-                    self._wake_word_listener.start()
-                elif self._wake_word_listener:
-                    self._wake_word_listener.resume()
-                self.ready_time = time.time() + 2.0  # brief settle time
+                # Initial startup — grace period to ignore stale events
+                self.ready_time = time.time() + 3.0
+                self.last_activity_time = time.time()
                 self.set_state(State.IDLE)
-                logger.info("openWakeWord listener active — ready for wake word")
         else:
-            # Misty keyphrase mode — start the built-in keyphrase engine
-            # MUST use force_restart=True to stop stale keyphrase from previous
-            # controller sessions. Without stop-first, keyphrase/start returns
-            # "Success" but the engine doesn't actually reset (#22).
-            if self.start_keyphrase(force_restart=True):
-                self.set_led(0, 255, 0)
-                self.display_image("e_DefaultContent.jpg")
-                if current_state in (State.REARMING, State.REBOOTING):
-                    self.last_activity_time = time.time()
-                    self.set_state(State.IDLE)
-                    logger.info(f"{'Reboot' if current_state == State.REBOOTING else 'Re-arm'} complete — keyphrase active (fresh WebSocket)")
-                else:
-                    self.ready_time = time.time() + 3.0
-                    self.last_activity_time = time.time()
-                    self.set_state(State.IDLE)
-            else:
-                self.set_state(State.ERROR)
+            self.set_state(State.ERROR)
 
     def _on_ws_message(self, ws, message):
         try:
@@ -836,20 +737,20 @@ class MistyController:
         turn_start = time.time()
         logger.info(f"[Turn {turn}] Starting conversation turn")
 
-        try:
-            # Battery guard: enter charging mode if battery critically low
-            battery = self.get_battery_snapshot()
-            if battery.last_updated > 0 and battery.charge_percent < BATTERY_LOW_CRITICAL:
-                logger.warning(f"[Turn {turn}] Skipping — battery too low ({battery.charge_percent*100:.0f}%)")
-                self.set_state(State.CHARGING)
+        # Battery guard: enter charging mode if battery critically low
+        battery = self.get_battery_snapshot()
+        if battery.last_updated > 0 and battery.charge_percent < BATTERY_LOW_CRITICAL:
+            logger.warning(f"[Turn {turn}] Skipping — battery too low ({battery.charge_percent*100:.0f}%)")
+            if self.try_set_state(State.IDLE, State.CHARGING):
                 self._apply_charging_mode()
-                return  # finally block will NOT re-arm (charging mode handles its own state)
+            return
 
-            # Temperature throttle: add delay if overheating
-            if battery.last_updated > 0 and battery.temperature >= BATTERY_TEMP_THROTTLE_C:
-                logger.warning(f"[Turn {turn}] Thermal throttle — waiting 2s (temp={battery.temperature:.0f}°C)")
-                time.sleep(2.0)
+        # Temperature throttle: add delay if overheating
+        if battery.last_updated > 0 and battery.temperature >= BATTERY_TEMP_THROTTLE_C:
+            logger.warning(f"[Turn {turn}] Thermal throttle — waiting 2s (temp={battery.temperature:.0f}°C)")
+            time.sleep(2.0)
 
+        try:
             self._do_conversation_exchange(turn, turn_start)
             # Mark this as a successful conversation cycle for proactive reboot tracking
             self._conversation_cycles += 1
@@ -877,9 +778,8 @@ class MistyController:
             time.sleep(2)
 
         finally:
-            # Always re-arm wake word (unless we entered charging mode)
-            if self.get_state() != State.CHARGING:
-                self._rearm()
+            # Always re-arm wake word
+            self._rearm()
 
     def _do_conversation_exchange(self, turn: int, turn_start: float):
         """Record from Misty, orchestrate STT→LLM→TTS, play response."""
@@ -1052,21 +952,6 @@ class MistyController:
         self.set_state(State.REARMING)
         self.move_head(pitch=0, roll=0, yaw=0, velocity=40)  # center head
 
-        if WAKE_WORD_ENGINE == "openwakeword":
-            # openWakeWord mode — just resume the listener, no keyphrase gymnastics
-            self.stop_recording()
-            time.sleep(1.0)  # brief cooldown
-            self.set_led(0, 255, 0)
-            self.display_image("e_DefaultContent.jpg")
-            self.last_activity_time = time.time()
-            self.set_state(State.IDLE)
-            if self._wake_word_listener:
-                self._wake_word_listener.resume()
-            logger.info("Re-arm complete — openWakeWord listener resumed")
-            return
-
-        # --- Misty keyphrase mode below ---
-
         # Check if proactive reboot is needed (#22)
         if self._conversation_cycles >= PROACTIVE_REBOOT_AFTER_CYCLES:
             self._proactive_reboot()
@@ -1212,12 +1097,10 @@ class MistyController:
         logger.info("Misty Controller starting")
         logger.info(f"  Misty:         {MISTY_BASE}")
         logger.info(f"  Orchestration: {ORCHESTRATION_URL}")
-        logger.info(f"  Wake word:     {WAKE_WORD_ENGINE}")
         logger.info(f"  Recording:     {RECORDING_DURATION_S}s")
         logger.info(f"  Idle timeout:  {IDLE_TIMEOUT_S}s")
-        if WAKE_WORD_ENGINE == "misty":
-            logger.info(f"  Watchdog:      soft={WATCHDOG_IDLE_TIMEOUT_S}s, escalate={WATCHDOG_ESCALATE_TIMEOUT_S}s")
-            logger.info(f"  Proactive reboot: every {PROACTIVE_REBOOT_AFTER_CYCLES} conversation cycles")
+        logger.info(f"  Watchdog:      soft={WATCHDOG_IDLE_TIMEOUT_S}s, escalate={WATCHDOG_ESCALATE_TIMEOUT_S}s")
+        logger.info(f"  Proactive reboot: every {PROACTIVE_REBOOT_AFTER_CYCLES} conversation cycles")
         logger.info("=" * 60)
 
         # Pre-flight checks
@@ -1238,21 +1121,7 @@ class MistyController:
         # Cancel any lingering skills (e.g., built-in faceDetection)
         self.misty_post("/api/skills/cancel")
 
-        # Initialize wake word listener (openWakeWord on laptop)
-        if WAKE_WORD_ENGINE == "openwakeword":
-            if not _OWW_AVAILABLE:
-                logger.error("openWakeWord requested but not installed! pip install openwakeword")
-                return
-            self._wake_word_listener = WakeWordListener(
-                misty_base=MISTY_BASE,
-                on_wake_word=self._on_oww_wake_word,
-            )
-            # Stop Misty's built-in keyphrase engine (we don't need it)
-            self.misty_post("/api/audio/keyphrase/stop")
-            logger.info("openWakeWord listener created — will start after WebSocket connects")
-
         # Connect WebSocket (will enter IDLE or stay DISCONNECTED)
-        # _on_ws_open starts the wake word listener or keyphrase as appropriate
         self._connect_ws()
 
         # If battery was critically low at startup, override to charging mode
@@ -1287,20 +1156,9 @@ class MistyController:
                         logger.warning("Misty health check failed")
                         self.set_state(State.DISCONNECTED)
 
-                # Keyphrase watchdog (only when idle, misty engine only)
-                if state == State.IDLE and WAKE_WORD_ENGINE == "misty":
+                # Keyphrase watchdog (only when idle)
+                if state == State.IDLE:
                     self._watchdog_check()
-
-                # openWakeWord health monitor (only when idle)
-                if state == State.IDLE and WAKE_WORD_ENGINE == "openwakeword" and self._wake_word_listener:
-                    health = self._wake_word_listener.get_health()
-                    if health.get("consecutive_failures", 0) >= 5:
-                        logger.warning(f"openWakeWord listener unhealthy: {health}")
-                        logger.info("Restarting wake word listener...")
-                        self._wake_word_listener.stop()
-                        time.sleep(2.0)
-                        self._wake_word_listener.start()
-                        logger.info("Wake word listener restarted")
         except KeyboardInterrupt:
             self._shutdown()
 
@@ -1330,20 +1188,15 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
         if self.path == "/api/status":
             ctrl = self.controller
             battery = ctrl.get_battery_snapshot()
-            status_data = {
+            self._send_json(200, {
                 "state": ctrl.get_state().name,
                 "turn_id": ctrl.turn_id,
-                "wake_word_engine": WAKE_WORD_ENGINE,
+                "conversation_cycles": ctrl._conversation_cycles,
+                "proactive_reboot_at": PROACTIVE_REBOOT_AFTER_CYCLES,
                 "battery_percent": round(battery.charge_percent * 100),
                 "battery_charging": battery.is_charging,
                 "uptime_s": round(time.time() - ctrl._start_time) if hasattr(ctrl, "_start_time") else None,
-            }
-            if WAKE_WORD_ENGINE == "openwakeword" and ctrl._wake_word_listener:
-                status_data["wake_word_health"] = ctrl._wake_word_listener.get_health()
-            elif WAKE_WORD_ENGINE == "misty":
-                status_data["conversation_cycles"] = ctrl._conversation_cycles
-                status_data["proactive_reboot_at"] = PROACTIVE_REBOOT_AFTER_CYCLES
-            self._send_json(200, status_data)
+            })
         elif self.path == "/api/mic/health":
             ctrl = self.controller
             healthy = ctrl.check_mic_health()
