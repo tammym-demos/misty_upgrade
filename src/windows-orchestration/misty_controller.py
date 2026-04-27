@@ -851,6 +851,15 @@ class MistyController:
         self.display_image("e_Admiration.jpg")  # wide-eyed, attentive
         self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # look up slightly — eye contact
 
+        # Stop keyphrase before recording — shared mic on Snapdragon 410.
+        # In Misty-keyphrase mode, keyphrase auto-stops on detection.
+        # In laptop wake word mode, keyphrase is still active and must be
+        # explicitly stopped or the recording returns 44 bytes (empty WAV).
+        if self._wake_word_listener:
+            logger.info(f"[Turn {turn}] Stopping Misty keyphrase before recording (laptop wake word mode)")
+            self.misty_post("/api/audio/keyphrase/stop")
+            time.sleep(0.5)
+
         # 2. Record audio
         self.start_recording(RECORDING_FILENAME)
         time.sleep(RECORDING_DURATION_S)

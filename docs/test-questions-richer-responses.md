@@ -1,0 +1,182 @@
+# Misty Test Questions — Richer Responses Edition
+
+Updated for the richer responses changes in PR #45. Key differences from the original `test-questions.md`:
+
+| Setting | Before | After |
+|---------|--------|-------|
+| Response length | ≤10 words, 1 sentence | ~20 words, 1-2 sentences |
+| max_tokens | 20 | 40 |
+| Follow-up window | 60s | 90s |
+| Follow-up turn cap | unlimited | 12 turns |
+| Conversation history | 4 messages (2 turns) | 8 messages (4 turns) |
+| Wake word (laptop mode) | "Hey Misty" on robot | "Hey Jarvis" on laptop mic |
+
+---
+
+## Setup
+
+**Laptop wake word mode** (recommended for testing):
+```powershell
+$env:USE_LAPTOP_WAKE_WORD = "true"
+cd src\windows-orchestration
+python misty_controller.py
+```
+Say **"Hey Jarvis"** near the laptop mic, then speak after the orange LED.
+
+**Misty keyphrase mode** (default):
+```powershell
+cd src\windows-orchestration
+python misty_controller.py
+```
+Say **"Hey Misty"** near the robot, then speak after the orange LED.
+
+---
+
+## 1. Quick Check (Single Turn)
+
+Verify the full pipeline works with richer responses:
+
+1. "How are you doing today?"
+   - **Before**: "I'm great, thanks!" (5 words)
+   - **Now expect**: "I'm doing great, thanks for asking! How about you?" (1-2 sentences, ~10-20 words)
+
+2. "What's your name?"
+3. "Tell me a joke."
+   - Good test for richer responses — jokes need setup + punchline (2 sentences)
+4. "What color are you?"
+5. "What time is it?"
+
+**What to watch for**: Responses should feel more conversational — not one-word answers, but not paragraphs either. Target is 1-2 natural sentences.
+
+## 2. Knowledge & Facts
+
+Tests whether richer responses improve factual answers:
+
+6. "What is the capital of France?"
+   - **Before**: "Paris." (1 word)
+   - **Now expect**: "The capital of France is Paris, a beautiful city known for the Eiffel Tower." (~15 words)
+
+7. "What is the largest ocean?"
+8. "How many planets are in our solar system?"
+9. "Who wrote Romeo and Juliet?"
+10. "What is the speed of light?"
+
+**What to watch for**: Answers should include the fact PLUS a brief interesting detail. Not just the bare answer.
+
+## 3. Follow-Up Conversation (Multi-Turn)
+
+Tests the extended 90s/12-turn follow-up window and 8-message history:
+
+11. "What is the capital of Japan?" → "What language do they speak there?" → "What's a popular food there?" → "Do they have robots there?"
+    - 4th follow-up tests the expanded history (old limit was 2 turns)
+
+12. "Do you like music?" → "What kind?" → "Can you sing?" → "Try singing something!"
+
+13. "Tell me about dogs." → "What's the biggest breed?" → "Do you have a favorite?" → "Would you want to be a dog?"
+
+**What to watch for**:
+- Follow-ups should reference context from earlier turns (history now spans 4 turns)
+- Conversation should flow naturally for 90 seconds without wake word
+- After 12 follow-up turns, Misty should end the conversation gracefully
+
+## 4. Longer Questions (6-Second Recording Window)
+
+Test whether the full question gets captured in the recording:
+
+14. "Do you know what the largest lake in the United States is?"
+15. "Can you tell me something interesting about the planet Jupiter?"
+16. "What would you do if you could go anywhere in the world?"
+17. "If you had to pick your favorite season of the year, which one would it be?"
+
+**What to watch for**: With richer responses, answers to these should be more substantive — a sentence or two rather than a single word.
+
+## 5. Personality & Creativity
+
+Tests whether richer responses bring more personality:
+
+18. "Are you a boy or a girl?"
+    - **Before**: "I'm a robot!" (3 words)
+    - **Now expect**: "I'm Misty, a friendly robot! I don't have a gender, but I'm happy to chat." (~15 words)
+
+19. "Do you have any friends?"
+20. "What do you dream about?"
+21. "Would you rather be a cat or a dog?"
+22. "What's your favorite thing about being a robot?"
+
+**What to watch for**: Personality should shine through — playful, curious, warm. Two sentences gives room for a real answer.
+
+## 6. Edge Cases
+
+Tests STT accuracy and error handling:
+
+23. "Supercalifragilisticexpialidocious" *(unusual word)*
+24. "One plus one equals what?" *(math)*
+25. "Say something in Spanish." *(language switching)*
+26. *(Say nothing — test silence detection)*
+27. *(Whisper very quietly — test mic sensitivity)*
+28. *(Speak very fast — test STT with rapid speech)*
+
+## 7. Stress Test — Extended Conversation
+
+Run these as a continuous follow-up chain to test pipeline stability under the 90s window and 12-turn cap:
+
+29. "What's two plus two?"
+30. "What's the opposite of hot?"
+31. "Name a color."
+32. "Name an animal."
+33. "What day is it?"
+34. "Say something funny."
+35. "What's your favorite number?"
+36. "Tell me a fun fact."
+37. "What's the weather like where you are?"
+38. "Do you get tired?"
+39. "What should we talk about next?"
+40. "Goodbye!"
+
+**What to watch for**:
+- Pipeline should stay stable through all 12 turns
+- Response quality shouldn't degrade over time
+- Misty should end conversation after turn 12 or 90s, whichever comes first
+- Latency should stay consistent (~2s follow-ups, ~5s first turn)
+
+## 8. Laptop Wake Word Specific
+
+Tests unique to the laptop mic wake word mode:
+
+41. *(Walk across the room and say "Hey Jarvis" — test laptop mic range)*
+42. *(Say "Hey Jarvis" during Misty's response — self-wake prevention should block it)*
+43. *(Say "Hey Jarvis" immediately after conversation ends — should re-arm within 2s)*
+44. *(Play music near laptop — test false positive rate)*
+45. *(Say "Hey Jarvis" while facing away from laptop — test directional sensitivity)*
+
+---
+
+## Expected Behavior
+
+| LED Color | State | Duration |
+|-----------|-------|----------|
+| 🟢 Green | Ready — listening for wake word | Until triggered |
+| 🟠 Orange | Recording your question | 6 seconds |
+| 🔵 Blue | Processing (STT → LLM → TTS) | ~2-5s |
+| 🟣 Purple | Playing response | Varies by response length |
+| 🩵 Cyan | Follow-up listening | Up to 90s / 12 turns |
+| 🟡 Yellow | Watchdog soft reset | ~5s |
+| 🔴 Red | Error | Check logs |
+
+**Response time**: ~2s for follow-ups, ~5s for first turn (TTS cold start)
+**Response length**: 1-2 sentences, ~20 words (max_tokens=40, post-truncation at 25 words)
+**Follow-up window**: 90 seconds or 12 turns, whichever comes first
+**History**: Misty remembers the last 4 turns (8 messages) of conversation
+
+## Troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---------|-------------|-----|
+| No response to wake word | Keyphrase silent failure (#22) or laptop mic issue | Check logs; try `USE_LAPTOP_WAKE_WORD=true` |
+| 44-byte recording (empty) | Misty keyphrase still active during recording | Fixed in PR #45 — keyphrase stopped before recording in laptop mode |
+| Response too long/wordy | Brevity drift past 25 words | Post-truncation should catch this; check max_tokens=40 |
+| Response too short | Old behavior persisted | Verify running updated code; check system prompt |
+| Follow-up doesn't work | Silence threshold too aggressive | Check `FOLLOWUP_SILENCE_THRESHOLD` (default 5000 bytes) |
+| Laptop wake word false positives | Threshold too low | Increase threshold: `WAKE_WORD_THRESHOLD=0.7` |
+| Laptop wake word misses | Threshold too high or mic issue | Decrease threshold or check `sounddevice` mic selection |
+| Self-wake (Misty triggers herself) | Pause/resume not working | Check `wake_word_listener.py` pause/resume flow in logs |
