@@ -364,9 +364,9 @@ class TestPromptLimiting(unittest.TestCase):
             f"History should be capped near 8, got {len(self._svc.conversation_history)}",
         )
 
-    def test_response_truncation_at_25_words(self):
-        """Responses over 25 words must be truncated to 25 words or 2 sentences."""
-        long_response = " ".join([f"word{i}" for i in range(40)])
+    def test_response_truncation_at_35_words(self):
+        """Responses over 35 words must be truncated to 35 words or 3 sentences."""
+        long_response = " ".join([f"word{i}" for i in range(50)])
         result, _ = self._call_llm_and_capture_payload(
             "test", mock_response_text=long_response
         )
@@ -374,32 +374,33 @@ class TestPromptLimiting(unittest.TestCase):
         words = result["text"].split()
         self.assertLessEqual(
             len(words),
-            26,  # 25 words + possible trailing period word
-            f"Response should be truncated to ~25 words, got {len(words)}",
+            36,  # 35 words + possible trailing period word
+            f"Response should be truncated to ~35 words, got {len(words)}",
         )
 
     def test_two_sentence_truncation(self):
-        """A response with 3+ sentences over 25 words should be truncated at 2 sentence boundaries."""
-        three_sentences = (
+        """A response with 4+ sentences over 35 words should be truncated at 3 sentence boundaries."""
+        four_sentences = (
             "This is the very first long sentence about robotics and AI technology. "
             "This is the equally long second sentence with more interesting details. "
-            "This is the third sentence that definitely should be cut out entirely."
+            "This is the third sentence that adds even more juicy context here. "
+            "This is the fourth sentence that definitely should be cut out entirely."
         )
         result, _ = self._call_llm_and_capture_payload(
-            "test", mock_response_text=three_sentences
+            "test", mock_response_text=four_sentences
         )
-        # Should keep at most 2 sentence-ending punctuation marks
+        # Should keep at most 3 sentence-ending punctuation marks
         text = result["text"]
         sentence_count = text.count(".") + text.count("!") + text.count("?")
-        self.assertLessEqual(sentence_count, 2, f"Expected at most 2 sentences in: {text}")
+        self.assertLessEqual(sentence_count, 3, f"Expected at most 3 sentences in: {text}")
 
-    def test_max_tokens_is_40(self):
-        """The LLM payload must use max_tokens=40 for short mode."""
+    def test_max_tokens_is_60(self):
+        """The LLM payload must use max_tokens=60 for short mode."""
         _, payload = self._call_llm_and_capture_payload("test question")
         self.assertEqual(
             payload["max_tokens"],
-            40,
-            f"Expected max_tokens=40 for short mode, got {payload['max_tokens']}",
+            60,
+            f"Expected max_tokens=60 for short mode, got {payload['max_tokens']}",
         )
 
     # ------------------------------------------------------------------
@@ -514,7 +515,7 @@ class TestPromptLimiting(unittest.TestCase):
         # Second call: different topic
         result, payload = self._call_llm_and_capture_payload("What's 2 plus 2?")
         self.assertEqual(result["responseMode"], "short")
-        self.assertEqual(payload["max_tokens"], 40)
+        self.assertEqual(payload["max_tokens"], 60)
 
     def test_brevity_reminder_suppressed_in_summary_mode(self):
         """Brevity reminder should not appear in summary/continuation modes."""

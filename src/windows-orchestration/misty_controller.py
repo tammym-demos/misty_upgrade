@@ -920,7 +920,7 @@ class MistyController:
             speech_ended = threading.Event()
             self._wake_word_listener.start_speech_monitor(
                 on_speech_end=lambda: speech_ended.set(),
-                min_duration=3.0,
+                min_duration=RECORDING_DURATION_S,  # at least the standard duration
                 max_duration=15.0,
             )
             speech_ended.wait(timeout=15.0)
@@ -937,15 +937,15 @@ class MistyController:
         # Small delay for Misty to finalize the file
         time.sleep(0.5)
 
-        # 3. Retrieve recorded audio — thinking face + "hmm" sound
+        # 3. Retrieve recorded audio — wondering face + thinking sound
         self.set_state(State.PROCESSING)
         self.set_led(0, 0, 255)  # blue = processing
-        self.display_image("e_ContentRight.jpg")  # looking to the side — "thinking"
+        self.display_image("e_Contempt.jpg")  # one eyebrow raised — "hmm, let me think..."
         self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)  # tilt head — pondering
 
-        # Play a thinking sound so the user knows Misty heard them
+        # Play a wondering sound so the user knows Misty heard them
         try:
-            self.misty_post("/api/audio/play", {"FileName": "s_PhraseHello.wav", "Volume": 25})
+            self.misty_post("/api/audio/play", {"FileName": "s_Amazement.wav", "Volume": 25})
         except Exception as e:
             logger.debug(f"[Turn {turn}] Thinking sound failed: {e}")
 
@@ -968,11 +968,7 @@ class MistyController:
         Returns True if speech was detected and a response was played,
         False if no speech was detected (empty STT).
         """
-        # Processing state — deep thinking
-        self.set_state(State.PROCESSING)
-        self.set_led(0, 0, 255)  # blue = processing
-        self.display_image("e_SystemCamera.jpg")  # concentrated/processing face
-        self.move_head(pitch=0, roll=-5, yaw=-15, velocity=30)  # slight head tilt other way — pondering
+        # Processing state already set by caller — just send to orchestration
 
         # Send to orchestration service
         response = requests.post(
@@ -1062,6 +1058,12 @@ class MistyController:
         # Very small recordings are certainly silence
         if len(audio_bytes) < FOLLOWUP_SILENCE_THRESHOLD:
             return False
+
+        # Show thinking face while processing follow-up
+        self.set_state(State.PROCESSING)
+        self.set_led(0, 0, 255)  # blue = processing
+        self.display_image("e_Contempt.jpg")  # wondering face
+        self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)
 
         # Send through the full pipeline — orchestration returns empty_stt error
         # if no speech was detected, which we treat as silence

@@ -100,6 +100,9 @@ class WakeWordListener:
         self._last_speech_time = 0.0
         self._speech_monitor_min_s = SPEECH_MIN_DURATION_S
         self._speech_monitor_max_s = SPEECH_MAX_DURATION_S
+        self._speech_rms_threshold = SPEECH_RMS_THRESHOLD  # dynamic, set by calibration
+        self._calibration_samples: list[int] = []  # RMS samples during calibration
+        self._calibration_done = False
 
         # openWakeWord model (lazy init)
         self._oww_model = None
@@ -260,12 +263,15 @@ class WakeWordListener:
         self._last_speech_time = 0.0
         self._speech_monitor_min_s = min_duration
         self._speech_monitor_max_s = max_duration
+        self._calibration_samples = []
+        self._calibration_done = False
+        self._speech_rms_threshold = SPEECH_RMS_THRESHOLD  # reset to default until calibrated
         self._speech_monitor_active = True
         # Ensure audio flows even if paused for wake word
         self._pause_event.set()
         logger.info(
             f"Speech monitor started (min={min_duration}s, max={max_duration}s, "
-            f"rms_threshold={SPEECH_RMS_THRESHOLD})"
+            f"calibrating noise floor...)"
         )
 
     def stop_speech_monitor(self):
@@ -394,22 +400,46 @@ class WakeWordListener:
     # --- Speech monitor helpers ---
 
     def _process_speech_monitor_frame(self, pcm: np.ndarray):
-        """Process a single audio frame for speech/silence detection using RMS."""
+        """Process a single audio frame for speech/silence detection using RMS.
+        
+        First ~1.5s: calibrate noise floor (fan noise, ambient).
+        After calibration: detect speech as RMS significantly above noise floor.
+        """
         now = time.time()
         elapsed = now - self._speech_monitor_start_time
 
         # Compute RMS energy
         rms = int(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
-        is_speech = rms > SPEECH_RMS_THRESHOLD
+
+        # Phase 1: Calibration (~1.5s = ~18 frames at 80ms each)
+        CALIBRATION_FRAMES = 18
+        if not self._calibration_done:
+            self._calibration_samples.append(rms)
+            if len(self._calibration_samples) >= CALIBRATION_FRAMES:
+                # Set threshold as noise floor mean + 2x standard deviation, minimum 30
+                noise_mean = np.mean(self._calibration_samples)
+                noise_std = np.std(self._calibration_samples)
+                # Threshold = noise floor + margin (at least 2x std, minimum absolute of 30)
+                margin = max(noise_std * 3, 30)
+                self._speech_rms_threshold = int(noise_mean + margin)
+                self._calibration_done = True
+                logger.info(
+                    f"Speech monitor: calibrated — noise_floor={noise_mean:.0f} "
+                    f"std={noise_std:.0f} → threshold={self._speech_rms_threshold}"
+                )
+            return  # don't process speech during calibration
+
+        # Phase 2: Speech detection
+        is_speech = rms > self._speech_rms_threshold
 
         # Log RMS periodically for diagnostics (every ~0.5s = ~6 frames at 80ms)
         frame_count = int(elapsed / 0.08)
         if frame_count % 6 == 0:
-            logger.debug(f"Speech monitor: RMS={rms} threshold={SPEECH_RMS_THRESHOLD} speech={is_speech} elapsed={elapsed:.1f}s")
+            logger.info(f"Speech monitor: RMS={rms} threshold={self._speech_rms_threshold} speech={is_speech} elapsed={elapsed:.1f}s")
 
         if is_speech:
             if not self._speech_detected:
-                logger.info(f"Speech monitor: speech started (RMS={rms}, elapsed={elapsed:.1f}s)")
+                logger.info(f"Speech monitor: speech started (RMS={rms}, threshold={self._speech_rms_threshold}, elapsed={elapsed:.1f}s)")
             self._speech_detected = True
             self._last_speech_time = now
 
@@ -419,11 +449,15 @@ class WakeWordListener:
             self._fire_speech_end()
             return
 
-        # Check no-speech timeout — no speech detected at all
+        # Check no-speech timeout — if laptop mic can't hear speech,
+        # fall back to minimum recording duration (don't cut short)
         if not self._speech_detected and elapsed >= SPEECH_NO_SPEECH_TIMEOUT_S:
-            logger.info(f"Speech monitor: no speech detected after {SPEECH_NO_SPEECH_TIMEOUT_S}s")
-            self._fire_speech_end()
-            return
+            if elapsed >= self._speech_monitor_min_s:
+                logger.info(f"Speech monitor: no speech on laptop mic after {elapsed:.1f}s — falling back to min duration")
+                self._fire_speech_end()
+                return
+            # Otherwise keep recording until min_duration — user may be speaking to Misty
+            # and laptop mic just can't hear them
 
         # Check silence after speech — end of utterance
         if self._speech_detected and not is_speech:
