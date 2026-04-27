@@ -901,17 +901,16 @@ class MistyController:
             self.misty_post("/api/audio/record/stop")  # belt-and-suspenders cleanup
             time.sleep(0.5)  # minimal delay — no keyphrase to release
 
-        # Play a short "ready" chime so the user knows Misty is listening.
-        # Critical in laptop wake word mode: there's a ~3s gap between saying
-        # the wake word and when recording starts (keyphrase release delay).
-        # Without this cue, users speak during the gap and Misty misses it.
+        # Play a short "ready" chime so the user knows Misty is preparing.
+        # After the chime, LED changes to bright green = "speak now".
         try:
             self.misty_post("/api/audio/play", {"FileName": "s_Awe3.wav", "Volume": 30})
             time.sleep(0.8)  # let the chime play before recording starts
         except Exception as e:
             logger.debug(f"[Turn {turn}] Ready chime failed: {e}")
 
-        # 2. Record audio — use VAD-controlled duration if laptop listener available
+        # 2. Record audio — bright green LED + tally light = "I'm listening, speak now!"
+        self.set_led(0, 255, 0)  # green = recording active, speak now
         self.start_recording(RECORDING_FILENAME)
         record_start = time.time()
         
