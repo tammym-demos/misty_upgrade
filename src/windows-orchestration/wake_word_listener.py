@@ -104,6 +104,10 @@ class WakeWordListener:
         self._calibration_samples: list[int] = []  # RMS samples during calibration
         self._calibration_done = False
 
+        # Laptop mic recording (capture audio for STT instead of Misty's mic)
+        self._recording = False
+        self._recorded_frames: list[bytes] = []
+
         # openWakeWord model (lazy init)
         self._oww_model = None
 
@@ -294,6 +298,60 @@ class WakeWordListener:
                 f"(speech_detected={self._speech_detected})"
             )
 
+    def start_recording(self):
+        """Start capturing audio frames from the laptop mic for STT.
+        
+        Call this instead of (or alongside) Misty's recording to use the
+        laptop mic as the audio source. Frames are buffered in memory.
+        """
+        self._recorded_frames = []
+        self._recording = True
+        # Ensure audio flows even if paused
+        self._pause_event.set()
+        logger.info("Laptop mic recording started")
+
+    def stop_recording(self) -> bytes:
+        """Stop capturing and return WAV audio bytes.
+        
+        Returns:
+            WAV-format audio bytes (16kHz, 16-bit mono) ready for STT.
+        """
+        self._recording = False
+        frames = self._recorded_frames
+        self._recorded_frames = []
+
+        if not frames:
+            logger.warning("Laptop mic recording: no frames captured")
+            return b""
+
+        # Concatenate all PCM frames
+        pcm_data = b"".join(frames)
+        logger.info(
+            f"Laptop mic recording stopped: {len(frames)} frames, "
+            f"{len(pcm_data)} bytes PCM, "
+            f"{len(pcm_data) / (SAMPLE_RATE * 2):.1f}s"
+        )
+
+        # Wrap in WAV header (16kHz, 16-bit, mono)
+        import struct
+        wav_header = struct.pack(
+            '<4sI4s4sIHHIIHH4sI',
+            b'RIFF',
+            36 + len(pcm_data),
+            b'WAVE',
+            b'fmt ',
+            16,       # chunk size
+            1,        # PCM format
+            1,        # mono
+            SAMPLE_RATE,
+            SAMPLE_RATE * 2,  # byte rate
+            2,        # block align
+            16,       # bits per sample
+            b'data',
+            len(pcm_data),
+        )
+        return wav_header + pcm_data
+
     @property
     def is_running(self) -> bool:
         return self._running and self._stream is not None
@@ -323,13 +381,14 @@ class WakeWordListener:
         """Called by sounddevice for each audio block. Must be fast — just queue the data."""
         if status:
             logger.debug(f"Audio stream status: {status}")
-        if self._paused and not self._speech_monitor_active:
-            return  # drop audio during conversation (unless speech monitoring)
+        
+        # Buffer frames for laptop mic recording (independent of wake word state)
+        if self._recording:
+            self._recorded_frames.append(bytes(indata))
+
+        if self._paused and not self._speech_monitor_active and not self._recording:
+            return  # drop audio during conversation (unless speech monitoring or recording)
         data = bytes(indata)
-        # Log first speech monitor frame to verify data is flowing
-        if self._speech_monitor_active and self._total_frames % 100 == 0:
-            sample = int.from_bytes(data[:2], byteorder='little', signed=True) if len(data) >= 2 else 0
-            logger.info(f"Audio callback: speech_monitor frame, len={len(data)}, first_sample={sample}")
         try:
             self._audio_queue.put_nowait(data)
         except queue.Full:

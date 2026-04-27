@@ -303,6 +303,36 @@ class MistyController:
         result = self.misty_get("/api/device", timeout=3.0)
         return result is not None and result.get("status") == "Success"
 
+    def _upload_greeting(self):
+        """Generate 'What's up baby?' TTS and upload to Misty as greeting audio."""
+        try:
+            # Ask orchestration service to generate TTS
+            response = requests.post(
+                f"{ORCHESTRATION_URL}/api/tts",
+                json={"text": "What's up baby?"},
+                timeout=15.0,
+            )
+            if response.status_code != 200:
+                logger.warning(f"Greeting TTS failed: HTTP {response.status_code}")
+                return
+
+            audio_data = response.content
+            if len(audio_data) < 100:
+                logger.warning(f"Greeting TTS too small: {len(audio_data)} bytes")
+                return
+
+            # Upload to Misty as a named audio file
+            audio_b64 = base64.b64encode(audio_data).decode("ascii")
+            result = self.misty_post("/api/audio", {
+                "FileName": "greeting_whatsup.wav",
+                "Data": audio_b64,
+                "ImmediatelyApply": False,
+                "OverwriteExisting": True,
+            })
+            logger.info(f"Greeting audio uploaded to Misty ({len(audio_data)} bytes)")
+        except Exception as e:
+            logger.warning(f"Failed to upload greeting: {e}")
+
     def check_orchestration_health(self) -> bool:
         try:
             r = requests.get(f"{ORCHESTRATION_URL}/api/health", timeout=3.0)
@@ -901,20 +931,32 @@ class MistyController:
             self.misty_post("/api/audio/record/stop")  # belt-and-suspenders cleanup
             time.sleep(0.5)  # minimal delay — no keyphrase to release
 
-        # Play a short "ready" chime so the user knows Misty is preparing.
-        # After the chime, LED changes to bright green = "speak now".
+        # Play "What's up baby?" greeting via pre-uploaded TTS audio.
+        # Falls back to chime if greeting audio isn't available.
         try:
-            self.misty_post("/api/audio/play", {"FileName": "s_Awe3.wav", "Volume": 30})
-            time.sleep(0.8)  # let the chime play before recording starts
+            self.misty_post("/api/audio/play", {"FileName": "greeting_whatsup.wav", "Volume": 40})
+            time.sleep(1.2)  # let the greeting play before recording starts
         except Exception as e:
-            logger.debug(f"[Turn {turn}] Ready chime failed: {e}")
+            logger.debug(f"[Turn {turn}] Greeting playback failed, trying chime: {e}")
+            try:
+                self.misty_post("/api/audio/play", {"FileName": "s_Awe3.wav", "Volume": 30})
+                time.sleep(0.8)
+            except Exception:
+                pass
 
         # 2. Record audio — bright green LED + tally light = "I'm listening, speak now!"
         self.set_led(0, 255, 0)  # green = recording active, speak now
+        
+        # Start laptop mic recording (primary audio source for STT)
+        use_laptop_mic = self._wake_word_listener and self._wake_word_listener.is_running
+        if use_laptop_mic:
+            self._wake_word_listener.start_recording()
+        
+        # Also start Misty recording for tally light indicator (audio not used for STT)
         self.start_recording(RECORDING_FILENAME)
         record_start = time.time()
         
-        if self._wake_word_listener and self._wake_word_listener.is_running:
+        if use_laptop_mic:
             # Dynamic recording: laptop mic monitors speech and signals when to stop
             speech_ended = threading.Event()
             self._wake_word_listener.start_speech_monitor(
@@ -931,6 +973,19 @@ class MistyController:
         self.stop_recording()
         self._recording_cycles += 1
         record_duration = time.time() - record_start
+        
+        # Get audio from laptop mic (preferred) or fall back to Misty's mic
+        if use_laptop_mic:
+            laptop_audio = self._wake_word_listener.stop_recording()
+            if len(laptop_audio) > 100:
+                logger.info(f"[Turn {turn}] Using LAPTOP mic: {len(laptop_audio)} bytes, {record_duration:.1f}s")
+                audio_bytes = laptop_audio
+            else:
+                logger.warning(f"[Turn {turn}] Laptop mic empty, falling back to Misty mic")
+                audio_bytes = None  # will fetch from Misty below
+        else:
+            audio_bytes = None
+
         logger.info(f"[Turn {turn}] Recorded {record_duration:.1f}s (cycle {self._recording_cycles})")
 
         # Small delay for Misty to finalize the file
@@ -948,12 +1003,13 @@ class MistyController:
         except Exception as e:
             logger.debug(f"[Turn {turn}] Thinking sound failed: {e}")
 
-        audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
-        if not audio_b64:
-            raise RuntimeError("Failed to retrieve recorded audio from Misty")
-
-        audio_bytes = base64.b64decode(audio_b64)
-        logger.info(f"[Turn {turn}] Retrieved {len(audio_bytes)} bytes of audio")
+        # Fall back to Misty mic if laptop mic wasn't used or was empty
+        if audio_bytes is None:
+            audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
+            if not audio_b64:
+                raise RuntimeError("Failed to retrieve recorded audio from Misty")
+            audio_bytes = base64.b64decode(audio_b64)
+            logger.info(f"[Turn {turn}] Using MISTY mic: {len(audio_bytes)} bytes")
 
         if len(audio_bytes) < FOLLOWUP_SILENCE_THRESHOLD:
             raise RuntimeError(f"Recording too small ({len(audio_bytes)} bytes) — likely empty")
@@ -1030,8 +1086,12 @@ class MistyController:
         self.move_head(pitch=-10, roll=-3, yaw=-10, velocity=40)  # slight head tilt — attentive
 
         # Record a short clip — use VAD if available
+        use_laptop_mic = self._wake_word_listener and self._wake_word_listener.is_running
+        if use_laptop_mic:
+            self._wake_word_listener.start_recording()
+        
         self.start_recording(RECORDING_FILENAME)
-        if self._wake_word_listener and self._wake_word_listener.is_running:
+        if use_laptop_mic:
             speech_ended = threading.Event()
             self._wake_word_listener.start_speech_monitor(
                 on_speech_end=lambda: speech_ended.set(),
@@ -1046,13 +1106,25 @@ class MistyController:
         self._recording_cycles += 1
         time.sleep(0.5)  # finalize
 
-        audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
-        if not audio_b64:
-            logger.warning(f"[Turn {turn}] Follow-up: failed to retrieve audio")
-            return False
+        # Get audio from laptop mic (preferred) or Misty
+        if use_laptop_mic:
+            laptop_audio = self._wake_word_listener.stop_recording()
+            if len(laptop_audio) > 100:
+                logger.info(f"[Turn {turn}] Follow-up using LAPTOP mic: {len(laptop_audio)} bytes")
+                audio_bytes = laptop_audio
+            else:
+                logger.warning(f"[Turn {turn}] Follow-up laptop mic empty, falling back to Misty mic")
+                audio_bytes = None
+        else:
+            audio_bytes = None
 
-        audio_bytes = base64.b64decode(audio_b64)
-        logger.info(f"[Turn {turn}] Follow-up recording: {len(audio_bytes)} bytes")
+        if audio_bytes is None:
+            audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
+            if not audio_b64:
+                logger.warning(f"[Turn {turn}] Follow-up: failed to retrieve audio")
+                return False
+            audio_bytes = base64.b64decode(audio_b64)
+            logger.info(f"[Turn {turn}] Follow-up using MISTY mic: {len(audio_bytes)} bytes")
 
         # Very small recordings are certainly silence
         if len(audio_bytes) < FOLLOWUP_SILENCE_THRESHOLD:
@@ -1314,6 +1386,10 @@ class MistyController:
         orch_ok = self.check_orchestration_health()
         if not orch_ok:
             logger.warning("Orchestration service not reachable — will retry during turns")
+
+        # Upload "What's up baby?" greeting to Misty via orchestration TTS
+        if orch_ok:
+            self._upload_greeting()
 
         # Cancel any lingering skills (e.g., built-in faceDetection)
         self.misty_post("/api/skills/cancel")

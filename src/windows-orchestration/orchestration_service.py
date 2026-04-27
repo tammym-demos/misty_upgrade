@@ -394,18 +394,26 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
         if model is None:
             return {"status": "error", "error": "stt_failure"}
 
+        # Log audio stats for debugging empty STT issues
+        try:
+            import numpy as _np
+            audio_io_check = BytesIO(audio_bytes)
+            import soundfile as _sf
+            data, sr = _sf.read(audio_io_check)
+            rms = float(_np.sqrt(_np.mean(data ** 2)))
+            peak = float(_np.max(_np.abs(data)))
+            logger.info(f"Audio stats: {len(audio_bytes)} bytes, sr={sr}, "
+                        f"duration={len(data)/sr:.1f}s, RMS={rms:.6f}, peak={peak:.6f}")
+        except Exception as e:
+            logger.debug(f"Audio stats failed: {e}")
+
         audio_io = BytesIO(audio_bytes)
+        # First try WITHOUT VAD to see if whisper can find any speech
         segments, info = model.transcribe(
             audio_io,
             language="en",
             beam_size=5,
-            vad_filter=True,
-            vad_parameters={
-                "min_speech_duration_ms": 100,
-                "min_silence_duration_ms": 300,
-                "speech_pad_ms": 400,
-                "threshold": 0.3,  # lower threshold for quieter mics (default 0.5)
-            },
+            vad_filter=False,
             initial_prompt="Hey Misty, tell me about science, history, math, geography, and fun facts.",
         )
         text = " ".join(seg.text.strip() for seg in segments).strip()
@@ -693,6 +701,43 @@ def fallback_tts():
         
     except Exception as e:
         logger.error(f"Fallback TTS failed: {e}")
+        return jsonify({"status": "error", "error": "internal_error"}), 500
+
+
+@app.route("/api/tts", methods=["POST"])
+def tts_endpoint():
+    """Generate TTS audio and return raw WAV bytes.
+    
+    Used by the controller to pre-generate greeting audio etc.
+    POST JSON: {"text": "What's up baby?"}
+    Returns: audio/wav binary
+    """
+    try:
+        data = request.json or {}
+        text = data.get("text", "")
+        
+        if not text:
+            return jsonify({"status": "error", "error": "no_text"}), 400
+        if len(text) > 500:
+            return jsonify({"status": "error", "error": "text_too_long"}), 400
+        
+        result = text_to_speech(text, time.time())
+        
+        if result.get("status") == "error":
+            return jsonify(result), 500
+        
+        audio_file = result.get("audioFile")
+        if not audio_file:
+            return jsonify({"status": "error", "error": "no_audio_generated"}), 500
+        
+        audio_path = os.path.join("responses", audio_file)
+        if not os.path.exists(audio_path):
+            return jsonify({"status": "error", "error": "audio_file_missing"}), 500
+        
+        return send_file(audio_path, mimetype='audio/wav')
+        
+    except Exception as e:
+        logger.error(f"TTS endpoint failed: {e}")
         return jsonify({"status": "error", "error": "internal_error"}), 500
 
 # ============================================================================
