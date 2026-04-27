@@ -64,6 +64,11 @@ BATTERY_TEMP_THROTTLE_C = 50.0  # add delay between turns
 # Idle timeout
 IDLE_TIMEOUT_S = float(os.getenv("IDLE_TIMEOUT_S", "900"))  # 15 minutes
 
+# Proactive reboot — keyphrase engine degrades after ~2 conversation cycles (#22)
+PROACTIVE_REBOOT_AFTER_CYCLES = int(os.getenv("PROACTIVE_REBOOT_AFTER_CYCLES", "2"))
+REBOOT_POLL_INTERVAL_S = 5.0   # poll interval while waiting for Misty to come back
+REBOOT_TIMEOUT_S = 120.0       # max wait for Misty to come back after reboot
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -101,6 +106,7 @@ class State(Enum):
     PLAYING = "PLAYING"
     LISTENING = "LISTENING"  # follow-up listening after response
     REARMING = "REARMING"
+    REBOOTING = "REBOOTING"  # proactive reboot in progress (#22)
     CHARGING = "CHARGING"
     ERROR = "ERROR"
 
@@ -130,6 +136,9 @@ class MistyController:
         self._last_keyphrase_armed_time = 0.0   # last time keyphrase was started/re-armed
         self._watchdog_recovery_level = 0       # 0=none, 1=soft reset done, 2=sensory reboot done
         self._watchdog_recovery_time = 0.0      # when the last recovery attempt was made
+
+        # Proactive reboot — counts successful conversation cycles (wake→response→rearm)
+        self._conversation_cycles = 0
 
     # --- State transitions ---
 
@@ -613,11 +622,11 @@ class MistyController:
         if self.start_keyphrase(force_restart=True):
             self.set_led(0, 255, 0)
             self.display_image("e_DefaultContent.jpg")
-            if current_state == State.REARMING:
-                # Re-arm reconnect — no grace period needed, go straight to IDLE
+            if current_state in (State.REARMING, State.REBOOTING):
+                # Re-arm or post-reboot reconnect — no grace period, go straight to IDLE
                 self.last_activity_time = time.time()
                 self.set_state(State.IDLE)
-                logger.info("Re-arm complete — keyphrase active (fresh WebSocket)")
+                logger.info(f"{'Reboot' if current_state == State.REBOOTING else 'Re-arm'} complete — keyphrase active (fresh WebSocket)")
             else:
                 # Initial startup — grace period to ignore stale events
                 self.ready_time = time.time() + 3.0
@@ -691,7 +700,7 @@ class MistyController:
 
     def _on_ws_close(self, ws, close_status_code, close_msg):
         logger.warning(f"WebSocket closed (code={close_status_code})")
-        if self.running and self.get_state() != State.REARMING:
+        if self.running and self.get_state() not in (State.REARMING, State.REBOOTING):
             self.set_state(State.DISCONNECTED)
             self._schedule_reconnect()
 
@@ -743,6 +752,9 @@ class MistyController:
 
         try:
             self._do_conversation_exchange(turn, turn_start)
+            # Mark this as a successful conversation cycle for proactive reboot tracking
+            self._conversation_cycles += 1
+            logger.info(f"[Turn {turn}] Conversation cycle {self._conversation_cycles}/{PROACTIVE_REBOOT_AFTER_CYCLES}")
 
             # Follow-up listening loop — listen for continued conversation
             # without requiring the wake word again
@@ -940,7 +952,12 @@ class MistyController:
         self.set_state(State.REARMING)
         self.move_head(pitch=0, roll=0, yaw=0, velocity=40)  # center head
 
-        # Aggressive audio resource cleanup before re-arming.
+        # Check if proactive reboot is needed (#22)
+        if self._conversation_cycles >= PROACTIVE_REBOOT_AFTER_CYCLES:
+            self._proactive_reboot()
+            return
+
+        # Normal re-arm: aggressive audio resource cleanup before re-arming.
         # Misty's audio subsystem (Snapdragon 410) degrades after multiple
         # recording/playback/keyphrase cycles. Extended cooldown lets the
         # hardware fully release resources before keyphrase restart (#22).
@@ -960,6 +977,119 @@ class MistyController:
         # Wait for the connection to establish and keyphrase to start
         time.sleep(6.0)
 
+    def _proactive_reboot(self):
+        """Proactive reboot to prevent keyphrase silent failure (#22).
+        
+        The Snapdragon 410 keyphrase engine degrades after ~2 conversation cycles.
+        Instead of waiting for failure, reboot preemptively and tell the user.
+        """
+        logger.warning(f"Proactive reboot: {self._conversation_cycles} cycles reached "
+                       f"(limit={PROACTIVE_REBOOT_AFTER_CYCLES})")
+
+        # Battery check — skip reboot if battery is critically low
+        battery = self.get_battery_snapshot()
+        if battery.last_updated > 0 and battery.charge_percent < BATTERY_LOW_CRITICAL:
+            logger.warning(f"Proactive reboot skipped — battery too low ({battery.charge_percent*100:.0f}%)")
+            self._conversation_cycles = 0  # reset to avoid infinite skip loop
+            # Fall back to normal re-arm
+            self.stop_recording()
+            self.misty_post("/api/audio/keyphrase/stop")
+            time.sleep(5.0)
+            if self.ws:
+                self.ws.close()
+                time.sleep(1.0)
+            self.reconnect_attempts = 0
+            self._connect_ws()
+            time.sleep(6.0)
+            return
+
+        self.set_state(State.REBOOTING)
+
+        # Announce the reboot to the user
+        self.set_led(255, 200, 0)  # yellow = maintenance
+        self.display_image("e_ContentLeft.jpg")  # calm face
+        self._play_reboot_announcement()
+
+        # Stop all audio before reboot
+        self.stop_recording()
+        self.misty_post("/api/audio/keyphrase/stop")
+        time.sleep(1.0)
+
+        # Close WebSocket cleanly (state=REBOOTING suppresses auto-reconnect)
+        if self.ws:
+            self.ws.close()
+            time.sleep(0.5)
+
+        # Issue full reboot
+        logger.info("Proactive reboot: issuing Core+Sensory reboot")
+        self.misty_post("/api/reboot", {"Core": True, "SensoryServices": True})
+
+        # Wait for Misty to come back online
+        logger.info(f"Proactive reboot: waiting up to {REBOOT_TIMEOUT_S:.0f}s for Misty to come back")
+        time.sleep(10.0)  # Misty needs time to start shutting down
+
+        reboot_start = time.time()
+        while time.time() - reboot_start < REBOOT_TIMEOUT_S:
+            time.sleep(REBOOT_POLL_INTERVAL_S)
+            if self.check_misty_health():
+                elapsed = time.time() - reboot_start
+                logger.info(f"Proactive reboot: Misty back online after {elapsed:.0f}s")
+                break
+        else:
+            logger.error("Proactive reboot: timeout waiting for Misty — attempting reconnect anyway")
+
+        # Reset all reboot-related bookkeeping
+        self._conversation_cycles = 0
+        self._watchdog_recovery_level = 0
+        self._watchdog_recovery_time = time.time()
+        self._last_keyphrase_armed_time = 0.0
+        self._last_wake_event_time = 0.0
+
+        # Reconnect WebSocket — _on_ws_open handles subscribe + keyphrase start
+        self.reconnect_attempts = 0
+        self._connect_ws()
+        # Wait for full readiness (WS connected + keyphrase armed)
+        time.sleep(8.0)
+
+        # Verify we made it back to IDLE
+        if self.get_state() == State.IDLE:
+            logger.info("Proactive reboot: fully recovered — ready for conversations")
+        else:
+            logger.warning(f"Proactive reboot: recovery incomplete (state={self.get_state().value})")
+
+    def _play_reboot_announcement(self):
+        """Play a reboot announcement on Misty via orchestration TTS.
+        Falls back to Misty's built-in system sound if TTS is unavailable.
+        """
+        try:
+            response = requests.post(
+                f"{ORCHESTRATION_URL}/api/fallback-tts",
+                json={"text": "I need a quick reset. Be right back!"},
+                timeout=10.0,
+            )
+            if response.status_code == 200:
+                result = response.json()
+                audio_uri = result.get("audio_uri", "")
+                if audio_uri:
+                    audio_url = f"{ORCHESTRATION_URL}{audio_uri}"
+                    audio_resp = requests.get(audio_url, timeout=10.0)
+                    audio_resp.raise_for_status()
+                    wav_bytes = audio_resp.content
+                    duration = self.upload_and_play_audio(wav_bytes, "reboot_announce.wav")
+                    time.sleep(duration + 1.0)
+                    logger.info("Proactive reboot: announcement played")
+                    return
+            logger.warning(f"Proactive reboot: TTS unavailable (status={response.status_code})")
+        except Exception as e:
+            logger.warning(f"Proactive reboot: announcement failed: {e}")
+
+        # Fallback: play Misty's built-in system sound
+        try:
+            self.misty_post("/api/audio/play", {"FileName": "s_Awe2.wav"})
+            time.sleep(2.0)
+        except Exception:
+            pass
+
     # --- Main loop ---
 
     def start(self):
@@ -970,6 +1100,7 @@ class MistyController:
         logger.info(f"  Recording:     {RECORDING_DURATION_S}s")
         logger.info(f"  Idle timeout:  {IDLE_TIMEOUT_S}s")
         logger.info(f"  Watchdog:      soft={WATCHDOG_IDLE_TIMEOUT_S}s, escalate={WATCHDOG_ESCALATE_TIMEOUT_S}s")
+        logger.info(f"  Proactive reboot: every {PROACTIVE_REBOOT_AFTER_CYCLES} conversation cycles")
         logger.info("=" * 60)
 
         # Pre-flight checks
@@ -1060,6 +1191,8 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
             self._send_json(200, {
                 "state": ctrl.get_state().name,
                 "turn_id": ctrl.turn_id,
+                "conversation_cycles": ctrl._conversation_cycles,
+                "proactive_reboot_at": PROACTIVE_REBOOT_AFTER_CYCLES,
                 "battery_percent": round(battery.charge_percent * 100),
                 "battery_charging": battery.is_charging,
                 "uptime_s": round(time.time() - ctrl._start_time) if hasattr(ctrl, "_start_time") else None,

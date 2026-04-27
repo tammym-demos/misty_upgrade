@@ -199,9 +199,22 @@ The Snapdragon 410 sensory services silently stop firing `KeyPhraseRecognized` W
   3. **Full reboot** (+60s): red LED → `POST /api/reboot {"Core": true, "SensoryServices": true}`
 
 **Future alternatives under consideration:**
-- Proactive reboot every N turns (before failure occurs)
-- Python-based wake word detection (openwakeword/pvporcupine) on companion device with continuous mic streaming
+- Python-based wake word detection (Picovoice Porcupine or openwakeword) on companion device with continuous mic streaming
 - Touch-based trigger using Misty's capacitive sensors
+
+### Proactive Reboot (#22 Mitigation)
+
+Since the keyphrase engine reliably fails after ~2 conversation cycles, the controller now performs a **proactive reboot before failure occurs**:
+
+1. After `PROACTIVE_REBOOT_AFTER_CYCLES` successful conversations (default: 2), the controller triggers a reboot instead of a normal re-arm
+2. Misty announces *"I need a quick reset. Be right back!"* via TTS
+3. Full Core+Sensory reboot is issued (~60-90s downtime)
+4. Controller polls `/api/device` until Misty is back, then reconnects WebSocket and re-arms keyphrase
+5. Cycle counter resets to 0
+
+The proactive reboot is skipped if battery is critically low (<10%). Configure via `PROACTIVE_REBOOT_AFTER_CYCLES` env var.
+
+This is a **UX-aware workaround** — the user knows Misty is rebooting rather than experiencing mysterious silence. The watchdog remains as a safety net for unexpected failures between reboots.
 
 ## Foundry Local API
 
@@ -227,7 +240,7 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 ## Key Conventions
 
 - **Latency SLO**: p50 < 3s, p95 < 6s end-to-end (aspirational — currently achieving ~23s, see #21). The orchestration service logs per-stage timing: `[Pipeline Xms] STT=X LLM=X TTS=X history=N`. Measured breakdown: STT ~420ms, LLM ~1200ms, TTS ~6000ms. TTS scales linearly with response length — keep `max_tokens` low (currently 40).
-- **Misty controller state machine**: DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING → PROCESSING → PLAYING →]* REARMING (5s cooldown + full WS reconnect + keyphrase restart) → IDLE. After each response, enters LISTENING state (cyan LED) for up to 60s of follow-up conversation without requiring wake word. Silence ends the loop. Re-arm performs full WebSocket reconnect to get fresh event subscriptions. IDLE ↔ CHARGING (auto-enters at 10% battery, exits at 25%+charging). All state transitions are logged.
+- **Misty controller state machine**: DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING → PROCESSING → PLAYING →]* REARMING → IDLE. After every `PROACTIVE_REBOOT_AFTER_CYCLES` (default 2) successful conversations: → REBOOTING (announce → reboot → poll → reconnect) → IDLE. After each response, enters LISTENING state (cyan LED) for up to 60s of follow-up conversation without requiring wake word. Silence ends the loop. IDLE ↔ CHARGING (auto-enters at 10% battery, exits at 25%+charging). All state transitions are logged.
 - **LED color scheme**: 🟢 Green = ready/idle, 🟠 Orange = recording, 🔵 Blue = processing, 🟣 Purple = playing response, 🩵 Cyan = follow-up listening, 🟡 Yellow = watchdog soft reset / low battery warning, ⚫ Off = charging mode, 🔴 Red = error / watchdog full reboot.
 - **Keyphrase watchdog**: Detects silent keyphrase failure (Snapdragon 410 firmware bug, see #22) and auto-recovers with 3-level escalation: soft reset (90s) → second soft reset (+60s) → full reboot (+60s). **Never uses sensory-only reboot** (permanently breaks mic, see #33). Only active in IDLE state. Configurable via `WATCHDOG_IDLE_TIMEOUT_S` (default 90) and `WATCHDOG_ESCALATE_TIMEOUT_S` (default 60) env vars. Health check runs every 10s.
 - **TTS fallback chain**: Kokoro-ONNX is primary TTS (speed 1.2x). If unavailable, pyttsx3 (Windows SAPI5) is used as fallback. Both are lazily initialized. The API response includes `"ttsFallback": true` when fallback is used.

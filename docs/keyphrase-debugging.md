@@ -63,7 +63,20 @@ After ~2 conversation cycles (each involving keyphrase detect → record → pla
 
 ## Current Mitigations
 
-### Keyphrase Watchdog
+### Proactive Reboot (Primary)
+
+Since the firmware-level failure is predictable (~2 cycles), the controller now reboots **before** failure occurs:
+
+1. Tracks successful conversation cycles (wake → response → rearm)
+2. After `PROACTIVE_REBOOT_AFTER_CYCLES` (default: 2) cycles, triggers proactive reboot
+3. Misty announces "I need a quick reset. Be right back!" via TTS
+4. Full Core+Sensory reboot (~60-90s downtime)
+5. Controller polls `/api/device` until back, reconnects WebSocket, re-arms keyphrase
+6. Cycle counter resets to 0
+
+Skipped if battery <10%. Configure via `PROACTIVE_REBOOT_AFTER_CYCLES` env var.
+
+### Keyphrase Watchdog (Safety Net)
 
 The controller runs a watchdog that detects missing wake events and escalates:
 
@@ -126,9 +139,9 @@ When keyphrase stops working:
 
 ## Future Improvements Under Consideration
 
-1. **Proactive reboot every N turns**: Since keyphrase reliably works after a fresh boot, schedule a reboot every 3-4 turns before failure occurs (~90s downtime per reboot).
+1. **Python-based wake word detection (Picovoice Porcupine)**: Replace Misty's built-in keyphrase engine with Porcupine running on the companion laptop. Actively maintained, free tier with custom wake words, Windows support. Would require continuous audio streaming from Misty's mic to the laptop via REST API polling. Eliminates the Snapdragon 410 firmware bug entirely.
 
-2. **Python-based wake word detection**: Replace Misty's built-in keyphrase engine with `openwakeword` or `pvporcupine` running on the companion laptop. Would require continuous audio streaming from Misty to the laptop, but avoids the Snapdragon 410 firmware bug entirely.
+2. **openWakeWord**: Open-source alternative to Porcupine (MIT licensed, ONNX-based). Can train custom "Hey Misty" model. However, the repo hasn't been actively maintained since Feb 2024 (v0.6.0). 330+ open issues.
 
 3. **Touch-based trigger**: Use Misty's capacitive touch sensors (head, chin, scruff) as an alternative wake trigger. No mic dependency.
 
