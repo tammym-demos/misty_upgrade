@@ -199,7 +199,8 @@ The Snapdragon 410 sensory services silently stop firing `KeyPhraseRecognized` W
   3. **Full reboot** (+60s): red LED → `POST /api/reboot {"Core": true, "SensoryServices": true}`
 
 **Future alternatives under consideration:**
-- Python-based wake word detection (Picovoice Porcupine or openwakeword) on companion device with continuous mic streaming
+- **openWakeWord on companion laptop** (MIT, no signup needed): Works with Misty's mic via REST polling but accelerates Snapdragon 410 mic degradation (RMS drops to 0 after ~100 poll cycles). **Next approach: use the laptop's own microphone** for wake word detection, only using Misty's mic for the actual 6s conversation recording. Code preserved in git tag `wake-engine-experiment`. See #44.
+- Picovoice Porcupine: Requires commercial email signup — blocked for personal/hobbyist use.
 - Touch-based trigger using Misty's capacitive sensors
 
 ### Proactive Reboot (#22 Mitigation)
@@ -231,8 +232,9 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 - **Processors**: Qualcomm Snapdragon 820 (main) + Snapdragon 410 (sensory services). 2 GB RAM (soldered, not upgradeable).
 - **Battery**: 10,200 mAh, 8.4V Li-ion. ~2.2 hours at max speed, up to 10 hours idle. Abruptly powers down at ~7V (no graceful shutdown).
 - **Charging**: Two methods — wireless pad (~6-7 hours full charge) and direct wired via port on bottom near power switch (~3-4 hours, ~2× faster). Different barrel jack sizes; each has its own adapter. Robot does NOT need to be on to charge.
-- **Tally light**: Blue LED on side of head indicates camera/mic is active (PII collection indicator). Turns off when keyphrase/recording is stopped.
+- **Tally light**: Blue LED on side of head indicates camera/mic is active (PII collection indicator). Turns off when keyphrase/recording is stopped. **Important**: If the controller exits uncleanly, the tally light stays on — you must explicitly `POST /api/audio/keyphrase/stop` and `POST /api/audio/record/stop` to turn it off.
 - **Battery monitoring**: `GET /api/battery` returns chargePercent, healthPercent, isCharging, voltage, temperature. At very low charge (~5%), mic and keyphrase **silently fail** — APIs return success but produce no data. Minimum ~10% recommended for operation.
+- **Shutdown procedure**: Before powering off Misty or ending a session: (1) Stop keyphrase: `POST /api/audio/keyphrase/stop` (2) Stop recording: `POST /api/audio/record/stop` (3) Cancel skills: `POST /api/skills/cancel` (4) LED off: `POST /api/led {"red":0,"green":0,"blue":0}`. This ensures the tally light goes off and hardware resources are released. The controller's `_shutdown()` method does this automatically on clean exit.
 - **Power saving**: When not in use, stop keyphrase, cancel skills, and turn LED off (`{"red":0,"green":0,"blue":0}`) to reduce power draw and charge faster. Note: `/api/services` endpoint is not functional on firmware v2.0.2 — cannot disable individual sensor services via API.
 - **Fans**: Run continuously — firmware-controlled with no API or user override.
 - **Firmware**: v2.0.2.140 / robot OS 2.0.2.11660. Misty Robotics was acquired by Furhat Robotics; no further firmware updates expected. This is the final firmware.
@@ -256,7 +258,8 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 | Issue | Summary | Status |
 |-------|---------|--------|
 | #33 | **CRITICAL**: Sensory-only reboot permanently breaks mic until physical power cycle | Open — sensory reboot removed from all code paths |
-| #22 | Keyphrase silently fails after ~2 conversation cycles (Snapdragon 410 firmware bug). Watchdog auto-recovers with escalating soft resets → full reboot (90s/60s/60s). Multiple WebSocket and subscription fixes applied but firmware-level issue remains | Open |
+| #22 | Keyphrase silently fails after ~2 conversation cycles (Snapdragon 410 firmware bug). Watchdog auto-recovers with escalating soft resets → full reboot (90s/60s/60s). Proactive reboot after 2 cycles preempts failure. Multiple WebSocket and subscription fixes applied but firmware-level issue remains | Open |
+| #44 | Replace Misty keyphrase with laptop-based wake word (openWakeWord). REST polling approach degrades Misty mic — need laptop mic instead. Code in tag `wake-engine-experiment` | Open |
 | #28 | Keyphrase re-arm: sensory reboot approach **abandoned** (breaks mic, see #33) | Closed — reverted to soft re-arm |
 | #27 | STT accuracy: beam_size=5 + VAD applied, whisper-tiny still garbles follow-ups | Open |
 | #21 | End-to-end latency ~2s follow-ups, ~5s first turn (TTS cold start) — target <3s | Improved |
