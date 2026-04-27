@@ -937,11 +937,17 @@ class MistyController:
         # Small delay for Misty to finalize the file
         time.sleep(0.5)
 
-        # 3. Retrieve recorded audio — thinking face
+        # 3. Retrieve recorded audio — thinking face + "hmm" sound
         self.set_state(State.PROCESSING)
         self.set_led(0, 0, 255)  # blue = processing
         self.display_image("e_ContentRight.jpg")  # looking to the side — "thinking"
         self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)  # tilt head — pondering
+
+        # Play a thinking sound so the user knows Misty heard them
+        try:
+            self.misty_post("/api/audio/play", {"FileName": "s_PhraseHello.wav", "Volume": 25})
+        except Exception as e:
+            logger.debug(f"[Turn {turn}] Thinking sound failed: {e}")
 
         audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
         if not audio_b64:
@@ -962,11 +968,11 @@ class MistyController:
         Returns True if speech was detected and a response was played,
         False if no speech was detected (empty STT).
         """
-        # Processing state — thinking
+        # Processing state — deep thinking
         self.set_state(State.PROCESSING)
         self.set_led(0, 0, 255)  # blue = processing
-        self.display_image("e_ContentRight.jpg")  # thinking face
-        self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)  # head tilt — pondering
+        self.display_image("e_SystemCamera.jpg")  # concentrated/processing face
+        self.move_head(pitch=0, roll=-5, yaw=-15, velocity=30)  # slight head tilt other way — pondering
 
         # Send to orchestration service
         response = requests.post(

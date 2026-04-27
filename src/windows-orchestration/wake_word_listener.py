@@ -52,7 +52,7 @@ BLOCK_SIZE = 1280          # match frame size for 1:1 callback-to-frame ratio
 RESUME_COOLDOWN_S = float(os.getenv("WAKE_WORD_RESUME_COOLDOWN_S", "1.5"))
 
 # Speech monitor settings (for VAD-controlled recording)
-SPEECH_RMS_THRESHOLD = int(os.getenv("SPEECH_RMS_THRESHOLD", "300"))
+SPEECH_RMS_THRESHOLD = int(os.getenv("SPEECH_RMS_THRESHOLD", "80"))
 SPEECH_SILENCE_DURATION_S = float(os.getenv("SPEECH_SILENCE_DURATION_S", "1.5"))
 SPEECH_MIN_DURATION_S = float(os.getenv("SPEECH_MIN_DURATION_S", "3.0"))
 SPEECH_MAX_DURATION_S = float(os.getenv("SPEECH_MAX_DURATION_S", "15.0"))
@@ -401,6 +401,11 @@ class WakeWordListener:
         # Compute RMS energy
         rms = int(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
         is_speech = rms > SPEECH_RMS_THRESHOLD
+
+        # Log RMS periodically for diagnostics (every ~0.5s = ~6 frames at 80ms)
+        frame_count = int(elapsed / 0.08)
+        if frame_count % 6 == 0:
+            logger.debug(f"Speech monitor: RMS={rms} threshold={SPEECH_RMS_THRESHOLD} speech={is_speech} elapsed={elapsed:.1f}s")
 
         if is_speech:
             if not self._speech_detected:
