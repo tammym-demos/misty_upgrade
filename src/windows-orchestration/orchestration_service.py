@@ -51,6 +51,106 @@ SYSTEM_PROMPT = os.getenv(
     )
 )
 
+# ---- Response mode configuration ----
+# Intent patterns that trigger summary mode (compiled once at import time)
+_INTENT_PATTERNS = {
+    "story": re.compile(
+        r"\b(?:tell\s+(?:me\s+)?(?:a\s+)?(?:bed\s*time\s+)?stor(?:y|ies)|"
+        r"make\s+up\s+a\s+(?:story|tale)|"
+        r"(?:bed\s*time|fairy|scary|funny)\s+(?:story|tale)|"
+        r"once\s+upon\s+a\s+time|"
+        r"read\s+(?:me\s+)?a\s+(?:story|book)|"
+        r"sing\s+(?:me\s+)?a\s+song)\b",
+        re.IGNORECASE,
+    ),
+    "recipe": re.compile(
+        r"\b(?:recipe\s+for|how\s+(?:do\s+(?:I|you)|to)\s+"
+        r"(?:cook|make|bake|prepare|grill|roast)|"
+        r"ingredients\s+for|"
+        r"give\s+me\s+a\s+recipe|"
+        r"what(?:'s|\s+is)\s+a\s+(?:good\s+)?recipe)\b",
+        re.IGNORECASE,
+    ),
+    "explain": re.compile(
+        r"\b(?:explain\s+(?:how|what|why|to\s+me)|"
+        r"tell\s+me\s+(?:about|how)|"
+        r"how\s+does\s+.{1,30}\s+work|"
+        r"what\s+is\s+(?:the\s+)?(?:history|science|meaning)\s+of|"
+        r"describe\s+(?:how|what|the))\b",
+        re.IGNORECASE,
+    ),
+    "list": re.compile(
+        r"\b(?:(?:give|list|name)\s+(?:me\s+)?(?:\d+\s+|some\s+|the\s+)?"
+        r"(?:steps|things|reasons|ways|tips|facts|items|ideas)|"
+        r"what\s+are\s+(?:the\s+)?(?:steps|ways|reasons))\b",
+        re.IGNORECASE,
+    ),
+}
+
+_CONTINUATION_PATTERN = re.compile(
+    r"^\s*(?:yes|yeah|yep|sure|ok(?:ay)?|more|continue|go\s+on|keep\s+going|"
+    r"tell\s+me\s+more|what\s+happens?\s+next|and\s+then\??|"
+    r"what(?:'s|\s+is)\s+next|what\s+else)\s*[.!?]?\s*$",
+    re.IGNORECASE,
+)
+
+# Per-mode LLM parameters
+RESPONSE_MODE_CONFIG = {
+    "short": {
+        "max_tokens": 40,
+        "max_words": 25,
+        "max_sentences": 2,
+        "prompt_suffix": None,
+        "stop": ["\n", "...", "\u2014"],
+    },
+    "summary": {
+        "max_tokens": 80,
+        "max_words": 50,
+        "max_sentences": 3,
+        "prompt_suffix": (
+            "The user wants a detailed response. "
+            "Give a compelling summary in 2-3 sentences. "
+            "End by asking 'Want to hear more?'"
+        ),
+        "stop": ["...", "\u2014"],  # no \n — multi-sentence responses need room
+    },
+    "continuation": {
+        "max_tokens": 80,
+        "max_words": 50,
+        "max_sentences": 3,
+        "prompt_suffix": (
+            "Continue where you left off. Give the next part in 2-3 sentences. "
+            "If there's more to tell, end with 'Want more?' "
+            "If wrapping up, give a satisfying ending."
+        ),
+        "stop": ["...", "\u2014"],
+    },
+}
+
+
+def classify_intent(user_text: str, last_response_mode: str) -> str:
+    """Classify user intent to determine response mode.
+    
+    Returns: 'short', 'summary', or 'continuation'.
+    """
+    text = (user_text or "").strip()
+    if not text:
+        return "short"
+
+    # Check for continuation first — only valid after a summary or continuation
+    if last_response_mode in ("summary", "continuation"):
+        if _CONTINUATION_PATTERN.match(text):
+            return "continuation"
+
+    # Check long-form intent patterns
+    for intent_type, pattern in _INTENT_PATTERNS.items():
+        if pattern.search(text):
+            logger.info(f"Intent classified as '{intent_type}' → summary mode")
+            return "summary"
+
+    return "short"
+
+
 # Maximum characters for a single user prompt (truncated if exceeded)
 MAX_USER_CHARS = int(os.getenv("MAX_USER_CHARS", "400"))
 # Maximum total characters across all messages sent to the LLM (0 = disabled)
@@ -117,6 +217,8 @@ LATENCY_BUDGET = {
 
 # Global conversation context (in-memory for v1; stateless per utterance for MVP)
 conversation_history = []
+# Track last response mode for continuation detection
+_last_response_mode = "short"
 
 # ============================================================================
 # FLASK APP SETUP
@@ -312,8 +414,8 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
 # ============================================================================
 
 def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any]:
-    """Run inference using Foundry Local."""
-    global conversation_history
+    """Run inference using Foundry Local with adaptive response modes."""
+    global conversation_history, _last_response_mode
     
     try:
         elapsed = (time.time() - start_time) * 1000
@@ -331,6 +433,11 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
             )
             user_text = user_text[:MAX_USER_CHARS]
 
+        # Classify intent for adaptive response mode
+        response_mode = classify_intent(user_text, _last_response_mode)
+        mode_config = RESPONSE_MODE_CONFIG[response_mode]
+        logger.info(f"Response mode: {response_mode} (last={_last_response_mode})")
+
         # Build message history
         conversation_history.append({"role": "user", "content": user_text})
         # Keep history limited to last 8 messages (4 turns) for better context
@@ -341,8 +448,11 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         # Prepend system prompt on every call; not stored in history
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
 
-        # Inject brevity reminder when history is building up (model forgets rules)
-        if len(conversation_history) > 4:
+        # Inject mode-specific prompt suffix
+        if mode_config["prompt_suffix"]:
+            messages.append({"role": "system", "content": mode_config["prompt_suffix"]})
+        elif len(conversation_history) > 4:
+            # Brevity reminder only for short mode when history is long
             messages.append({"role": "system", "content": "Remember: 1-2 sentences, ~20 words max. Stay punchy."})
 
         # Enforce maximum total context character budget (trim oldest turns first)
@@ -363,9 +473,9 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         payload = {
             "model": MODELS["chat"],
             "messages": messages,
-            "max_tokens": 40,  # Raised from 20 for richer 1-2 sentence responses
-            "temperature": 0.85,  # Higher for more personality
-            "stop": ["\n", "...", "—"],  # Stop at sentence boundaries
+            "max_tokens": mode_config["max_tokens"],
+            "temperature": 0.85,
+            "stop": mode_config["stop"],
         }
         
         response = requests.post(
@@ -381,30 +491,31 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         result = response.json()
         assistant_text = result["choices"][0]["message"]["content"].strip()
 
-        # Post-LLM truncation: allow up to 2 sentences / 25 words
-        # This catches cases where the model ignores the system prompt brevity rule
+        # Post-LLM truncation — limits vary by mode
+        max_words = mode_config["max_words"]
+        max_sents = mode_config["max_sentences"]
         words = assistant_text.split()
-        if len(words) > 25:
-            # Find the second sentence boundary (., !, ?)
+        if len(words) > max_words:
             sentence_ends = []
             for i, char in enumerate(assistant_text):
                 if char in ".!?" and i > 10:
                     sentence_ends.append(i)
-                    if len(sentence_ends) >= 2:
+                    if len(sentence_ends) >= max_sents:
                         break
             if sentence_ends:
-                # Truncate at the last found sentence boundary (up to 2)
                 assistant_text = assistant_text[:sentence_ends[-1] + 1]
             else:
-                # No sentence boundary found — hard truncate at 25 words
-                assistant_text = " ".join(words[:25]) + "."
-            logger.info(f"Truncated LLM response to: {assistant_text}")
+                assistant_text = " ".join(words[:max_words]) + "."
+            logger.info(f"Truncated LLM response ({response_mode} mode) to: {assistant_text}")
         
+        # Update continuation tracking
+        _last_response_mode = response_mode
+
         # Add to history for context in next turn
         conversation_history.append({"role": "assistant", "content": assistant_text})
         
-        logger.debug(f"LLM result: {assistant_text}")
-        return {"status": "ok", "text": assistant_text}
+        logger.debug(f"LLM result ({response_mode}): {assistant_text}")
+        return {"status": "ok", "text": assistant_text, "responseMode": response_mode}
         
     except requests.Timeout:
         logger.error("LLM request timed out")

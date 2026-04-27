@@ -911,12 +911,28 @@ class MistyController:
         except Exception as e:
             logger.debug(f"[Turn {turn}] Ready chime failed: {e}")
 
-        # 2. Record audio
+        # 2. Record audio — use VAD-controlled duration if laptop listener available
         self.start_recording(RECORDING_FILENAME)
-        time.sleep(RECORDING_DURATION_S)
+        record_start = time.time()
+        
+        if self._wake_word_listener and self._wake_word_listener.is_running:
+            # Dynamic recording: laptop mic monitors speech and signals when to stop
+            speech_ended = threading.Event()
+            self._wake_word_listener.start_speech_monitor(
+                on_speech_end=lambda: speech_ended.set(),
+                min_duration=3.0,
+                max_duration=15.0,
+            )
+            speech_ended.wait(timeout=15.0)
+            self._wake_word_listener.stop_speech_monitor()
+        else:
+            # Fallback: fixed duration recording
+            time.sleep(RECORDING_DURATION_S)
+        
         self.stop_recording()
         self._recording_cycles += 1
-        logger.info(f"[Turn {turn}] Recorded {RECORDING_DURATION_S}s (recording cycle {self._recording_cycles})")
+        record_duration = time.time() - record_start
+        logger.info(f"[Turn {turn}] Recorded {record_duration:.1f}s (cycle {self._recording_cycles})")
 
         # Small delay for Misty to finalize the file
         time.sleep(0.5)
@@ -1012,9 +1028,19 @@ class MistyController:
         self.display_image("e_Joy.jpg")  # warm, expectant — "go on..."
         self.move_head(pitch=-10, roll=-3, yaw=-10, velocity=40)  # slight head tilt — attentive
 
-        # Record a short clip
+        # Record a short clip — use VAD if available
         self.start_recording(RECORDING_FILENAME)
-        time.sleep(FOLLOWUP_LISTEN_S)
+        if self._wake_word_listener and self._wake_word_listener.is_running:
+            speech_ended = threading.Event()
+            self._wake_word_listener.start_speech_monitor(
+                on_speech_end=lambda: speech_ended.set(),
+                min_duration=2.0,   # shorter min for follow-ups
+                max_duration=10.0,  # shorter max for follow-ups
+            )
+            speech_ended.wait(timeout=10.0)
+            self._wake_word_listener.stop_speech_monitor()
+        else:
+            time.sleep(FOLLOWUP_LISTEN_S)
         self.stop_recording()
         self._recording_cycles += 1
         time.sleep(0.5)  # finalize

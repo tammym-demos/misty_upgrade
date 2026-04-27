@@ -51,6 +51,13 @@ BLOCK_SIZE = 1280          # match frame size for 1:1 callback-to-frame ratio
 # (prevents Misty's speaker echo from triggering a false wake)
 RESUME_COOLDOWN_S = float(os.getenv("WAKE_WORD_RESUME_COOLDOWN_S", "1.5"))
 
+# Speech monitor settings (for VAD-controlled recording)
+SPEECH_RMS_THRESHOLD = int(os.getenv("SPEECH_RMS_THRESHOLD", "300"))
+SPEECH_SILENCE_DURATION_S = float(os.getenv("SPEECH_SILENCE_DURATION_S", "1.5"))
+SPEECH_MIN_DURATION_S = float(os.getenv("SPEECH_MIN_DURATION_S", "3.0"))
+SPEECH_MAX_DURATION_S = float(os.getenv("SPEECH_MAX_DURATION_S", "15.0"))
+SPEECH_NO_SPEECH_TIMEOUT_S = float(os.getenv("SPEECH_NO_SPEECH_TIMEOUT_S", "4.0"))
+
 # Health monitoring
 MAX_CONSECUTIVE_ERRORS = 10
 
@@ -84,6 +91,15 @@ class WakeWordListener:
         self._last_detection_time = 0.0
         self._start_time = 0.0
         self._resume_time = 0.0  # for self-wake cooldown
+
+        # Speech monitor state (for VAD-controlled recording)
+        self._speech_monitor_active = False
+        self._speech_monitor_callback = None
+        self._speech_monitor_start_time = 0.0
+        self._speech_detected = False
+        self._last_speech_time = 0.0
+        self._speech_monitor_min_s = SPEECH_MIN_DURATION_S
+        self._speech_monitor_max_s = SPEECH_MAX_DURATION_S
 
         # openWakeWord model (lazy init)
         self._oww_model = None
@@ -221,6 +237,49 @@ class WakeWordListener:
             self._oww_model.reset()
         logger.debug("Wake word listener resumed")
 
+    def start_speech_monitor(
+        self,
+        on_speech_end: callable,
+        min_duration: float = SPEECH_MIN_DURATION_S,
+        max_duration: float = SPEECH_MAX_DURATION_S,
+    ):
+        """Begin monitoring laptop mic for speech end during Misty recording.
+        
+        Uses RMS-based voice activity detection on the same audio stream.
+        Fires on_speech_end when silence is detected after speech, or when
+        max_duration is reached.
+        
+        Args:
+            on_speech_end: Callback fired when speech ends (silence detected)
+            min_duration: Minimum monitoring time before allowing early stop
+            max_duration: Maximum monitoring time (hard cap)
+        """
+        self._speech_monitor_callback = on_speech_end
+        self._speech_monitor_start_time = time.time()
+        self._speech_detected = False
+        self._last_speech_time = 0.0
+        self._speech_monitor_min_s = min_duration
+        self._speech_monitor_max_s = max_duration
+        self._speech_monitor_active = True
+        # Ensure audio flows even if paused for wake word
+        self._pause_event.set()
+        logger.info(
+            f"Speech monitor started (min={min_duration}s, max={max_duration}s, "
+            f"rms_threshold={SPEECH_RMS_THRESHOLD})"
+        )
+
+    def stop_speech_monitor(self):
+        """Stop speech monitoring."""
+        was_active = self._speech_monitor_active
+        self._speech_monitor_active = False
+        self._speech_monitor_callback = None
+        if was_active:
+            elapsed = time.time() - self._speech_monitor_start_time
+            logger.info(
+                f"Speech monitor stopped after {elapsed:.1f}s "
+                f"(speech_detected={self._speech_detected})"
+            )
+
     @property
     def is_running(self) -> bool:
         return self._running and self._stream is not None
@@ -250,8 +309,8 @@ class WakeWordListener:
         """Called by sounddevice for each audio block. Must be fast — just queue the data."""
         if status:
             logger.debug(f"Audio stream status: {status}")
-        if self._paused:
-            return  # drop audio during conversation
+        if self._paused and not self._speech_monitor_active:
+            return  # drop audio during conversation (unless speech monitoring)
         try:
             self._audio_queue.put_nowait(bytes(indata))
         except queue.Full:
@@ -260,21 +319,24 @@ class WakeWordListener:
     # --- Processing thread ---
 
     def _process_loop(self):
-        """Pull audio frames from queue and run wake word detection."""
+        """Pull audio frames from queue and run wake word or speech monitoring."""
         logger.info("Wake word processing loop started")
 
         while self._running:
-            # Block until unpaused
+            # Block until unpaused (or speech monitoring is active)
             self._pause_event.wait(timeout=1.0)
             if not self._running:
                 break
-            if self._paused:
+            if self._paused and not self._speech_monitor_active:
                 continue
 
             try:
                 # Get audio frame (block with timeout to allow shutdown check)
                 audio_data = self._audio_queue.get(timeout=0.5)
             except queue.Empty:
+                # Even with no audio, check speech monitor timeouts
+                if self._speech_monitor_active:
+                    self._check_speech_monitor_timeout()
                 continue
 
             try:
@@ -282,6 +344,11 @@ class WakeWordListener:
 
                 # Convert to numpy int16 array
                 pcm = np.frombuffer(audio_data, dtype=np.int16)
+
+                # Speech monitoring mode — RMS-based VAD
+                if self._speech_monitor_active:
+                    self._process_speech_monitor_frame(pcm)
+                    continue  # skip wake word detection during speech monitoring
 
                 # Self-wake cooldown: ignore detections shortly after resume
                 in_cooldown = (time.time() - self._resume_time) < RESUME_COOLDOWN_S
@@ -323,3 +390,62 @@ class WakeWordListener:
                     self._consecutive_errors = 0
 
         logger.info("Wake word processing loop ended")
+
+    # --- Speech monitor helpers ---
+
+    def _process_speech_monitor_frame(self, pcm: np.ndarray):
+        """Process a single audio frame for speech/silence detection using RMS."""
+        now = time.time()
+        elapsed = now - self._speech_monitor_start_time
+
+        # Compute RMS energy
+        rms = int(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
+        is_speech = rms > SPEECH_RMS_THRESHOLD
+
+        if is_speech:
+            if not self._speech_detected:
+                logger.info(f"Speech monitor: speech started (RMS={rms}, elapsed={elapsed:.1f}s)")
+            self._speech_detected = True
+            self._last_speech_time = now
+
+        # Check max duration — hard cap
+        if elapsed >= self._speech_monitor_max_s:
+            logger.info(f"Speech monitor: max duration reached ({self._speech_monitor_max_s}s)")
+            self._fire_speech_end()
+            return
+
+        # Check no-speech timeout — no speech detected at all
+        if not self._speech_detected and elapsed >= SPEECH_NO_SPEECH_TIMEOUT_S:
+            logger.info(f"Speech monitor: no speech detected after {SPEECH_NO_SPEECH_TIMEOUT_S}s")
+            self._fire_speech_end()
+            return
+
+        # Check silence after speech — end of utterance
+        if self._speech_detected and not is_speech:
+            silence_duration = now - self._last_speech_time
+            if silence_duration >= SPEECH_SILENCE_DURATION_S and elapsed >= self._speech_monitor_min_s:
+                logger.info(
+                    f"Speech monitor: end of utterance detected "
+                    f"(silence={silence_duration:.1f}s, total={elapsed:.1f}s)"
+                )
+                self._fire_speech_end()
+
+    def _check_speech_monitor_timeout(self):
+        """Check for speech monitor timeouts when no audio frames arrive."""
+        if not self._speech_monitor_active:
+            return
+        elapsed = time.time() - self._speech_monitor_start_time
+        if elapsed >= self._speech_monitor_max_s:
+            logger.info(f"Speech monitor: max duration reached (no audio, {elapsed:.1f}s)")
+            self._fire_speech_end()
+
+    def _fire_speech_end(self):
+        """Fire the speech end callback and deactivate monitoring."""
+        callback = self._speech_monitor_callback
+        self._speech_monitor_active = False
+        self._speech_monitor_callback = None
+        if callback:
+            try:
+                callback()
+            except Exception as e:
+                logger.error(f"Speech end callback error: {e}")
