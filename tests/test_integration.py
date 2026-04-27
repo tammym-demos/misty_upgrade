@@ -340,6 +340,67 @@ class TestPromptLimiting(unittest.TestCase):
         # The system prompt must always be the first message
         self.assertEqual(payload["messages"][0]["role"], "system")
 
+    def test_history_cap_at_eight_messages(self):
+        """Conversation history must be capped at 8 messages (4 turns)."""
+        # Fill history with 10 messages (5 turns)
+        self._svc.conversation_history = [
+            {"role": "user", "content": f"msg {i}"}
+            if i % 2 == 0
+            else {"role": "assistant", "content": f"reply {i}"}
+            for i in range(10)
+        ]
+
+        self._call_llm_and_capture_payload("latest question")
+
+        # After the call, history should have been trimmed to 8 + the new user msg
+        # The function appends user msg, trims to 8, then appends assistant response
+        # So conversation_history should be 8 (trim happened) + 1 (assistant) = at most 9
+        # But actually: append user -> trim to 8 -> call LLM -> append assistant = 9
+        # Next call will trim to 8 again. Just check it's <= 9.
+        self.assertLessEqual(
+            len(self._svc.conversation_history),
+            9,
+            f"History should be capped near 8, got {len(self._svc.conversation_history)}",
+        )
+
+    def test_response_truncation_at_25_words(self):
+        """Responses over 25 words must be truncated to 25 words or 2 sentences."""
+        long_response = " ".join([f"word{i}" for i in range(40)])
+        result, _ = self._call_llm_and_capture_payload(
+            "test", mock_response_text=long_response
+        )
+        # The result should be truncated
+        words = result["text"].split()
+        self.assertLessEqual(
+            len(words),
+            26,  # 25 words + possible trailing period word
+            f"Response should be truncated to ~25 words, got {len(words)}",
+        )
+
+    def test_two_sentence_truncation(self):
+        """A response with 3+ sentences over 25 words should be truncated at 2 sentence boundaries."""
+        three_sentences = (
+            "This is the very first long sentence about robotics and AI technology. "
+            "This is the equally long second sentence with more interesting details. "
+            "This is the third sentence that definitely should be cut out entirely."
+        )
+        result, _ = self._call_llm_and_capture_payload(
+            "test", mock_response_text=three_sentences
+        )
+        # Should keep at most 2 sentence-ending punctuation marks
+        text = result["text"]
+        sentence_count = text.count(".") + text.count("!") + text.count("?")
+        self.assertLessEqual(sentence_count, 2, f"Expected at most 2 sentences in: {text}")
+
+    def test_max_tokens_is_40(self):
+        """The LLM payload must use max_tokens=40."""
+        _, payload = self._call_llm_and_capture_payload("test question")
+        self.assertEqual(
+            payload["max_tokens"],
+            40,
+            f"Expected max_tokens=40, got {payload['max_tokens']}",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

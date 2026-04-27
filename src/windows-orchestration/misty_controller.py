@@ -44,11 +44,15 @@ RECORDING_FILENAME = "foundry_input.wav"
 RESPONSE_FILENAME = "foundry_response.wav"
 REARM_DELAY_S = 3.0  # delay after playback before re-arming wake word (increased from 1.0 for reliability)
 FOLLOWUP_LISTEN_S = float(os.getenv("FOLLOWUP_LISTEN_S", "5"))  # seconds to listen for follow-up
-FOLLOWUP_TIMEOUT_S = float(os.getenv("FOLLOWUP_TIMEOUT_S", "60"))  # max follow-up window
+FOLLOWUP_TIMEOUT_S = float(os.getenv("FOLLOWUP_TIMEOUT_S", "90"))  # max follow-up window (extended from 60)
 FOLLOWUP_SILENCE_THRESHOLD = 1000  # audio bytes below this = silence (no speech)
+FOLLOWUP_MAX_TURNS = int(os.getenv("FOLLOWUP_MAX_TURNS", "12"))  # cap recording cycles per session
 WS_RECONNECT_BASE_S = 2.0
 WS_RECONNECT_MAX_S = 30.0
 HEALTH_CHECK_INTERVAL_S = 10.0  # reduced from 30s for watchdog responsiveness
+
+# Laptop wake word listener (issue #44) — use laptop mic instead of Misty's keyphrase engine
+USE_LAPTOP_WAKE_WORD = os.getenv("USE_LAPTOP_WAKE_WORD", "").lower() in ("1", "true", "yes")
 
 # Keyphrase watchdog — detects silent failures and auto-recovers
 WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", "90"))  # 90s after rearm with no wake event
@@ -130,6 +134,9 @@ class MistyController:
         self._last_keyphrase_armed_time = 0.0   # last time keyphrase was started/re-armed
         self._watchdog_recovery_level = 0       # 0=none, 1=soft reset done, 2=sensory reboot done
         self._watchdog_recovery_time = 0.0      # when the last recovery attempt was made
+
+        # Laptop wake word listener (optional, #44)
+        self._wake_word_listener = None
 
     # --- State transitions ---
 
@@ -514,6 +521,10 @@ class MistyController:
             return  # Already shut down
         logger.info("Shutting down...")
         self.running = False
+        # Stop laptop wake word listener
+        if self._wake_word_listener:
+            self._wake_word_listener.stop()
+            self._wake_word_listener = None
         # Log final battery state
         battery = self.check_battery()
         if battery:
@@ -666,6 +677,50 @@ class MistyController:
         )
         self.ws_thread.start()
 
+    # --- Laptop wake word listener (issue #44) ---
+
+    def _start_laptop_wake_word(self):
+        """Initialize and start the laptop-based wake word listener."""
+        try:
+            from wake_word_listener import WakeWordListener
+            self._wake_word_listener = WakeWordListener(
+                on_wake_word=self._on_laptop_wake_word,
+            )
+            if self._wake_word_listener.start():
+                logger.info("Laptop wake word listener active — Misty keyphrase is backup only")
+            else:
+                logger.warning("Laptop wake word listener failed to start — using Misty keyphrase only")
+                self._wake_word_listener = None
+        except ImportError as e:
+            logger.warning(f"Laptop wake word not available ({e}) — using Misty keyphrase only")
+            self._wake_word_listener = None
+
+    def _on_laptop_wake_word(self):
+        """Callback fired by laptop wake word listener on detection."""
+        self.last_activity_time = time.time()
+        self._last_wake_event_time = time.time()
+        self._watchdog_recovery_level = 0
+
+        if self._is_dimmed and self.get_state() == State.IDLE:
+            self._is_dimmed = False
+            self.set_led(0, 255, 0)
+            self.display_image("e_DefaultContent.jpg")
+            logger.info("Restored from idle-dim on laptop wake word")
+
+        if self.get_state() == State.IDLE and time.time() >= self.ready_time:
+            logger.info("[Wake] Laptop mic wake word detected!")
+            self.turn_id += 1
+            # Pause listener during conversation to prevent self-wake
+            if self._wake_word_listener:
+                self._wake_word_listener.pause()
+            threading.Thread(
+                target=self._handle_conversation_turn,
+                name=f"turn-{self.turn_id}",
+                daemon=True,
+            ).start()
+        else:
+            logger.debug(f"Laptop wake word ignored (state={self.get_state().value})")
+
     # --- Conversation turn (runs in worker thread) ---
 
     def _handle_conversation_turn(self):
@@ -695,6 +750,12 @@ class MistyController:
             followup_count = 0
             while (time.time() - followup_start) < FOLLOWUP_TIMEOUT_S:
                 followup_count += 1
+
+                # Cap recording cycles to prevent Snapdragon 410 mic degradation
+                if followup_count > FOLLOWUP_MAX_TURNS:
+                    logger.info(f"[Turn {turn}] Follow-up turn cap reached ({FOLLOWUP_MAX_TURNS}) — ending conversation")
+                    break
+
                 remaining = FOLLOWUP_TIMEOUT_S - (time.time() - followup_start)
                 logger.info(f"[Turn {turn}] Follow-up listen #{followup_count} "
                             f"({remaining:.0f}s remaining in window)")
@@ -909,6 +970,11 @@ class MistyController:
             time.sleep(5)
             self._rearm()
 
+        # Resume laptop wake word listener after conversation ends
+        if self._wake_word_listener:
+            self._wake_word_listener.resume()
+            logger.info("Laptop wake word listener resumed")
+
     # --- Main loop ---
 
     def start(self):
@@ -919,6 +985,8 @@ class MistyController:
         logger.info(f"  Recording:     {RECORDING_DURATION_S}s")
         logger.info(f"  Idle timeout:  {IDLE_TIMEOUT_S}s")
         logger.info(f"  Watchdog:      soft={WATCHDOG_IDLE_TIMEOUT_S}s, escalate={WATCHDOG_ESCALATE_TIMEOUT_S}s")
+        logger.info(f"  Wake word:     {'laptop mic (openWakeWord)' if USE_LAPTOP_WAKE_WORD else 'Misty keyphrase (Snapdragon 410)'}")
+        logger.info(f"  Follow-up:     {FOLLOWUP_TIMEOUT_S}s window, max {FOLLOWUP_MAX_TURNS} turns")
         logger.info("=" * 60)
 
         # Pre-flight checks
@@ -941,6 +1009,10 @@ class MistyController:
 
         # Connect WebSocket (will enter IDLE or stay DISCONNECTED)
         self._connect_ws()
+
+        # Start laptop wake word listener if enabled (#44)
+        if USE_LAPTOP_WAKE_WORD:
+            self._start_laptop_wake_word()
 
         # If battery was critically low at startup, override to charging mode
         # (give WS a moment to connect first)

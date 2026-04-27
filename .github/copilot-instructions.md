@@ -15,16 +15,18 @@ The robot's hardware (Snapdragon 820 + 410, 2 GB RAM) cannot run inference — 2
 
 ```
 [Misty Controller]                           [Orchestration Service]
-  WebSocket ← KeyPhraseRecognized               Foundry Local
-  REST → StartRecordingAudio (4s)                  ├─ STT (faster-whisper)
-  REST → GetAudio (base64)                         ├─ LLM (Phi-3.5-mini)
-  HTTP POST /api/orchestrate ───────────────────►  └─ TTS (Kokoro / pyttsx3)
+  Laptop mic → openWakeWord (optional)           Foundry Local
+  OR WebSocket ← KeyPhraseRecognized               ├─ STT (faster-whisper)
+  REST → StartRecordingAudio (6s)                  ├─ LLM (Phi-3.5-mini)
+  REST → GetAudio (base64)                         └─ TTS (Kokoro / pyttsx3)
+  HTTP POST /api/orchestrate ───────────────────►
   HTTP GET /api/audio/<file> ◄──────────────────
   REST → SaveAudio (base64, ImmediatelyApply)
-  ┌─ Follow-up: listen 4s, send to orchestrate
-  │  Speech detected? → repeat (up to 60s)
+  ┌─ Follow-up: listen 5s, send to orchestrate
+  │  Speech detected? → repeat (up to 90s, max 12 turns)
   │  Silence? → fall through to re-arm
   └→ REST → StartKeyPhraseRecognition (re-arm)
+      + Resume laptop wake word listener
 ```
 
 ### Locked model stack (v1)
@@ -190,14 +192,17 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 
 ## Key Conventions
 
-- **Latency SLO**: p50 < 3s, p95 < 6s end-to-end (aspirational — currently achieving ~23s, see #21). The orchestration service logs per-stage timing: `[Pipeline Xms] STT=X LLM=X TTS=X history=N`. Measured breakdown: STT ~420ms, LLM ~1200ms, TTS ~6000ms. TTS scales linearly with response length — keep `max_tokens` low (currently 40).
-- **Misty controller state machine**: DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING → PROCESSING → PLAYING →]* REARMING (soft re-arm ~3s) → IDLE. After each response, enters LISTENING state (cyan LED) for up to 60s of follow-up conversation without requiring wake word. Silence ends the loop. Re-arm uses soft reset only (WS re-subscribe + keyphrase restart). IDLE ↔ CHARGING (auto-enters at 10% battery, exits at 25%+charging). All state transitions are logged.
+- **Latency SLO**: p50 < 3s, p95 < 6s end-to-end (aspirational — currently achieving ~23s, see #21). The orchestration service logs per-stage timing: `[Pipeline Xms] STT=X LLM=X TTS=X history=N`. Measured breakdown: STT ~420ms, LLM ~1200ms, TTS ~6000ms. TTS scales linearly with response length — keep `max_tokens` moderate (currently 40).
+- **Misty controller state machine**: DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING → PROCESSING → PLAYING →]* REARMING (soft re-arm ~3s) → IDLE. After each response, enters LISTENING state (cyan LED) for up to 90s of follow-up conversation (max 12 turns) without requiring wake word. Silence ends the loop. Re-arm uses soft reset only (WS re-subscribe + keyphrase restart). IDLE ↔ CHARGING (auto-enters at 10% battery, exits at 25%+charging). All state transitions are logged.
+- **Wake word detection**: Two modes (configurable via `USE_LAPTOP_WAKE_WORD` env var):
+  - **Laptop mic** (recommended): Uses `sounddevice` + openWakeWord on the companion laptop. Zero Misty mic usage for wake detection. Auto-pauses during conversation (self-wake prevention). Enable with `USE_LAPTOP_WAKE_WORD=true`.
+  - **Misty keyphrase** (default/fallback): Built-in "Hey Misty" via Snapdragon 410. Subject to silent failure after ~2 cycles (#22). Watchdog auto-recovers.
 - **LED color scheme**: 🟢 Green = ready/idle, 🟠 Orange = recording, 🔵 Blue = processing, 🟣 Purple = playing response, 🩵 Cyan = follow-up listening, 🟡 Yellow = watchdog soft reset / low battery warning, ⚫ Off = charging mode, 🔴 Red = error / watchdog full reboot.
-- **Keyphrase watchdog**: Detects silent keyphrase failure (Snapdragon 410 bug, see #22) and auto-recovers with 3-level escalation: soft reset (300s) → second soft reset (+120s) → full reboot (+120s). **Never uses sensory-only reboot** (permanently breaks mic, see #33). Only active in IDLE state. Configurable via `WATCHDOG_IDLE_TIMEOUT_S` and `WATCHDOG_ESCALATE_TIMEOUT_S` env vars. Health check runs every 10s.
-- **TTS fallback chain**: Kokoro-ONNX is primary TTS (speed 1.2x). If unavailable, pyttsx3 (Windows SAPI5) is used as fallback. Both are lazily initialized. The API response includes `"ttsFallback": true` when fallback is used.
-- **Conversation history**: Maintained in-memory, capped at the last 6 messages (3 turns). System prompt is prepended on every call but not stored in history. See #19 for smarter history approaches.
-- **System prompt**: Instructs Misty to keep responses to ONE short sentence, 15 words max. LLM (Phi-3.5-mini) often exceeds this — see #24.
-- **Configuration**: The orchestration service reads from `.env` (copy `.env.example`). The Misty controller reads `MISTY_IP` and `ORCHESTRATION_URL` from environment.
+- **Keyphrase watchdog**: Detects silent keyphrase failure (Snapdragon 410 bug, see #22) and auto-recovers with 3-level escalation: soft reset (90s) → second soft reset (+60s) → full reboot (+60s). **Never uses sensory-only reboot** (permanently breaks mic, see #33). Only active in IDLE state. Configurable via `WATCHDOG_IDLE_TIMEOUT_S` and `WATCHDOG_ESCALATE_TIMEOUT_S` env vars. Health check runs every 10s.
+- **TTS fallback chain**: Kokoro-ONNX is primary TTS (speed 1.4x). If unavailable, pyttsx3 (Windows SAPI5) is used as fallback. Both are lazily initialized. The API response includes `"ttsFallback": true` when fallback is used.
+- **Conversation history**: Maintained in-memory, capped at the last 8 messages (4 turns). System prompt is prepended on every call but not stored in history. Context budget: MAX_CONTEXT_CHARS=5000. See #19 for smarter history approaches.
+- **System prompt**: Instructs Misty to reply in 1-2 sentences, ~20 words. LLM (Phi-3.5-mini) often exceeds this — `max_tokens=40` and post-LLM truncation (25 words / 2 sentences) enforce the limit.
+- **Configuration**: The orchestration service reads from `.env` (copy `.env.example`). The Misty controller reads `MISTY_IP`, `ORCHESTRATION_URL`, and `USE_LAPTOP_WAKE_WORD` from environment.
 - **Error responses**: The orchestration service returns structured JSON errors with a `status` field (`"ok"` or `"error"`) and an `error` code (e.g., `"timeout"`, `"stt_failure"`, `"model_load_failure"`).
 - **Python version**: Use Python 3.13. Note that Python 3.14 may also be installed — always use `python -m pip` to target the correct version.
 - **Official docs**: https://docs.mistyrobotics.com/ — REST API reference at `/misty-ii/reference/rest/`
@@ -206,12 +211,13 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 
 | Issue | Summary | Status |
 |-------|---------|--------|
-| #33 | **CRITICAL**: Sensory-only reboot permanently breaks mic until physical power cycle | Open — sensory reboot removed from all code paths |
+| #33 | **CRITICAL**: Sensory-only reboot permanently breaks mic until physical power cycle | Closed — sensory reboot removed from all code paths |
+| #44 | Replace Misty keyphrase with laptop-based wake word (openWakeWord) | In progress — laptop mic listener implemented, enable with `USE_LAPTOP_WAKE_WORD=true` |
+| #22 | Keyphrase silently fails after ~2 conversation cycles — watchdog + proactive reboot recover. Laptop wake word bypasses this entirely. | Open |
 | #28 | Keyphrase re-arm: sensory reboot approach **abandoned** (breaks mic, see #33) | Closed — reverted to soft re-arm |
-| #22 | Keyphrase silently fails after conversation cycle — watchdog recovers (300s timeout) | Open, soft re-arm only |
 | #27 | STT accuracy: beam_size=5 + VAD applied, whisper-tiny still garbles follow-ups | Open |
-| #21 | End-to-end latency ~7s (TTS is 70% of pipeline) — target <3s | Open |
-| #24 | LLM ignores brevity — max_tokens=30, post-LLM truncation, tighter prompt applied | Mitigated via PR #31 |
-| #20 | Fixed 4s recording misses end of speech / records silence | Open |
-| #19 | Conversation history grows unbounded per session, increases LLM latency | Open |
+| #21 | End-to-end latency ~2s follow-ups, ~5s first turn (TTS cold start) — target <3s | Improved |
+| #24 | LLM ignores brevity — max_tokens=40, post-LLM truncation to 25 words/2 sentences | Mitigated |
+| #20 | Recording increased from 4s to 6s (PR #42) — still fixed-duration, no VAD | Mitigated |
+| #19 | Conversation history capped at 8 messages (4 turns) to manage latency | Mitigated |
 | #23 | Unicode arrow in log messages crashes on Windows cp1252 console | Fixed |

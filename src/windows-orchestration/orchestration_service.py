@@ -46,7 +46,7 @@ SYSTEM_PROMPT = os.getenv(
     (
         "You are Misty, a sassy robot. Witty, cheeky, never mean. "
         "Use casual language and expressive phrases. "
-        "RULE: Reply in ONE sentence, max 10 words. No exceptions. "
+        "RULE: Reply in 1-2 sentences, around 20 words. Keep it punchy. "
         "Never say you're an AI or assistant. You're Misty."
     )
 )
@@ -54,7 +54,7 @@ SYSTEM_PROMPT = os.getenv(
 # Maximum characters for a single user prompt (truncated if exceeded)
 MAX_USER_CHARS = int(os.getenv("MAX_USER_CHARS", "400"))
 # Maximum total characters across all messages sent to the LLM (0 = disabled)
-MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "3000"))
+MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "5000"))
 
 # Locked v1 model stack
 # Foundry Local requires full model IDs for inference calls
@@ -333,17 +333,17 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
 
         # Build message history
         conversation_history.append({"role": "user", "content": user_text})
-        # Keep history limited to last 4 messages (2 turns) to prevent brevity drift
-        if len(conversation_history) > 4:
-            del conversation_history[:-4]
+        # Keep history limited to last 8 messages (4 turns) for better context
+        if len(conversation_history) > 8:
+            del conversation_history[:-8]
 
         url = f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions"
         # Prepend system prompt on every call; not stored in history
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
 
         # Inject brevity reminder when history is building up (model forgets rules)
-        if len(conversation_history) > 2:
-            messages.append({"role": "system", "content": "Remember: max 10 words, ONE short sentence."})
+        if len(conversation_history) > 4:
+            messages.append({"role": "system", "content": "Remember: 1-2 sentences, ~20 words max. Stay punchy."})
 
         # Enforce maximum total context character budget (trim oldest turns first)
         if MAX_CONTEXT_CHARS > 0:
@@ -363,7 +363,7 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         payload = {
             "model": MODELS["chat"],
             "messages": messages,
-            "max_tokens": 20,  # Hard cap — keeps responses ≤15 words for fast TTS
+            "max_tokens": 40,  # Raised from 20 for richer 1-2 sentence responses
             "temperature": 0.85,  # Higher for more personality
             "stop": ["\n", "...", "—"],  # Stop at sentence boundaries
         }
@@ -381,18 +381,23 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         result = response.json()
         assistant_text = result["choices"][0]["message"]["content"].strip()
 
-        # Post-LLM truncation: cut to first sentence if response is too long
+        # Post-LLM truncation: allow up to 2 sentences / 25 words
         # This catches cases where the model ignores the system prompt brevity rule
         words = assistant_text.split()
-        if len(words) > 10:
-            # Find the first sentence boundary (., !, ?)
+        if len(words) > 25:
+            # Find the second sentence boundary (., !, ?)
+            sentence_ends = []
             for i, char in enumerate(assistant_text):
-                if char in ".!?" and i > 10:  # at least 10 chars for a real sentence
-                    assistant_text = assistant_text[:i + 1]
-                    break
+                if char in ".!?" and i > 10:
+                    sentence_ends.append(i)
+                    if len(sentence_ends) >= 2:
+                        break
+            if sentence_ends:
+                # Truncate at the last found sentence boundary (up to 2)
+                assistant_text = assistant_text[:sentence_ends[-1] + 1]
             else:
-                # No sentence boundary found — hard truncate at 10 words
-                assistant_text = " ".join(words[:10]) + "."
+                # No sentence boundary found — hard truncate at 25 words
+                assistant_text = " ".join(words[:25]) + "."
             logger.info(f"Truncated LLM response to: {assistant_text}")
         
         # Add to history for context in next turn
