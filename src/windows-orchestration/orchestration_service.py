@@ -735,7 +735,14 @@ def tts_endpoint():
         if not audio_file:
             return jsonify({"status": "error", "error": "no_audio_generated"}), 500
         
-        audio_path = os.path.join("responses", audio_file)
+        # Security: prevent path traversal (defense-in-depth)
+        if "/" in audio_file or "\\" in audio_file or ".." in audio_file:
+            return jsonify({"status": "error", "error": "invalid_filename"}), 400
+        audio_path = os.path.abspath(os.path.join("responses", audio_file))
+        base_path = os.path.abspath("responses")
+        if not audio_path.startswith(base_path):
+            return jsonify({"status": "error", "error": "invalid_filename"}), 400
+        
         if not os.path.exists(audio_path):
             return jsonify({"status": "error", "error": "audio_file_missing"}), 500
         

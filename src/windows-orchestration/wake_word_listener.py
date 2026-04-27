@@ -46,6 +46,7 @@ OWW_CUSTOM_MODEL_PATH = os.getenv("OWW_CUSTOM_MODEL_PATH", "")
 SAMPLE_RATE = 16000       # openWakeWord native rate
 FRAME_SAMPLES = 1280      # 80ms at 16kHz — openWakeWord's expected frame size
 BLOCK_SIZE = 1280          # match frame size for 1:1 callback-to-frame ratio
+MAX_RECORDING_BYTES = 5 * 1024 * 1024  # 5MB max recording buffer (~160s at 16kHz mono)
 
 # Self-wake suppression: ignore detections for this many seconds after resume
 # (prevents Misty's speaker echo from triggering a false wake)
@@ -384,7 +385,12 @@ class WakeWordListener:
         
         # Buffer frames for laptop mic recording (independent of wake word state)
         if self._recording:
-            self._recorded_frames.append(bytes(indata))
+            total_size = sum(len(f) for f in self._recorded_frames)
+            if total_size < MAX_RECORDING_BYTES:
+                self._recorded_frames.append(bytes(indata))
+            elif total_size >= MAX_RECORDING_BYTES and self._recording:
+                logger.warning("Recording buffer full — stopping capture")
+                self._recording = False
 
         if self._paused and not self._speech_monitor_active and not self._recording:
             return  # drop audio during conversation (unless speech monitoring or recording)
