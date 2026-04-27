@@ -461,7 +461,8 @@ class MistyController:
                 # Reset watchdog so it starts fresh after reboot
                 self._watchdog_recovery_level = 0
                 self._watchdog_recovery_time = time.time()
-
+
+
     def check_mic_health(self) -> bool:
         """Quick mic health check: record 1s and verify we get real audio data.
         Returns True if mic is working, False if it returns empty recordings.
@@ -1086,8 +1087,8 @@ class MistyController:
         # Fallback: play Misty's built-in system sound
         try:
             self.misty_post("/api/audio/play", {"FileName": "s_Awe2.wav"})
-            time.sleep(2.0)
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Proactive reboot: built-in fallback sound failed: {e}")
             pass
 
     # --- Main loop ---
