@@ -159,15 +159,65 @@ The controller still calls `_cancel_all_skills()` on WebSocket connect as a safe
 ### Misty Keyphrase Behavior
 
 - After Misty recognizes "Hey Misty", **keyphrase listening auto-stops**. You must re-issue `StartKeyPhraseRecognition` to listen again.
-- **Recording auto-stops keyphrase** — they cannot run simultaneously.
+- **Recording auto-stops keyphrase** — they cannot run simultaneously (shared mic on Snapdragon 410).
 - **Always stop-then-start keyphrase** when re-arming (stale state causes silent failures).
-- Use a **1-second delay** between stop and start calls.
-- **Soft re-arm**: After each conversation ends, `_rearm()` performs a **soft re-arm** (WS re-subscribe + stop/start keyphrase + 3s delay). No sensory reboot.
-- **⚠️ NEVER use sensory-only reboots** (`POST /api/reboot {"SensoryServices": true, "Core": false}`). They permanently break Misty's microphone until physical power cycle. See #33. This was discovered during autonomous testing — repeated sensory reboots cause the Snapdragon 410 audio subsystem to return 44-byte empty WAV files.
-- **Silent keyphrase failure**: The Snapdragon 410 sensory services can silently stop firing `KeyPhraseRecognized` WebSocket events while REST API still returns "Success". A **keyphrase watchdog** in the controller auto-detects and recovers:
-  1. **Soft reset** (after 300s): yellow LED flash → cancel skills → stop/start keyphrase
-  2. **Second soft reset** (after +120s): darker yellow LED → repeat
-  3. **Full reboot** (after +120s): red LED → `POST /api/reboot {"Core": true, "SensoryServices": true}`
+- Use a **2-second delay** between stop and start calls (`start_keyphrase(force_restart=True)`). 1s was unreliable.
+- **⚠️ NEVER use sensory-only reboots** (`POST /api/reboot {"SensoryServices": true, "Core": false}`). They permanently break Misty's microphone until physical power cycle. See #33.
+
+#### WebSocket Subscription Gotchas
+
+- **Stale subscriptions persist globally**: When a controller process is killed, its WebSocket event subscriptions remain active on Misty. A new controller cannot register the same event name → "Cannot register an event with same name" → events silently stop. **Fix**: Use unique timestamped event names (e.g., `WakeWord_{unix_timestamp}`).
+- **Unsubscribe only works on the creating connection**: You cannot unsubscribe events from a different WebSocket connection than the one that created them.
+- **DebounceMs must be 0**: With `DebounceMs=250`, keyphrase events were being swallowed. Use `DebounceMs=0` for reliable delivery.
+- **Registration status uses the same eventName**: `"Registration Status: API event registered."` messages arrive with the same `eventName` as real events. Filter by checking if `message` is a string containing "Registration Status".
+
+#### Re-Arm Strategy
+
+After each conversation ends, `_rearm()` performs:
+1. Stop recording + stop keyphrase (cleanup)
+2. **5-second audio cooldown** — lets Snapdragon 410 release hardware resources
+3. **Full WebSocket reconnect** — close connection, wait 1s, create fresh connection + subscriptions
+4. `start_keyphrase(force_restart=True)` — stop→2s delay→start via `_on_ws_open()`
+
+This mimics a fresh controller start on every re-arm, which is the most reliable approach found.
+
+#### Silent Keyphrase Failure (#22) — Known Issue
+
+The Snapdragon 410 sensory services silently stop firing `KeyPhraseRecognized` WebSocket events after ~2 conversation cycles, while the REST API still returns "Success" for `keyphrase/start`. Battery events continue flowing on the same WebSocket (proving the connection is healthy). The mic itself works (direct recording produces real audio). Only the keyphrase detection engine fails.
+
+**Confirmed root causes (all fixed):**
+- Stale WebSocket subscriptions from killed controllers (unique event names)
+- DebounceMs=250 swallowing events (changed to 0)
+- Missing stop-before-start on keyphrase re-arm (force_restart=True)
+- Mic health check recording while keyphrase active (false positive empty recordings)
+
+**Unresolved firmware-level issue:**
+- The keyphrase engine appears to suffer resource exhaustion after multiple record/play/keyphrase cycles
+- No API exists to query keyphrase engine health — `keyphrase/start` always returns "Success"
+- Only reliable recovery is a **full Core+Sensory reboot** (~60-90s downtime)
+- A **keyphrase watchdog** auto-detects and escalates:
+  1. **Soft reset** (after 90s idle): yellow LED → cancel skills → force-restart keyphrase
+  2. **Second soft reset** (+60s): darker yellow LED → repeat
+  3. **Full reboot** (+60s): red LED → `POST /api/reboot {"Core": true, "SensoryServices": true}`
+
+**Future alternatives under consideration:**
+- **openWakeWord on companion laptop** (MIT, no signup needed): Works with Misty's mic via REST polling but accelerates Snapdragon 410 mic degradation (RMS drops to 0 after ~100 poll cycles). **Next approach: use the laptop's own microphone** for wake word detection, only using Misty's mic for the actual 6s conversation recording. Code preserved in git tag `wake-engine-experiment`. See #44.
+- Picovoice Porcupine: Requires commercial email signup — blocked for personal/hobbyist use.
+- Touch-based trigger using Misty's capacitive sensors
+
+### Proactive Reboot (#22 Mitigation)
+
+Since the keyphrase engine reliably fails after ~2 conversation cycles, the controller now performs a **proactive reboot before failure occurs**:
+
+1. After `PROACTIVE_REBOOT_AFTER_CYCLES` successful conversations (default: 2), the controller triggers a reboot instead of a normal re-arm
+2. Misty announces *"I need a quick reset. Be right back!"* via TTS
+3. Full Core+Sensory reboot is issued (~60-90s downtime)
+4. Controller polls `/api/device` until Misty is back, then reconnects WebSocket and re-arms keyphrase
+5. Cycle counter resets to 0
+
+The proactive reboot is skipped if battery is critically low (<10%). Configure via `PROACTIVE_REBOOT_AFTER_CYCLES` env var.
+
+This is a **UX-aware workaround** — the user knows Misty is rebooting rather than experiencing mysterious silence. The watchdog remains as a safety net for unexpected failures between reboots.
 
 ## Foundry Local API
 
@@ -184,8 +234,9 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 - **Processors**: Qualcomm Snapdragon 820 (main) + Snapdragon 410 (sensory services). 2 GB RAM (soldered, not upgradeable).
 - **Battery**: 10,200 mAh, 8.4V Li-ion. ~2.2 hours at max speed, up to 10 hours idle. Abruptly powers down at ~7V (no graceful shutdown).
 - **Charging**: Two methods — wireless pad (~6-7 hours full charge) and direct wired via port on bottom near power switch (~3-4 hours, ~2× faster). Different barrel jack sizes; each has its own adapter. Robot does NOT need to be on to charge.
-- **Tally light**: Blue LED on side of head indicates camera/mic is active (PII collection indicator). Turns off when keyphrase/recording is stopped.
+- **Tally light**: Blue LED on side of head indicates camera/mic is active (PII collection indicator). Turns off when keyphrase/recording is stopped. **Important**: If the controller exits uncleanly, the tally light stays on — you must explicitly `POST /api/audio/keyphrase/stop` and `POST /api/audio/record/stop` to turn it off.
 - **Battery monitoring**: `GET /api/battery` returns chargePercent, healthPercent, isCharging, voltage, temperature. At very low charge (~5%), mic and keyphrase **silently fail** — APIs return success but produce no data. Minimum ~10% recommended for operation.
+- **Shutdown procedure**: Before powering off Misty or ending a session: (1) Stop keyphrase: `POST /api/audio/keyphrase/stop` (2) Stop recording: `POST /api/audio/record/stop` (3) Cancel skills: `POST /api/skills/cancel` (4) LED off: `POST /api/led {"red":0,"green":0,"blue":0}`. This ensures the tally light goes off and hardware resources are released. The controller's `_shutdown()` method does this automatically on clean exit.
 - **Power saving**: When not in use, stop keyphrase, cancel skills, and turn LED off (`{"red":0,"green":0,"blue":0}`) to reduce power draw and charge faster. Note: `/api/services` endpoint is not functional on firmware v2.0.2 — cannot disable individual sensor services via API.
 - **Fans**: Run continuously — firmware-controlled with no API or user override.
 - **Firmware**: v2.0.2.140 / robot OS 2.0.2.11660. Misty Robotics was acquired by Furhat Robotics; no further firmware updates expected. This is the final firmware.
@@ -193,7 +244,7 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 ## Key Conventions
 
 - **Latency SLO**: p50 < 3s, p95 < 6s end-to-end (aspirational — currently achieving ~23s, see #21). The orchestration service logs per-stage timing: `[Pipeline Xms] STT=X LLM=X TTS=X history=N`. Measured breakdown: STT ~420ms, LLM ~1200ms, TTS ~6000ms. TTS scales linearly with response length — keep `max_tokens` moderate (currently 40).
-- **Misty controller state machine**: DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING → PROCESSING → PLAYING →]* REARMING (soft re-arm ~3s) → IDLE. After each response, enters LISTENING state (cyan LED) for up to 90s of follow-up conversation (max 12 turns) without requiring wake word. Silence ends the loop. Re-arm uses soft reset only (WS re-subscribe + keyphrase restart). IDLE ↔ CHARGING (auto-enters at 10% battery, exits at 25%+charging). All state transitions are logged.
+- **Misty controller state machine**: DISCONNECTED → IDLE → RECORDING → PROCESSING → PLAYING → [LISTENING → PROCESSING → PLAYING →]* REARMING (soft re-arm ~3s) → IDLE. After every `PROACTIVE_REBOOT_AFTER_CYCLES` (default 2) successful conversations: → REBOOTING (announce → reboot → poll → reconnect) → IDLE. After each response, enters LISTENING state (cyan LED) for up to 90s of follow-up conversation (max 12 turns) without requiring wake word. Silence ends the loop. Re-arm uses soft reset only (WS re-subscribe + keyphrase restart). IDLE ↔ CHARGING (auto-enters at 10% battery, exits at 25%+charging). All state transitions are logged.
 - **Wake word detection**: Two modes (configurable via `USE_LAPTOP_WAKE_WORD` env var):
   - **Laptop mic** (recommended): Uses `sounddevice` + openWakeWord on the companion laptop. Zero Misty mic usage for wake detection. Auto-pauses during conversation (self-wake prevention). Enable with `USE_LAPTOP_WAKE_WORD=true`.
   - **Misty keyphrase** (default/fallback): Built-in "Hey Misty" via Snapdragon 410. Subject to silent failure after ~2 cycles (#22). Watchdog auto-recovers.
