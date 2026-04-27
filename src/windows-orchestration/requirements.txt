@@ -14,3 +14,6 @@ soundfile
 pyttsx3
 # Misty controller: WebSocket client for event subscriptions
 websocket-client
+# Wake word detection: openWakeWord (laptop-based, replaces Misty's unreliable keyphrase engine)
+openwakeword
+numpy
