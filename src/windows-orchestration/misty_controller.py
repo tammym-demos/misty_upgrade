@@ -304,34 +304,37 @@ class MistyController:
         return result is not None and result.get("status") == "Success"
 
     def _upload_greeting(self):
-        """Generate 'What's up baby?' TTS and upload to Misty as greeting audio."""
-        try:
-            # Ask orchestration service to generate TTS
-            response = requests.post(
-                f"{ORCHESTRATION_URL}/api/tts",
-                json={"text": "What's up baby?"},
-                timeout=15.0,
-            )
-            if response.status_code != 200:
-                logger.warning(f"Greeting TTS failed: HTTP {response.status_code}")
-                return
+        """Generate TTS phrases and upload to Misty as named audio files."""
+        phrases = {
+            "greeting_whatsup.wav": "What's up baby?",
+            "thinking.wav": "Let me think about that.",
+        }
+        for filename, text in phrases.items():
+            try:
+                response = requests.post(
+                    f"{ORCHESTRATION_URL}/api/tts",
+                    json={"text": text},
+                    timeout=15.0,
+                )
+                if response.status_code != 200:
+                    logger.warning(f"TTS for '{filename}' failed: HTTP {response.status_code}")
+                    continue
 
-            audio_data = response.content
-            if len(audio_data) < 100:
-                logger.warning(f"Greeting TTS too small: {len(audio_data)} bytes")
-                return
+                audio_data = response.content
+                if len(audio_data) < 100:
+                    logger.warning(f"TTS for '{filename}' too small: {len(audio_data)} bytes")
+                    continue
 
-            # Upload to Misty as a named audio file
-            audio_b64 = base64.b64encode(audio_data).decode("ascii")
-            result = self.misty_post("/api/audio", {
-                "FileName": "greeting_whatsup.wav",
-                "Data": audio_b64,
-                "ImmediatelyApply": False,
-                "OverwriteExisting": True,
-            })
-            logger.info(f"Greeting audio uploaded to Misty ({len(audio_data)} bytes)")
-        except Exception as e:
-            logger.warning(f"Failed to upload greeting: {e}")
+                audio_b64 = base64.b64encode(audio_data).decode("ascii")
+                self.misty_post("/api/audio", {
+                    "FileName": filename,
+                    "Data": audio_b64,
+                    "ImmediatelyApply": False,
+                    "OverwriteExisting": True,
+                })
+                logger.info(f"Uploaded '{filename}' to Misty ({len(audio_data)} bytes)")
+            except Exception as e:
+                logger.warning(f"Failed to upload '{filename}': {e}")
 
     def check_orchestration_health(self) -> bool:
         try:
@@ -997,9 +1000,9 @@ class MistyController:
         self.display_image("e_Contempt.jpg")  # one eyebrow raised — "hmm, let me think..."
         self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)  # tilt head — pondering
 
-        # Play a wondering sound so the user knows Misty heard them
+        # Play thinking phrase so the user knows Misty heard them
         try:
-            self.misty_post("/api/audio/play", {"FileName": "s_Amazement.wav", "Volume": 25})
+            self.misty_post("/api/audio/play", {"FileName": "thinking.wav", "Volume": 40})
         except Exception as e:
             logger.debug(f"[Turn {turn}] Thinking sound failed: {e}")
 
