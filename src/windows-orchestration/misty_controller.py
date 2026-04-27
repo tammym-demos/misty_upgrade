@@ -200,7 +200,7 @@ class MistyController:
     def start_keyphrase(self, force_restart=False):
         if force_restart:
             self.misty_post("/api/audio/keyphrase/stop")
-            time.sleep(1.0)
+            time.sleep(2.0)  # 2s delay — Misty needs time to fully release audio resources (#22)
         result = self.misty_post("/api/audio/keyphrase/start")
         if result and result.get("status") == "Success":
             logger.info("Wake word listening active")
@@ -208,6 +208,16 @@ class MistyController:
             return True
         logger.error(f"Failed to start keyphrase: {result}")
         return False
+
+    def _rearm_keyphrase_after_ignored_event(self):
+        """Re-arm keyphrase after an ignored WakeWord event (grace period or wrong state).
+        
+        Misty auto-stops keyphrase after ANY KeyPhraseRecognized event, even stale ones
+        replayed on WebSocket subscription. If we don't re-arm, keyphrase is dead. (#22)
+        """
+        time.sleep(1.5)  # brief delay to let Misty finish stopping keyphrase
+        self.start_keyphrase(force_restart=True)
+        logger.info("Keyphrase re-armed after ignored wake event")
 
     def _cancel_all_skills(self):
         """Cancel all running on-robot skills (e.g., faceDetection auto-start)."""
@@ -445,8 +455,12 @@ class MistyController:
 
     def check_mic_health(self) -> bool:
         """Quick mic health check: record 1s and verify we get real audio data.
-        Returns True if mic is working, False if it returns empty recordings."""
+        Returns True if mic is working, False if it returns empty recordings.
+        NOTE: Stops keyphrase before recording since they can't run simultaneously."""
         try:
+            # Must stop keyphrase first — it locks the mic (#22)
+            self.misty_post("/api/audio/keyphrase/stop")
+            time.sleep(0.5)
             resp = self.misty_post("/api/audio/record/start", {"FileName": "mic_health_check.wav"})
             if not resp:
                 return False
@@ -529,37 +543,52 @@ class MistyController:
 
     def _ws_subscribe_keyphrase(self):
         if self.ws:
-            # Unsubscribe first to clear stale subscriptions
-            unsub = json.dumps({"Operation": "unsubscribe", "EventName": "WakeWord"})
-            self.ws.send(unsub)
+            # Save previous name for cleanup on reconnect
+            prev = getattr(self, '_wake_event_name', None)
+            # Use unique event name to avoid "Cannot register event with same name" 
+            # when previous controller died without unsubscribing (#22)
+            self._wake_event_name = f"WakeWord_{int(time.time())}"
+            
+            # Try to unsubscribe any old names (best effort)
+            for old_name in ["WakeWord", prev or '']:
+                if old_name:
+                    unsub = json.dumps({"Operation": "unsubscribe", "EventName": old_name})
+                    self.ws.send(unsub)
             time.sleep(0.3)
-            # Fresh subscribe
+            
+            # Fresh subscribe with unique name
             msg = json.dumps({
                 "Operation": "subscribe",
                 "Type": "KeyPhraseRecognized",
-                "DebounceMs": 250,
-                "EventName": "WakeWord",
+                "DebounceMs": 0,
+                "EventName": self._wake_event_name,
                 "ReturnProperty": None,
                 "EventConditions": [],
             })
             self.ws.send(msg)
-            logger.info("Subscribed to KeyPhraseRecognized events")
+            logger.info(f"Subscribed to KeyPhraseRecognized events (name={self._wake_event_name})")
 
     def _ws_subscribe_battery(self):
         if self.ws:
-            unsub = json.dumps({"Operation": "unsubscribe", "EventName": "BatteryMonitor"})
-            self.ws.send(unsub)
+            prev = getattr(self, '_battery_event_name', None)
+            self._battery_event_name = f"BatteryMonitor_{int(time.time())}"
+            
+            for old_name in ["BatteryMonitor", prev or '']:
+                if old_name:
+                    unsub = json.dumps({"Operation": "unsubscribe", "EventName": old_name})
+                    self.ws.send(unsub)
             time.sleep(0.3)
+            
             msg = json.dumps({
                 "Operation": "subscribe",
                 "Type": "BatteryCharge",
                 "DebounceMs": 60000,
-                "EventName": "BatteryMonitor",
+                "EventName": self._battery_event_name,
                 "ReturnProperty": None,
                 "EventConditions": [],
             })
             self.ws.send(msg)
-            logger.info("Subscribed to BatteryCharge events")
+            logger.info(f"Subscribed to BatteryCharge events (name={self._battery_event_name})")
 
     def _on_ws_open(self, ws):
         logger.info("WebSocket connected")
@@ -574,18 +603,26 @@ class MistyController:
             logger.info("WebSocket reconnected in CHARGING mode — not restarting keyphrase")
             return
 
-        # Normal startup: cancel any auto-started skills (e.g., faceDetection)
-        # that conflict with our wake word + recording pipeline
+        # Cancel any auto-started skills (e.g., faceDetection)
         self._cancel_all_skills()
 
-        # Normal startup: start keyphrase recognition
-        if self.start_keyphrase():
+        # Start keyphrase recognition
+        # MUST use force_restart=True to stop stale keyphrase from previous
+        # controller sessions. Without stop-first, keyphrase/start returns
+        # "Success" but the engine doesn't actually reset (#22).
+        if self.start_keyphrase(force_restart=True):
             self.set_led(0, 255, 0)
             self.display_image("e_DefaultContent.jpg")
-            # Grace period: ignore wake events for 3s after connect (spurious residual events)
-            self.ready_time = time.time() + 3.0
-            self.last_activity_time = time.time()
-            self.set_state(State.IDLE)
+            if current_state == State.REARMING:
+                # Re-arm reconnect — no grace period needed, go straight to IDLE
+                self.last_activity_time = time.time()
+                self.set_state(State.IDLE)
+                logger.info("Re-arm complete — keyphrase active (fresh WebSocket)")
+            else:
+                # Initial startup — grace period to ignore stale events
+                self.ready_time = time.time() + 3.0
+                self.last_activity_time = time.time()
+                self.set_state(State.IDLE)
         else:
             self.set_state(State.ERROR)
 
@@ -593,22 +630,30 @@ class MistyController:
         try:
             data = json.loads(message)
         except json.JSONDecodeError:
+            logger.warning(f"WS non-JSON message: {message[:200]}")
             return
 
         event_name = data.get("eventName") or data.get("EventName", "")
         msg_content = data.get("message", "")
+
+        # Log ALL WebSocket messages for debugging keyphrase issues (#22)
+        if event_name:
+            msg_preview = str(msg_content)[:200] if msg_content else "(empty)"
+            logger.info(f"WS event: {event_name} | msg_type={type(msg_content).__name__} | msg={msg_preview}")
+        else:
+            logger.info(f"WS raw: {str(message)[:300]}")
 
         # Ignore registration status messages
         if isinstance(msg_content, str) and "Registration Status" in msg_content:
             logger.debug(f"WS registration: {msg_content}")
             return
 
-        if event_name == "BatteryMonitor":
+        if event_name == getattr(self, '_battery_event_name', 'BatteryMonitor') or event_name == "BatteryMonitor":
             if isinstance(msg_content, dict):
                 self._update_battery_from_event(msg_content)
             return
 
-        if event_name == "WakeWord":
+        if event_name == getattr(self, '_wake_event_name', 'WakeWord') or event_name == "WakeWord":
             self.last_activity_time = time.time()
             self._last_wake_event_time = time.time()
             # Wake event received — keyphrase is working, reset watchdog
@@ -629,14 +674,24 @@ class MistyController:
                     daemon=True,
                 ).start()
             else:
-                logger.debug(f"Wake word ignored (state={self.get_state().value}, grace={time.time() < self.ready_time})")
+                # CRITICAL: Misty auto-stops keyphrase after ANY recognition event,
+                # including stale events replayed on subscription. If we ignore
+                # the event (grace period / wrong state), we MUST re-arm keyphrase
+                # or it stays dead forever. (#22)
+                logger.warning(f"Wake word during grace/wrong state — re-arming keyphrase "
+                               f"(state={self.get_state().value}, grace={time.time() < self.ready_time})")
+                threading.Thread(
+                    target=self._rearm_keyphrase_after_ignored_event,
+                    name="rearm-grace",
+                    daemon=True,
+                ).start()
 
     def _on_ws_error(self, ws, error):
         logger.error(f"WebSocket error: {error}")
 
     def _on_ws_close(self, ws, close_status_code, close_msg):
         logger.warning(f"WebSocket closed (code={close_status_code})")
-        if self.running:
+        if self.running and self.get_state() != State.REARMING:
             self.set_state(State.DISCONNECTED)
             self._schedule_reconnect()
 
@@ -885,29 +940,25 @@ class MistyController:
         self.set_state(State.REARMING)
         self.move_head(pitch=0, roll=0, yaw=0, velocity=40)  # center head
 
-        # Explicit audio resource cleanup before re-arming
+        # Aggressive audio resource cleanup before re-arming.
+        # Misty's audio subsystem (Snapdragon 410) degrades after multiple
+        # recording/playback/keyphrase cycles. Extended cooldown lets the
+        # hardware fully release resources before keyphrase restart (#22).
         self.stop_recording()
-        time.sleep(0.5)
+        self.misty_post("/api/audio/keyphrase/stop")
+        logger.info("Re-arm: audio cooldown (5s) to let hardware release resources")
+        time.sleep(5.0)
 
-        # Soft re-arm: WS re-subscribe + keyphrase restart.
-        # Sensory reboot on every re-arm was DEGRADING the audio subsystem —
-        # repeated sensory reboots cause Misty's mic to return empty recordings (44 bytes).
-        # Instead, rely on the watchdog to escalate to sensory reboot only when needed.
-        self._ws_subscribe_keyphrase()
-        time.sleep(REARM_DELAY_S)
-
-        if self.start_keyphrase(force_restart=True):
-            self.set_led(0, 255, 0)  # green = ready
-            self.display_image("e_DefaultContent.jpg")
-            self.set_state(State.IDLE)
-            logger.info("Re-arm complete — keyphrase active")
-        else:
-            logger.error("Failed to re-arm wake word")
-            self.set_led(255, 0, 0)
-            self.set_state(State.ERROR)
-            # Retry after delay
-            time.sleep(5)
-            self._rearm()
+        # Full WebSocket reconnect for fresh event subscription
+        logger.info("Re-arm: closing WebSocket for fresh reconnect")
+        if self.ws:
+            self.ws.close()
+            time.sleep(1.0)
+        self.reconnect_attempts = 0
+        self._connect_ws()
+        # _on_ws_open handles: subscribe + start_keyphrase(force_restart=True)
+        # Wait for the connection to establish and keyphrase to start
+        time.sleep(6.0)
 
     # --- Main loop ---
 
