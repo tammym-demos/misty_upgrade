@@ -726,7 +726,9 @@ def tts_endpoint():
         if result.get("status") == "error":
             return jsonify(result), 500
         
-        audio_file = result.get("audioFile")
+        audio_uri = result.get("audio_uri", "")
+        # Extract filename from URI like "/api/audio/response_123.wav"
+        audio_file = audio_uri.split("/")[-1] if audio_uri else ""
         if not audio_file:
             return jsonify({"status": "error", "error": "no_audio_generated"}), 500
         
