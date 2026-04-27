@@ -401,9 +401,10 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
             beam_size=5,
             vad_filter=True,
             vad_parameters={
-                "min_speech_duration_ms": 200,
-                "min_silence_duration_ms": 100,
-                "speech_pad_ms": 200,
+                "min_speech_duration_ms": 100,
+                "min_silence_duration_ms": 300,
+                "speech_pad_ms": 400,
+                "threshold": 0.3,  # lower threshold for quieter mics (default 0.5)
             },
             initial_prompt="Hey Misty, tell me about science, history, math, geography, and fun facts.",
         )
