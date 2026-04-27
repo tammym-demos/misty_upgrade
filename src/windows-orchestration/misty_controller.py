@@ -420,7 +420,13 @@ class MistyController:
         between keyphrase-armed time and now (with no wake events) as the signal,
         NOT just "no wake events in N minutes" — avoids false positives when
         nobody is talking to Misty.
+
+        Disabled when laptop wake word is active — Misty's keyphrase is just a
+        backup in that mode, and the watchdog would falsely trigger reboots since
+        no Misty keyphrase events fire.
         """
+        if self._wake_word_listener:
+            return  # laptop wake word handles detection; skip keyphrase watchdog
         if self.get_state() != State.IDLE:
             return
         if self._last_keyphrase_armed_time == 0.0:
@@ -858,7 +864,8 @@ class MistyController:
         if self._wake_word_listener:
             logger.info(f"[Turn {turn}] Stopping Misty keyphrase before recording (laptop wake word mode)")
             self.misty_post("/api/audio/keyphrase/stop")
-            time.sleep(0.5)
+            self.misty_post("/api/audio/record/stop")  # belt-and-suspenders cleanup
+            time.sleep(2.0)  # Snapdragon 410 needs ~2s to release mic hardware
 
         # 2. Record audio
         self.start_recording(RECORDING_FILENAME)
@@ -902,8 +909,15 @@ class MistyController:
             files={"file": (RECORDING_FILENAME, audio_bytes, "audio/wav")},
             timeout=30.0,
         )
-        response.raise_for_status()
         result = response.json()
+
+        # Handle empty STT gracefully — not an error, just no speech detected
+        if result.get("error") == "empty_stt" or response.status_code == 400:
+            logger.info(f"[Turn {turn}] No speech detected in recording (empty STT) — treating as silence")
+            return
+
+        if response.status_code != 200:
+            raise RuntimeError(f"Orchestration HTTP {response.status_code}: {result.get('error', 'unknown')}")
 
         if result.get("status") != "ok":
             raise RuntimeError(f"Orchestration error: {result.get('error', 'unknown')}")
@@ -1047,6 +1061,11 @@ class MistyController:
         # _on_ws_open handles: subscribe + start_keyphrase(force_restart=True)
         # Wait for the connection to establish and keyphrase to start
         time.sleep(6.0)
+
+        # Resume laptop wake word listener after conversation ends
+        if self._wake_word_listener:
+            self._wake_word_listener.resume()
+            logger.info("Laptop wake word listener resumed")
 
     def _proactive_reboot(self):
         """Proactive reboot to prevent keyphrase silent failure (#22).
