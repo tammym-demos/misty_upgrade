@@ -234,10 +234,12 @@ class WakeWordListener:
         # 1. Record short audio clip from Misty
         audio_bytes = self._record_from_misty()
         if audio_bytes is None:
+            logger.debug(f"Poll #{self._total_polls}: no audio returned")
             return
 
         if len(audio_bytes) < EMPTY_RECORDING_THRESHOLD:
             self._consecutive_empty += 1
+            logger.debug(f"Poll #{self._total_polls}: empty recording ({len(audio_bytes)} bytes)")
             if self._consecutive_empty >= MAX_CONSECUTIVE_EMPTY:
                 logger.warning(f"Wake word: {self._consecutive_empty} consecutive empty recordings")
                 self._consecutive_empty = 0
@@ -247,7 +249,14 @@ class WakeWordListener:
         # 2. Resample 48kHz → 16kHz
         pcm_16k = self._resample_audio(audio_bytes)
         if pcm_16k is None:
+            logger.debug(f"Poll #{self._total_polls}: resample failed")
             return
+
+        # Log audio energy periodically for diagnostics
+        if self._total_polls % 20 == 0:
+            rms = float(np.sqrt(np.mean(pcm_16k.astype(np.float64) ** 2)))
+            logger.info(f"Poll #{self._total_polls}: {len(audio_bytes)} bytes, "
+                        f"{len(pcm_16k)} samples@16kHz, RMS={rms:.0f}")
 
         # 3. Feed to openWakeWord in frame-sized chunks
         detected = self._run_detection(pcm_16k)
