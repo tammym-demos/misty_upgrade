@@ -40,7 +40,7 @@ load_dotenv()  # Load .env before reading any env vars
 FOUNDRY_API_TIMEOUT = float(os.getenv("FOUNDRY_API_TIMEOUT", "10.0"))
 SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", "15.0"))
 KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_sky")
-KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.4"))
+KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.0"))
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     (
@@ -92,7 +92,12 @@ _INTENT_PATTERNS = {
 _CONTINUATION_PATTERN = re.compile(
     r"^\s*(?:yes|yeah|yep|sure|ok(?:ay)?|more|continue|go\s+on|keep\s+going|"
     r"tell\s+me\s+more|what\s+happens?\s+next|and\s+then\??|"
-    r"what(?:'s|\s+is)\s+next|what\s+else)\s*[.!?]?\s*$",
+    r"what(?:'s|\s+is)\s+next|what\s+else|"
+    r"(?:is|was)\s+that\s+(?:all|it|everything)|then\s+what|"
+    r"finish\s+(?:the|that)\s+(?:story|recipe|explanation)|"
+    r"(?:can|could)\s+you\s+(?:finish|continue|go\s+on)|"
+    r"what\s+(?:happened|comes)\s+(?:next|after\s+that)|"
+    r"I\s+(?:want|wanna)\s+(?:hear|know)\s+more)\s*[.!?]?\s*$",
     re.IGNORECASE,
 )
 

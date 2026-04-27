@@ -266,12 +266,20 @@ class WakeWordListener:
         self._calibration_samples = []
         self._calibration_done = False
         self._speech_rms_threshold = SPEECH_RMS_THRESHOLD  # reset to default until calibrated
+        # Drain any stale audio frames from the queue before starting
+        drained = 0
+        while not self._audio_queue.empty():
+            try:
+                self._audio_queue.get_nowait()
+                drained += 1
+            except queue.Empty:
+                break
         self._speech_monitor_active = True
         # Ensure audio flows even if paused for wake word
         self._pause_event.set()
         logger.info(
             f"Speech monitor started (min={min_duration}s, max={max_duration}s, "
-            f"calibrating noise floor...)"
+            f"calibrating noise floor..., drained {drained} stale frames)"
         )
 
     def stop_speech_monitor(self):
@@ -317,8 +325,13 @@ class WakeWordListener:
             logger.debug(f"Audio stream status: {status}")
         if self._paused and not self._speech_monitor_active:
             return  # drop audio during conversation (unless speech monitoring)
+        data = bytes(indata)
+        # Log first speech monitor frame to verify data is flowing
+        if self._speech_monitor_active and self._total_frames % 100 == 0:
+            sample = int.from_bytes(data[:2], byteorder='little', signed=True) if len(data) >= 2 else 0
+            logger.info(f"Audio callback: speech_monitor frame, len={len(data)}, first_sample={sample}")
         try:
-            self._audio_queue.put_nowait(bytes(indata))
+            self._audio_queue.put_nowait(data)
         except queue.Full:
             pass  # drop frame if processing can't keep up
 
