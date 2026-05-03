@@ -726,5 +726,372 @@ class TestDrivePrimitives(unittest.TestCase):
         self.assertTrue(body["Reverse"])
 
 
+class TestHazardTelemetry(unittest.TestCase):
+    """Unit tests for hazard/sensor telemetry subscription and handling (#49).
+
+    These tests mock WebSocket — no live robot required.
+    """
+
+    _ctrl = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            _ctrl_path = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration")
+            )
+            if _ctrl_path not in sys.path:
+                sys.path.insert(0, _ctrl_path)
+            from misty_controller import (
+                MistyController, HazardState, ToFReading,
+                TOF_SENSORS, TOF_FORWARD_SENSORS, TOF_REVERSE_SENSORS,
+                TELEMETRY_STALE_TIMEOUT_S,
+            )
+            cls._MistyController = MistyController
+            cls._HazardState = HazardState
+            cls._ToFReading = ToFReading
+            cls._TOF_SENSORS = TOF_SENSORS
+            cls._TOF_FORWARD_SENSORS = TOF_FORWARD_SENSORS
+            cls._TOF_REVERSE_SENSORS = TOF_REVERSE_SENSORS
+            cls._TELEMETRY_STALE_TIMEOUT_S = TELEMETRY_STALE_TIMEOUT_S
+        except Exception as exc:
+            cls._MistyController = None
+            print(f"[TestHazardTelemetry] Could not import misty_controller: {exc}")
+
+    def setUp(self):
+        if self._MistyController is None:
+            self.skipTest("misty_controller could not be imported")
+        self.ctrl = self._MistyController()
+        # Mock misty_post to capture calls
+        self._post_calls = []
+        self.ctrl.misty_post = lambda endpoint, body=None, timeout=5.0: (
+            self._post_calls.append((endpoint, body)) or {"status": "Success", "result": True}
+        )
+
+    # --- HazardState initialization ---
+
+    def test_hazard_state_initialized(self):
+        """Controller should initialize with empty HazardState."""
+        self.assertIsNotNone(self.ctrl.hazard)
+        self.assertEqual(self.ctrl.hazard.active_hazards, [])
+        self.assertEqual(self.ctrl.hazard.last_hazard_time, 0.0)
+        self.assertFalse(self.ctrl.hazard.hazard_halt_issued)
+        self.assertFalse(self.ctrl.hazard.any_bump_active)
+
+    def test_tof_readings_initialized_for_all_sensors(self):
+        """ToF readings dict should have entries for all 8 sensors."""
+        self.assertEqual(len(self.ctrl.hazard.tof_readings), 8)
+        for sid in self._TOF_SENSORS:
+            self.assertIn(sid, self.ctrl.hazard.tof_readings)
+            reading = self.ctrl.hazard.tof_readings[sid]
+            self.assertEqual(reading.sensor_id, sid)
+            self.assertFalse(reading.is_valid)
+
+    # --- ToF event handling ---
+
+    def test_handle_tof_event_updates_reading(self):
+        """ToF event should update the per-sensor reading."""
+        self.ctrl._handle_tof_event({
+            "sensorId": "toffc",
+            "distanceInMeters": 0.350,
+            "status": 0,
+        })
+        reading = self.ctrl.hazard.tof_readings["toffc"]
+        self.assertAlmostEqual(reading.distance_mm, 350.0, places=1)
+        self.assertEqual(reading.status, 0)
+        self.assertTrue(reading.is_valid)
+        self.assertGreater(reading.last_updated, 0)
+
+    def test_handle_tof_event_invalid_status(self):
+        """ToF event with high status should mark reading as invalid."""
+        self.ctrl._handle_tof_event({
+            "sensorId": "toffr",
+            "distanceInMeters": 0.100,
+            "status": 255,
+        })
+        reading = self.ctrl.hazard.tof_readings["toffr"]
+        self.assertFalse(reading.is_valid)
+        self.assertEqual(reading.status, 255)
+
+    def test_handle_tof_event_status_2_is_valid(self):
+        """Status 2 (ranging complete) should be treated as valid."""
+        self.ctrl._handle_tof_event({
+            "sensorId": "toffl",
+            "distanceInMeters": 0.500,
+            "status": 2,
+        })
+        self.assertTrue(self.ctrl.hazard.tof_readings["toffl"].is_valid)
+
+    def test_handle_tof_ignores_unknown_sensor(self):
+        """Unknown sensor ID should be silently ignored."""
+        self.ctrl._handle_tof_event({
+            "sensorId": "unknown_sensor",
+            "distanceInMeters": 0.100,
+            "status": 0,
+        })
+        # No crash, no new entry
+        self.assertNotIn("unknown_sensor", self.ctrl.hazard.tof_readings)
+
+    # --- Hazard event handling ---
+
+    def test_handle_hazard_event_with_bump(self):
+        """HazardNotification with bump hazard should record active hazards."""
+        self.ctrl._handle_hazard_event({
+            "bumpSensorsHazardState": [
+                {"sensorName": "Bump_FrontRight", "inHazard": True},
+                {"sensorName": "Bump_FrontLeft", "inHazard": False},
+            ],
+            "timeOfFlightSensorsHazardState": [],
+        })
+        self.assertEqual(len(self.ctrl.hazard.active_hazards), 1)
+        self.assertEqual(self.ctrl.hazard.active_hazards[0]["type"], "bump")
+        self.assertTrue(self.ctrl.hazard.hazard_halt_issued)
+
+    def test_handle_hazard_event_with_tof(self):
+        """HazardNotification with ToF hazard should record active hazards."""
+        self.ctrl._handle_hazard_event({
+            "bumpSensorsHazardState": [],
+            "timeOfFlightSensorsHazardState": [
+                {"sensorName": "TOF_FrontCenter", "inHazard": True, "distance": 80},
+            ],
+        })
+        self.assertEqual(len(self.ctrl.hazard.active_hazards), 1)
+        self.assertEqual(self.ctrl.hazard.active_hazards[0]["type"], "tof")
+        self.assertEqual(self.ctrl.hazard.active_hazards[0]["distance_mm"], 80)
+
+    def test_handle_hazard_cleared(self):
+        """HazardNotification with no active hazards should clear state."""
+        # First, set a hazard
+        self.ctrl._handle_hazard_event({
+            "bumpSensorsHazardState": [{"sensorName": "Bump_FR", "inHazard": True}],
+            "timeOfFlightSensorsHazardState": [],
+        })
+        self.assertTrue(self.ctrl.hazard.hazard_halt_issued)
+        # Now clear it
+        self.ctrl._handle_hazard_event({
+            "bumpSensorsHazardState": [{"sensorName": "Bump_FR", "inHazard": False}],
+            "timeOfFlightSensorsHazardState": [],
+        })
+        self.assertEqual(self.ctrl.hazard.active_hazards, [])
+        self.assertFalse(self.ctrl.hazard.hazard_halt_issued)
+
+    # --- Bump event handling ---
+
+    def test_handle_bump_event_pressed(self):
+        """Bump contact should be recorded and any_bump_active set."""
+        self.ctrl._handle_bump_event({
+            "sensorName": "Bump_FrontRight",
+            "isContacted": True,
+        })
+        self.assertTrue(self.ctrl.hazard.any_bump_active)
+        self.assertIn("Bump_FrontRight", self.ctrl.hazard.bump_states)
+        self.assertTrue(self.ctrl.hazard.bump_states["Bump_FrontRight"]["is_pressed"])
+
+    def test_handle_bump_event_released(self):
+        """Bump release should clear that sensor."""
+        # Press first
+        self.ctrl._handle_bump_event({"sensorName": "Bump_FrontLeft", "isContacted": True})
+        self.assertTrue(self.ctrl.hazard.any_bump_active)
+        # Release
+        self.ctrl._handle_bump_event({"sensorName": "Bump_FrontLeft", "isContacted": False})
+        self.assertFalse(self.ctrl.hazard.any_bump_active)
+
+    def test_multiple_bumps_any_active(self):
+        """any_bump_active should be True if ANY bump is still pressed."""
+        self.ctrl._handle_bump_event({"sensorName": "Bump_FR", "isContacted": True})
+        self.ctrl._handle_bump_event({"sensorName": "Bump_FL", "isContacted": True})
+        # Release one
+        self.ctrl._handle_bump_event({"sensorName": "Bump_FR", "isContacted": False})
+        self.assertTrue(self.ctrl.hazard.any_bump_active)  # FL still pressed
+
+    # --- check_forward_clear ---
+
+    def test_check_forward_clear_all_good(self):
+        """Forward clear when all forward sensors have valid, distant readings."""
+        now = time.time()
+        for sid in self._TOF_FORWARD_SENSORS:
+            with self.ctrl.hazard_lock:
+                r = self.ctrl.hazard.tof_readings[sid]
+                r.distance_mm = 500.0
+                r.status = 0
+                r.is_valid = True
+                r.last_updated = now
+        self.assertTrue(self.ctrl.check_forward_clear())
+
+    def test_check_forward_clear_close_obstacle(self):
+        """Forward NOT clear when a front sensor detects close obstacle."""
+        now = time.time()
+        for sid in self._TOF_FORWARD_SENSORS:
+            with self.ctrl.hazard_lock:
+                r = self.ctrl.hazard.tof_readings[sid]
+                r.distance_mm = 500.0
+                r.status = 0
+                r.is_valid = True
+                r.last_updated = now
+        # Place obstacle in front center
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.tof_readings["toffc"].distance_mm = 100.0
+        self.assertFalse(self.ctrl.check_forward_clear())
+
+    def test_check_forward_clear_stale_data(self):
+        """Forward NOT clear when sensor data is stale (fail closed)."""
+        # Leave last_updated at 0 (stale)
+        self.assertFalse(self.ctrl.check_forward_clear())
+
+    def test_check_forward_clear_invalid_sensor(self):
+        """Forward NOT clear when a sensor has invalid status."""
+        now = time.time()
+        for sid in self._TOF_FORWARD_SENSORS:
+            with self.ctrl.hazard_lock:
+                r = self.ctrl.hazard.tof_readings[sid]
+                r.distance_mm = 500.0
+                r.status = 0
+                r.is_valid = True
+                r.last_updated = now
+        # Invalidate one sensor
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.tof_readings["toffl"].is_valid = False
+        self.assertFalse(self.ctrl.check_forward_clear())
+
+    # --- check_reverse_clear ---
+
+    def test_check_reverse_clear_all_good(self):
+        """Reverse clear when rear sensors have valid, distant readings."""
+        now = time.time()
+        for sid in self._TOF_REVERSE_SENSORS:
+            with self.ctrl.hazard_lock:
+                r = self.ctrl.hazard.tof_readings[sid]
+                r.distance_mm = 400.0
+                r.status = 0
+                r.is_valid = True
+                r.last_updated = now
+        self.assertTrue(self.ctrl.check_reverse_clear())
+
+    def test_check_reverse_clear_obstacle_behind(self):
+        """Reverse NOT clear when rear sensor detects obstacle."""
+        now = time.time()
+        for sid in self._TOF_REVERSE_SENSORS:
+            with self.ctrl.hazard_lock:
+                r = self.ctrl.hazard.tof_readings[sid]
+                r.distance_mm = 400.0
+                r.status = 0
+                r.is_valid = True
+                r.last_updated = now
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.tof_readings["tofr"].distance_mm = 50.0
+        self.assertFalse(self.ctrl.check_reverse_clear())
+
+    # --- check_sensors_fresh ---
+
+    def test_check_sensors_fresh_all_recent(self):
+        """All sensors fresh when recently updated."""
+        now = time.time()
+        for sid in self._TOF_SENSORS:
+            with self.ctrl.hazard_lock:
+                self.ctrl.hazard.tof_readings[sid].last_updated = now
+        self.assertTrue(self.ctrl.check_sensors_fresh())
+
+    def test_check_sensors_fresh_one_stale(self):
+        """Not fresh if any sensor is stale."""
+        now = time.time()
+        for sid in self._TOF_SENSORS:
+            with self.ctrl.hazard_lock:
+                self.ctrl.hazard.tof_readings[sid].last_updated = now
+        # Make one stale
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.tof_readings["tofr"].last_updated = now - 10.0
+        self.assertFalse(self.ctrl.check_sensors_fresh())
+
+    def test_check_sensors_fresh_subset(self):
+        """Can check freshness of specific sensor subset."""
+        now = time.time()
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.tof_readings["toffc"].last_updated = now
+            self.ctrl.hazard.tof_readings["toffr"].last_updated = now
+        self.assertTrue(self.ctrl.check_sensors_fresh({"toffc", "toffr"}))
+        # But full set would fail
+        self.assertFalse(self.ctrl.check_sensors_fresh())
+
+    # --- get_hazard_snapshot ---
+
+    def test_get_hazard_snapshot_returns_dict(self):
+        """Snapshot should return a dict with expected keys."""
+        snapshot = self.ctrl.get_hazard_snapshot()
+        self.assertIsInstance(snapshot, dict)
+        self.assertIn("active_hazards", snapshot)
+        self.assertIn("tof_readings", snapshot)
+        self.assertIn("bump_states", snapshot)
+        self.assertIn("any_bump_active", snapshot)
+        self.assertEqual(len(snapshot["tof_readings"]), 8)
+
+    def test_get_hazard_snapshot_includes_friendly_names(self):
+        """Snapshot ToF readings should include friendly sensor names."""
+        snapshot = self.ctrl.get_hazard_snapshot()
+        self.assertEqual(snapshot["tof_readings"]["toffc"]["friendly_name"], "front_center")
+        self.assertEqual(snapshot["tof_readings"]["tofr"]["friendly_name"], "rear")
+
+    # --- WebSocket subscription methods ---
+
+    def test_ws_subscribe_hazard_sends_message(self):
+        """_ws_subscribe_hazard should send subscribe JSON via WebSocket."""
+        sent_messages = []
+        mock_ws = unittest.mock.MagicMock()
+        mock_ws.send = lambda msg: sent_messages.append(msg)
+        self.ctrl.ws = mock_ws
+
+        self.ctrl._ws_subscribe_hazard()
+
+        # Should have sent unsubscribe(s) + subscribe
+        subscribe_msgs = [m for m in sent_messages if "subscribe" in m.lower()]
+        self.assertTrue(len(subscribe_msgs) >= 1)
+        # Last message should be the subscribe
+        last = json.loads(subscribe_msgs[-1])
+        self.assertEqual(last["Operation"], "subscribe")
+        self.assertEqual(last["Type"], "HazardNotification")
+        self.assertEqual(last["DebounceMs"], 0)
+
+    def test_ws_subscribe_tof_sends_message(self):
+        """_ws_subscribe_tof should send subscribe JSON with 250ms debounce."""
+        sent_messages = []
+        mock_ws = unittest.mock.MagicMock()
+        mock_ws.send = lambda msg: sent_messages.append(msg)
+        self.ctrl.ws = mock_ws
+
+        self.ctrl._ws_subscribe_tof()
+
+        subscribe_msgs = [m for m in sent_messages if '"subscribe"' in m.lower()]
+        last = json.loads(subscribe_msgs[-1])
+        self.assertEqual(last["Type"], "TimeOfFlight")
+        self.assertEqual(last["DebounceMs"], 250)
+
+    def test_ws_subscribe_bump_sends_message(self):
+        """_ws_subscribe_bump should send subscribe JSON with 0 debounce."""
+        sent_messages = []
+        mock_ws = unittest.mock.MagicMock()
+        mock_ws.send = lambda msg: sent_messages.append(msg)
+        self.ctrl.ws = mock_ws
+
+        self.ctrl._ws_subscribe_bump()
+
+        subscribe_msgs = [m for m in sent_messages if '"subscribe"' in m.lower()]
+        last = json.loads(subscribe_msgs[-1])
+        self.assertEqual(last["Type"], "BumpSensor")
+        self.assertEqual(last["DebounceMs"], 0)
+
+    def test_ws_subscribe_uses_unique_names(self):
+        """Consecutive subscriptions should use different event names."""
+        mock_ws = unittest.mock.MagicMock()
+        self.ctrl.ws = mock_ws
+
+        self.ctrl._ws_subscribe_hazard()
+        name1 = self.ctrl._hazard_event_name
+
+        time.sleep(0.001)  # ensure time_ns differs
+        self.ctrl._ws_subscribe_hazard()
+        name2 = self.ctrl._hazard_event_name
+
+        self.assertNotEqual(name1, name2)
+
+
 if __name__ == "__main__":
     unittest.main()

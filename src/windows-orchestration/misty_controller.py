@@ -103,6 +103,66 @@ class BatteryState:
 
 
 # ============================================================================
+# HAZARD / SENSOR TELEMETRY (#49)
+# ============================================================================
+
+# ToF sensor positions on Misty (from docs)
+TOF_SENSORS = {
+    "toffc": "front_center",      # front center
+    "toffr": "front_right",       # front right
+    "toffl": "front_left",        # front left
+    "tofr": "rear",               # rear center
+    "tofdfc": "edge_front_center",  # downward front center (edge)
+    "tofdfr": "edge_front_right",   # downward front right (edge)
+    "tofdfl": "edge_front_left",    # downward front left (edge)
+    "tofdr": "edge_rear",           # downward rear (edge)
+}
+
+# Direction → required sensors for movement safety
+TOF_FORWARD_SENSORS = {"toffc", "toffr", "toffl", "tofdfc", "tofdfr", "tofdfl"}
+TOF_REVERSE_SENSORS = {"tofr", "tofdr"}
+TOF_EDGE_SENSORS = {"tofdfc", "tofdfr", "tofdfl", "tofdr"}
+
+# Telemetry watchdog — per-sensor freshness during movement
+TELEMETRY_STALE_TIMEOUT_S = 1.0  # sensor data older than this = stale (halt if moving)
+
+
+@dataclass
+class ToFReading:
+    """Single Time-of-Flight sensor reading."""
+    sensor_id: str = ""           # e.g., "toffc"
+    distance_mm: float = 0.0     # millimeters (0 = invalid/no return)
+    status: int = 0              # 0=valid, 100-class=warn, 200-class=error
+    is_valid: bool = False       # True only if status indicates reliable reading
+    last_updated: float = 0.0   # time.time()
+
+
+@dataclass
+class HazardState:
+    """Aggregated hazard/sensor state for safety decision-making."""
+    # Active hazards from HazardNotification events
+    active_hazards: list = None       # list of hazard dicts from last event
+    last_hazard_time: float = 0.0     # when last HazardNotification arrived
+    hazard_halt_issued: bool = False  # True if we auto-halted due to hazard
+
+    # Per-sensor ToF readings (keyed by sensor_id, e.g., "toffc")
+    tof_readings: dict = None         # {sensor_id: ToFReading}
+
+    # Bump sensor states (keyed by sensor position)
+    bump_states: dict = None          # {sensor_name: {"is_pressed": bool, "last_updated": float}}
+    last_bump_time: float = 0.0       # when last BumpSensor event arrived
+    any_bump_active: bool = False     # True if any bump sensor is currently pressed
+
+    def __post_init__(self):
+        if self.active_hazards is None:
+            self.active_hazards = []
+        if self.tof_readings is None:
+            self.tof_readings = {sid: ToFReading(sensor_id=sid) for sid in TOF_SENSORS}
+        if self.bump_states is None:
+            self.bump_states = {}
+
+
+# ============================================================================
 # STATE MACHINE
 # ============================================================================
 
@@ -151,6 +211,10 @@ class MistyController:
         # Proactive reboot — counts successful conversation cycles (wake→response→rearm)
         self._conversation_cycles = 0
         self._recording_cycles = 0  # total recordings since last reboot
+
+        # Hazard / sensor telemetry (#49)
+        self.hazard = HazardState()
+        self.hazard_lock = threading.Lock()
 
     # --- State transitions ---
 
@@ -551,6 +615,178 @@ class MistyController:
         if self.get_state() == State.IDLE:
             self.set_led(0, 255, 0)
 
+    # --- Hazard / Sensor Telemetry Event Handlers (#49) ---
+
+    def _handle_hazard_event(self, data: dict):
+        """Handle HazardNotification — firmware-level safety alert.
+
+        The firmware auto-stops motors on hazard, but we need to update our state
+        and log the event for safety decisions.
+        """
+        now = time.time()
+        # Extract hazard details from event data
+        # HazardNotification contains arrays of sensors that triggered
+        bump_hazards = data.get("bumpSensorsHazardState", [])
+        tof_hazards = data.get("timeOfFlightSensorsHazardState", [])
+
+        hazards = []
+        for sensor in bump_hazards:
+            if sensor.get("inHazard", False):
+                hazards.append({"type": "bump", "sensor": sensor.get("sensorName", "unknown")})
+        for sensor in tof_hazards:
+            if sensor.get("inHazard", False):
+                hazards.append({
+                    "type": "tof",
+                    "sensor": sensor.get("sensorName", "unknown"),
+                    "distance_mm": sensor.get("distance", 0),
+                })
+
+        with self.hazard_lock:
+            self.hazard.active_hazards = hazards
+            self.hazard.last_hazard_time = now
+            if hazards:
+                self.hazard.hazard_halt_issued = True
+
+        if hazards:
+            logger.warning(f"HAZARD: {len(hazards)} active — {hazards}")
+        else:
+            # Hazard cleared
+            with self.hazard_lock:
+                self.hazard.hazard_halt_issued = False
+            logger.info("Hazard cleared — all sensors nominal")
+
+    def _handle_tof_event(self, data: dict):
+        """Handle TimeOfFlight — raw distance reading from a single sensor.
+
+        Updates per-sensor state. Only logs significant changes (DEBUG level for routine).
+        """
+        sensor_id = data.get("sensorId", "").lower()
+        if sensor_id not in TOF_SENSORS:
+            return
+
+        distance_mm = data.get("distanceInMeters", 0) * 1000  # API returns meters
+        status = data.get("status", 0)
+        # Status 0 = valid ranging, 2 = ranging complete. Status >= 100 = reduced confidence.
+        is_valid = status in (0, 2)
+
+        now = time.time()
+        with self.hazard_lock:
+            reading = self.hazard.tof_readings[sensor_id]
+            old_valid = reading.is_valid
+            old_distance = reading.distance_mm
+
+            reading.distance_mm = distance_mm
+            reading.status = status
+            reading.is_valid = is_valid
+            reading.last_updated = now
+
+        # Log only transitions: sensor going invalid, or close obstacles
+        if is_valid and not old_valid:
+            logger.debug(f"ToF {sensor_id} recovered (status={status}, dist={distance_mm:.0f}mm)")
+        elif not is_valid and old_valid:
+            logger.info(f"ToF {sensor_id} degraded (status={status})")
+        elif is_valid and distance_mm < 200 and (old_distance >= 200 or not old_valid):
+            logger.info(f"ToF {sensor_id} close obstacle: {distance_mm:.0f}mm")
+
+    def _handle_bump_event(self, data: dict):
+        """Handle BumpSensor — physical contact detection.
+
+        On bump contact: log and set state. Firmware auto-halts on bump.
+        """
+        sensor_name = data.get("sensorName", "unknown")
+        is_pressed = data.get("isContacted", False)
+        now = time.time()
+
+        with self.hazard_lock:
+            self.hazard.bump_states[sensor_name] = {
+                "is_pressed": is_pressed,
+                "last_updated": now,
+            }
+            self.hazard.last_bump_time = now
+            self.hazard.any_bump_active = any(
+                s.get("is_pressed", False)
+                for s in self.hazard.bump_states.values()
+            )
+
+        if is_pressed:
+            logger.warning(f"BUMP: {sensor_name} contacted")
+        else:
+            logger.info(f"Bump released: {sensor_name}")
+
+    def get_hazard_snapshot(self) -> dict:
+        """Thread-safe snapshot of current hazard/sensor state for decision-making."""
+        with self.hazard_lock:
+            return {
+                "active_hazards": list(self.hazard.active_hazards),
+                "last_hazard_time": self.hazard.last_hazard_time,
+                "hazard_halt_issued": self.hazard.hazard_halt_issued,
+                "any_bump_active": self.hazard.any_bump_active,
+                "last_bump_time": self.hazard.last_bump_time,
+                "tof_readings": {
+                    sid: {
+                        "distance_mm": r.distance_mm,
+                        "status": r.status,
+                        "is_valid": r.is_valid,
+                        "last_updated": r.last_updated,
+                        "friendly_name": TOF_SENSORS[sid],
+                    }
+                    for sid, r in self.hazard.tof_readings.items()
+                },
+                "bump_states": dict(self.hazard.bump_states),
+            }
+
+    def check_forward_clear(self, min_distance_mm: float = 200.0) -> bool:
+        """Check if forward path is clear based on ToF readings.
+
+        Returns True if all valid forward sensors report distance > min_distance_mm.
+        Returns False if any forward sensor reports close obstacle or is stale/invalid.
+        """
+        now = time.time()
+        with self.hazard_lock:
+            for sid in TOF_FORWARD_SENSORS:
+                reading = self.hazard.tof_readings[sid]
+                # Stale data = not clear (fail closed)
+                if now - reading.last_updated > TELEMETRY_STALE_TIMEOUT_S:
+                    return False
+                # Invalid reading = not clear (fail closed)
+                if not reading.is_valid:
+                    return False
+                # Only check horizontal sensors (not edge/downward) for distance
+                if sid in ("toffc", "toffr", "toffl"):
+                    if reading.distance_mm < min_distance_mm:
+                        return False
+            return True
+
+    def check_reverse_clear(self, min_distance_mm: float = 200.0) -> bool:
+        """Check if reverse path is clear based on rear ToF readings."""
+        now = time.time()
+        with self.hazard_lock:
+            for sid in TOF_REVERSE_SENSORS:
+                reading = self.hazard.tof_readings[sid]
+                if now - reading.last_updated > TELEMETRY_STALE_TIMEOUT_S:
+                    return False
+                if not reading.is_valid:
+                    return False
+                if sid == "tofr":
+                    if reading.distance_mm < min_distance_mm:
+                        return False
+            return True
+
+    def check_sensors_fresh(self, sensor_ids: set = None) -> bool:
+        """Check if specified sensors have fresh data (within TELEMETRY_STALE_TIMEOUT_S).
+
+        Args:
+            sensor_ids: Set of sensor IDs to check. If None, checks all sensors.
+        """
+        now = time.time()
+        check_ids = sensor_ids or set(TOF_SENSORS.keys())
+        with self.hazard_lock:
+            for sid in check_ids:
+                reading = self.hazard.tof_readings.get(sid)
+                if not reading or now - reading.last_updated > TELEMETRY_STALE_TIMEOUT_S:
+                    return False
+            return True
+
     # --- Keyphrase watchdog ---
 
     def _watchdog_check(self):
@@ -766,11 +1002,89 @@ class MistyController:
             self.ws.send(msg)
             logger.info(f"Subscribed to BatteryCharge events (name={self._battery_event_name})")
 
+    # --- Hazard / Safety Telemetry Subscriptions (#49) ---
+
+    def _ws_subscribe_hazard(self):
+        """Subscribe to HazardNotification — firmware-level safety alerts."""
+        if self.ws:
+            prev = getattr(self, '_hazard_event_name', None)
+            self._hazard_event_name = f"Hazard_{time.time_ns()}"
+
+            for old_name in ["Hazard", prev or '']:
+                if old_name:
+                    unsub = json.dumps({"Operation": "unsubscribe", "EventName": old_name})
+                    self.ws.send(unsub)
+            time.sleep(0.2)
+
+            msg = json.dumps({
+                "Operation": "subscribe",
+                "Type": "HazardNotification",
+                "DebounceMs": 0,  # safety-critical: every event matters
+                "EventName": self._hazard_event_name,
+                "ReturnProperty": None,
+                "EventConditions": [],
+            })
+            self.ws.send(msg)
+            logger.info(f"Subscribed to HazardNotification (name={self._hazard_event_name})")
+
+    def _ws_subscribe_tof(self):
+        """Subscribe to TimeOfFlight — raw distance readings from 8 sensors."""
+        if self.ws:
+            prev = getattr(self, '_tof_event_name', None)
+            self._tof_event_name = f"ToF_{time.time_ns()}"
+
+            for old_name in ["ToF", prev or '']:
+                if old_name:
+                    unsub = json.dumps({"Operation": "unsubscribe", "EventName": old_name})
+                    self.ws.send(unsub)
+            time.sleep(0.2)
+
+            msg = json.dumps({
+                "Operation": "subscribe",
+                "Type": "TimeOfFlight",
+                "DebounceMs": 250,  # 4 Hz per sensor — advisory, not primary safety
+                "EventName": self._tof_event_name,
+                "ReturnProperty": None,
+                "EventConditions": [],
+            })
+            self.ws.send(msg)
+            logger.info(f"Subscribed to TimeOfFlight (name={self._tof_event_name})")
+
+    def _ws_subscribe_bump(self):
+        """Subscribe to BumpSensor — physical contact detection."""
+        if self.ws:
+            prev = getattr(self, '_bump_event_name', None)
+            self._bump_event_name = f"Bump_{time.time_ns()}"
+
+            for old_name in ["Bump", prev or '']:
+                if old_name:
+                    unsub = json.dumps({"Operation": "unsubscribe", "EventName": old_name})
+                    self.ws.send(unsub)
+            time.sleep(0.2)
+
+            msg = json.dumps({
+                "Operation": "subscribe",
+                "Type": "BumpSensor",
+                "DebounceMs": 0,  # safety-critical: immediate notification
+                "EventName": self._bump_event_name,
+                "ReturnProperty": None,
+                "EventConditions": [],
+            })
+            self.ws.send(msg)
+            logger.info(f"Subscribed to BumpSensor (name={self._bump_event_name})")
+
+    def _ws_subscribe_safety_telemetry(self):
+        """Subscribe to all safety-related sensor events."""
+        self._ws_subscribe_hazard()
+        self._ws_subscribe_tof()
+        self._ws_subscribe_bump()
+
     def _on_ws_open(self, ws):
         logger.info("WebSocket connected")
         self.reconnect_attempts = 0
-        # Always subscribe to battery events
+        # Always subscribe to battery and safety telemetry events
         self._ws_subscribe_battery()
+        self._ws_subscribe_safety_telemetry()
 
         # In laptop wake word mode, skip keyphrase entirely — the laptop mic
         # handles wake word detection. Starting Misty's keyphrase would:
@@ -833,17 +1147,33 @@ class MistyController:
         event_name = data.get("eventName") or data.get("EventName", "")
         msg_content = data.get("message", "")
 
-        # Log ALL WebSocket messages for debugging keyphrase issues (#22)
+        # Ignore registration status messages
+        if isinstance(msg_content, str) and "Registration Status" in msg_content:
+            logger.debug(f"WS registration: {msg_content}")
+            return
+
+        # Route high-frequency telemetry events FIRST (no per-message INFO log)
+        if event_name == getattr(self, '_tof_event_name', ''):
+            if isinstance(msg_content, dict):
+                self._handle_tof_event(msg_content)
+            return
+
+        if event_name == getattr(self, '_hazard_event_name', ''):
+            if isinstance(msg_content, dict):
+                self._handle_hazard_event(msg_content)
+            return
+
+        if event_name == getattr(self, '_bump_event_name', ''):
+            if isinstance(msg_content, dict):
+                self._handle_bump_event(msg_content)
+            return
+
+        # Log non-telemetry WebSocket messages for debugging (#22)
         if event_name:
             msg_preview = str(msg_content)[:200] if msg_content else "(empty)"
             logger.info(f"WS event: {event_name} | msg_type={type(msg_content).__name__} | msg={msg_preview}")
         else:
             logger.info(f"WS raw: {str(message)[:300]}")
-
-        # Ignore registration status messages
-        if isinstance(msg_content, str) and "Registration Status" in msg_content:
-            logger.debug(f"WS registration: {msg_content}")
-            return
 
         if event_name == getattr(self, '_battery_event_name', 'BatteryMonitor') or event_name == "BatteryMonitor":
             if isinstance(msg_content, dict):
