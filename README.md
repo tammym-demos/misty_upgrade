@@ -157,7 +157,7 @@ Misty is a sassy little robot with big personality. She lives on a farm with Tam
 
 - **Wake word**: Detected via laptop microphone using openWakeWord (not Misty's onboard mic)
 - **Speech recording**: Captured from the laptop mic via sounddevice (16kHz, 16-bit mono)
-- **Misty's mic**: Only used for the tally light indicator during recording — audio data is not used for STT
+- **Misty's mic**: Not used for the primary STT path, but Misty's recorded audio may be used as a fallback for STT if laptop capture is empty; it also drives Misty's recording/tally-light behavior during capture
 - **TTS phrases**: "What's up baby?" (greeting) and "Let me think about that." (thinking) are generated via Kokoro TTS at startup and uploaded to Misty
 
 ### Expressive Behavior
