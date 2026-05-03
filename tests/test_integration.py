@@ -1845,6 +1845,52 @@ class TestSpeakMoveIntegration(unittest.TestCase):
         result = self.ctrl._wait_for_move_completion(2.0)
         self.assertTrue(result)  # preempted
 
+    # --- State machine transition tests (Plan 3.3 from #60) ---
+
+    def test_move_rejected_during_recording(self):
+        """Move should be rejected when state is RECORDING (Plan 3.3)."""
+        self.ctrl.set_state(self._State.RECORDING)
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+        self.assertEqual(self.ctrl.get_state(), self._State.RECORDING)
+
+    def test_move_rejected_during_playing(self):
+        """Move should be rejected when state is PLAYING (Plan 3.3)."""
+        self.ctrl.set_state(self._State.PLAYING)
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+        self.assertEqual(self.ctrl.get_state(), self._State.PLAYING)
+
+    def test_move_rejected_during_processing(self):
+        """Move should be rejected when state is PROCESSING."""
+        self.ctrl.set_state(self._State.PROCESSING)
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+
+    def test_move_rejected_during_rearming(self):
+        """Move should be rejected when state is REARMING."""
+        self.ctrl.set_state(self._State.REARMING)
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+
+    def test_idle_to_moving_to_idle_clean_cycle(self):
+        """Full IDLE -> MOVING -> IDLE cycle (Plan 3.3)."""
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+        ok = self.ctrl.start_moving(reason="test")
+        self.assertTrue(ok)
+        self.assertEqual(self.ctrl.get_state(), self._State.MOVING)
+        self.ctrl.stop_moving(reason="complete")
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
+    def test_sequential_move_cycles(self):
+        """Multiple IDLE -> MOVING -> IDLE cycles should all succeed."""
+        for i in range(3):
+            self.ctrl.set_state(self._State.IDLE)
+            ok = self.ctrl.start_moving(reason=f"cycle_{i}")
+            self.assertTrue(ok, f"Cycle {i} failed to start")
+            self.ctrl.stop_moving(reason="complete")
+            self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
 
 if __name__ == "__main__":
     unittest.main()
