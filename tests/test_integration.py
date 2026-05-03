@@ -75,6 +75,41 @@ class TestWindowsOrchestration(unittest.TestCase):
         self.assertIn("tts", data)
         self.assertIn("engine", data["tts"])
 
+    def test_tts_endpoint_generates_audio(self):
+        """Verify /api/tts generates WAV audio from text."""
+        response = requests.post(
+            f"{WINDOWS_HOST}/api/tts",
+            json={"text": "Hello"},
+            timeout=30,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("Content-Type", ""), "audio/wav")
+        # WAV files start with RIFF header and must be > 44 bytes (header only)
+        self.assertGreater(len(response.content), 44, "TTS returned empty or header-only WAV")
+        self.assertTrue(response.content[:4] == b"RIFF", "Response is not a valid WAV file")
+
+    def test_tts_endpoint_rejects_empty_text(self):
+        """Verify /api/tts returns 400 for empty text."""
+        response = requests.post(
+            f"{WINDOWS_HOST}/api/tts",
+            json={"text": ""},
+            timeout=10,
+        )
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertEqual(data.get("error"), "no_text")
+
+    def test_tts_endpoint_rejects_overlong_text(self):
+        """Verify /api/tts returns 400 for text over 500 chars."""
+        response = requests.post(
+            f"{WINDOWS_HOST}/api/tts",
+            json={"text": "a" * 501},
+            timeout=10,
+        )
+        self.assertEqual(response.status_code, 400)
+        data = response.json()
+        self.assertEqual(data.get("error"), "text_too_long")
+
 class TestMistyConnectivity(unittest.TestCase):
     """Test Misty robot connectivity."""
     
