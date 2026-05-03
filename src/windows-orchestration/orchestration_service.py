@@ -453,9 +453,11 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
             user_text = user_text[:MAX_USER_CHARS]
 
         # Classify intent for adaptive response mode
-        response_mode = classify_intent(user_text, _last_response_mode)
+        previous_response_mode = _last_response_mode
+        response_mode = classify_intent(user_text, previous_response_mode)
+        globals()["_last_response_mode"] = response_mode
         mode_config = RESPONSE_MODE_CONFIG[response_mode]
-        logger.info(f"Response mode: {response_mode} (last={_last_response_mode})")
+        logger.info(f"Response mode: {response_mode} (last={previous_response_mode})")
 
         # Build message history
         conversation_history.append({"role": "user", "content": user_text})
