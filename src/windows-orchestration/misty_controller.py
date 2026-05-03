@@ -173,10 +173,24 @@ class State(Enum):
     PROCESSING = "PROCESSING"
     PLAYING = "PLAYING"
     LISTENING = "LISTENING"  # follow-up listening after response
+    MOVING = "MOVING"        # robot is in motion (#50)
     REARMING = "REARMING"
     REBOOTING = "REBOOTING"  # proactive reboot in progress (#22)
     CHARGING = "CHARGING"
     ERROR = "ERROR"
+
+
+# Movement preemption priority (highest priority first) — determines what can
+# interrupt an active movement command. (#50)
+PREEMPTION_PRIORITY = [
+    "hazard_stop",       # firmware-level HazardNotification (auto-halts motors)
+    "battery_critical",  # battery < BATTERY_LOW_CRITICAL
+    "emergency_halt",    # explicit halt() call (e.g., from teleop kill switch)
+    "bump_contact",      # physical bump sensor contact
+    "telemetry_stale",   # safety sensors went dark (fail closed)
+    "wake_word",         # user wants to talk — stop and listen
+    "move_complete",     # normal movement completion
+]
 
 
 class MistyController:
@@ -383,6 +397,80 @@ class MistyController:
             "TimeMs": time_ms,
             "Reverse": reverse,
         })
+
+    # --- Movement Lifecycle (#50) ---
+
+    def _safe_halt(self, reason: str = "unknown"):
+        """Stop all motors safely. Called before any transition FROM MOVING state.
+
+        This is the single choke point for movement termination — ensures motors
+        are always stopped regardless of why movement ended.
+        """
+        logger.warning(f"Safe halt: reason={reason}")
+        self.halt()
+
+    def start_moving(self, reason: str = "command") -> bool:
+        """Transition to MOVING state if safe to do so.
+
+        Pre-checks:
+        - Must be in IDLE state
+        - No active hazards
+        - No active bump contacts
+        - Battery not critically low
+
+        Returns True if transition succeeded, False if blocked.
+        """
+        # Pre-flight safety checks
+        with self.hazard_lock:
+            if self.hazard.active_hazards:
+                logger.warning(f"Cannot start moving: active hazards ({len(self.hazard.active_hazards)})")
+                return False
+            if self.hazard.any_bump_active:
+                logger.warning("Cannot start moving: bump sensor active")
+                return False
+
+        with self.battery_lock:
+            if self.battery.charge_percent < BATTERY_LOW_CRITICAL and self.battery.last_updated > 0:
+                logger.warning(f"Cannot start moving: battery critical ({self.battery.charge_percent*100:.0f}%)")
+                return False
+
+        # Atomic state transition
+        if not self.try_set_state(State.IDLE, State.MOVING):
+            current = self.get_state()
+            logger.warning(f"Cannot start moving: not IDLE (state={current.value})")
+            return False
+
+        logger.info(f"MOVING: started (reason={reason})")
+        return True
+
+    def stop_moving(self, reason: str = "complete"):
+        """Transition from MOVING back to IDLE, halting motors first.
+
+        Args:
+            reason: Why movement is stopping (for logging/telemetry).
+                    One of PREEMPTION_PRIORITY values or custom string.
+        """
+        if self.get_state() != State.MOVING:
+            return
+
+        self._safe_halt(reason)
+        self.set_state(State.IDLE)
+        self.last_activity_time = time.time()
+        logger.info(f"Movement stopped: reason={reason}")
+
+    def preempt_movement(self, reason: str):
+        """Force-stop movement due to higher-priority event.
+
+        Unlike stop_moving(), this can be called from any thread (e.g., WS event
+        handler) and will interrupt in-progress movement immediately.
+        """
+        with self.state_lock:
+            if self.state != State.MOVING:
+                return
+            self.state = State.IDLE
+        logger.warning(f"Movement PREEMPTED: {reason}")
+        self._safe_halt(reason)
+        self.last_activity_time = time.time()
 
     def start_keyphrase(self, force_restart=False):
         if force_restart:
@@ -649,6 +737,10 @@ class MistyController:
 
         if hazards:
             logger.warning(f"HAZARD: {len(hazards)} active — {hazards}")
+            # Preempt movement if in MOVING state (firmware already halted motors,
+            # but we need to update our state machine)
+            if self.get_state() == State.MOVING:
+                self.preempt_movement("hazard_stop")
         else:
             # Hazard cleared
             with self.hazard_lock:
@@ -710,6 +802,9 @@ class MistyController:
 
         if is_pressed:
             logger.warning(f"BUMP: {sensor_name} contacted")
+            # Preempt movement if in MOVING state
+            if self.get_state() == State.MOVING:
+                self.preempt_movement("bump_contact")
         else:
             logger.info(f"Bump released: {sensor_name}")
 
@@ -1194,6 +1289,16 @@ class MistyController:
 
             if self.get_state() == State.IDLE and time.time() >= self.ready_time:
                 logger.info("[Wake] Wake word detected!")
+                self.turn_id += 1
+                threading.Thread(
+                    target=self._handle_conversation_turn,
+                    name=f"turn-{self.turn_id}",
+                    daemon=True,
+                ).start()
+            elif self.get_state() == State.MOVING:
+                # Wake word during movement — stop moving, then start conversation
+                logger.info("[Wake] Wake word during movement — preempting to converse")
+                self.preempt_movement("wake_word")
                 self.turn_id += 1
                 threading.Thread(
                     target=self._handle_conversation_turn,

@@ -1093,5 +1093,172 @@ class TestHazardTelemetry(unittest.TestCase):
         self.assertNotEqual(name1, name2)
 
 
+class TestMovingState(unittest.TestCase):
+    """Unit tests for MOVING state and preemption logic (#50).
+
+    These tests mock HTTP calls — no live robot required.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            _ctrl_path = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration")
+            )
+            if _ctrl_path not in sys.path:
+                sys.path.insert(0, _ctrl_path)
+            from misty_controller import MistyController, State, PREEMPTION_PRIORITY
+            cls._MistyController = MistyController
+            cls._State = State
+            cls._PREEMPTION_PRIORITY = PREEMPTION_PRIORITY
+        except Exception as exc:
+            cls._MistyController = None
+            print(f"[TestMovingState] Could not import misty_controller: {exc}")
+
+    def setUp(self):
+        if self._MistyController is None:
+            self.skipTest("misty_controller could not be imported")
+        self.ctrl = self._MistyController()
+        self._post_calls = []
+        self.ctrl.misty_post = lambda endpoint, body=None, timeout=5.0: (
+            self._post_calls.append((endpoint, body)) or {"status": "Success", "result": True}
+        )
+
+    # --- State enum ---
+
+    def test_moving_state_exists(self):
+        """MOVING should be a valid state."""
+        self.assertEqual(self._State.MOVING.value, "MOVING")
+
+    def test_preemption_priority_defined(self):
+        """Preemption priority list should be defined."""
+        self.assertIn("hazard_stop", self._PREEMPTION_PRIORITY)
+        self.assertIn("bump_contact", self._PREEMPTION_PRIORITY)
+        self.assertIn("wake_word", self._PREEMPTION_PRIORITY)
+        self.assertIn("move_complete", self._PREEMPTION_PRIORITY)
+
+    # --- start_moving ---
+
+    def test_start_moving_from_idle(self):
+        """start_moving should succeed from IDLE state."""
+        self.ctrl.set_state(self._State.IDLE)
+        result = self.ctrl.start_moving(reason="test")
+        self.assertTrue(result)
+        self.assertEqual(self.ctrl.get_state(), self._State.MOVING)
+
+    def test_start_moving_blocked_not_idle(self):
+        """start_moving should fail if not in IDLE state."""
+        self.ctrl.set_state(self._State.RECORDING)
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+        self.assertEqual(self.ctrl.get_state(), self._State.RECORDING)
+
+    def test_start_moving_blocked_active_hazard(self):
+        """start_moving should fail if hazards are active."""
+        self.ctrl.set_state(self._State.IDLE)
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.active_hazards = [{"type": "tof", "sensor": "front"}]
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
+    def test_start_moving_blocked_bump_active(self):
+        """start_moving should fail if any bump sensor is active."""
+        self.ctrl.set_state(self._State.IDLE)
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.any_bump_active = True
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+
+    def test_start_moving_blocked_battery_critical(self):
+        """start_moving should fail if battery is critically low."""
+        self.ctrl.set_state(self._State.IDLE)
+        with self.ctrl.battery_lock:
+            self.ctrl.battery.charge_percent = 0.05
+            self.ctrl.battery.last_updated = time.time()
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+
+    # --- stop_moving ---
+
+    def test_stop_moving_halts_and_returns_to_idle(self):
+        """stop_moving should halt motors and return to IDLE."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl.stop_moving(reason="move_complete")
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+        # Should have called /api/halt
+        halt_calls = [c for c in self._post_calls if c[0] == "/api/halt"]
+        self.assertEqual(len(halt_calls), 1)
+
+    def test_stop_moving_noop_if_not_moving(self):
+        """stop_moving should do nothing if not in MOVING state."""
+        self.ctrl.set_state(self._State.IDLE)
+        self.ctrl.stop_moving(reason="test")
+        # No halt call expected
+        halt_calls = [c for c in self._post_calls if c[0] == "/api/halt"]
+        self.assertEqual(len(halt_calls), 0)
+
+    # --- preempt_movement ---
+
+    def test_preempt_halts_and_returns_to_idle(self):
+        """preempt_movement should halt motors and return to IDLE."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl.preempt_movement("hazard_stop")
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+        halt_calls = [c for c in self._post_calls if c[0] == "/api/halt"]
+        self.assertEqual(len(halt_calls), 1)
+
+    def test_preempt_noop_if_not_moving(self):
+        """preempt_movement should do nothing if not in MOVING state."""
+        self.ctrl.set_state(self._State.IDLE)
+        self.ctrl.preempt_movement("hazard_stop")
+        halt_calls = [c for c in self._post_calls if c[0] == "/api/halt"]
+        self.assertEqual(len(halt_calls), 0)
+
+    # --- Hazard preemption integration ---
+
+    def test_hazard_event_preempts_movement(self):
+        """Active hazard during MOVING should preempt movement."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl._handle_hazard_event({
+            "bumpSensorsHazardState": [],
+            "timeOfFlightSensorsHazardState": [
+                {"sensorName": "TOF_FC", "inHazard": True, "distance": 50},
+            ],
+        })
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
+    def test_hazard_cleared_no_preempt(self):
+        """Hazard cleared event should NOT affect MOVING state."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl._handle_hazard_event({
+            "bumpSensorsHazardState": [],
+            "timeOfFlightSensorsHazardState": [
+                {"sensorName": "TOF_FC", "inHazard": False},
+            ],
+        })
+        self.assertEqual(self.ctrl.get_state(), self._State.MOVING)
+
+    # --- Bump preemption integration ---
+
+    def test_bump_event_preempts_movement(self):
+        """Bump contact during MOVING should preempt movement."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl._handle_bump_event({
+            "sensorName": "Bump_FrontRight",
+            "isContacted": True,
+        })
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
+    def test_bump_release_no_preempt(self):
+        """Bump release should NOT preempt movement."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl._handle_bump_event({
+            "sensorName": "Bump_FrontRight",
+            "isContacted": False,
+        })
+        self.assertEqual(self.ctrl.get_state(), self._State.MOVING)
+
+
 if __name__ == "__main__":
     unittest.main()
