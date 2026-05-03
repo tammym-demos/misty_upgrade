@@ -303,6 +303,39 @@ class MistyController:
         result = self.misty_get("/api/device", timeout=3.0)
         return result is not None and result.get("status") == "Success"
 
+    def _upload_greeting(self):
+        """Generate TTS phrases and upload to Misty as named audio files."""
+        phrases = {
+            "greeting_whatsup.wav": "What's up baby?",
+            "thinking.wav": "Let me think about that.",
+        }
+        for filename, text in phrases.items():
+            try:
+                response = requests.post(
+                    f"{ORCHESTRATION_URL}/api/tts",
+                    json={"text": text},
+                    timeout=15.0,
+                )
+                if response.status_code != 200:
+                    logger.warning(f"TTS for '{filename}' failed: HTTP {response.status_code}")
+                    continue
+
+                audio_data = response.content
+                if len(audio_data) < 100:
+                    logger.warning(f"TTS for '{filename}' too small: {len(audio_data)} bytes")
+                    continue
+
+                audio_b64 = base64.b64encode(audio_data).decode("ascii")
+                self.misty_post("/api/audio", {
+                    "FileName": filename,
+                    "Data": audio_b64,
+                    "ImmediatelyApply": False,
+                    "OverwriteExisting": True,
+                })
+                logger.info(f"Uploaded '{filename}' to Misty ({len(audio_data)} bytes)")
+            except Exception as e:
+                logger.warning(f"Failed to upload '{filename}': {e}")
+
     def check_orchestration_health(self) -> bool:
         try:
             r = requests.get(f"{ORCHESTRATION_URL}/api/health", timeout=3.0)
@@ -901,38 +934,85 @@ class MistyController:
             self.misty_post("/api/audio/record/stop")  # belt-and-suspenders cleanup
             time.sleep(0.5)  # minimal delay — no keyphrase to release
 
-        # Play a short "ready" chime so the user knows Misty is listening.
-        # Critical in laptop wake word mode: there's a ~3s gap between saying
-        # the wake word and when recording starts (keyphrase release delay).
-        # Without this cue, users speak during the gap and Misty misses it.
+        # Play "What's up baby?" greeting via pre-uploaded TTS audio.
+        # Falls back to chime if greeting audio isn't available.
         try:
-            self.misty_post("/api/audio/play", {"FileName": "s_Awe3.wav", "Volume": 30})
-            time.sleep(0.8)  # let the chime play before recording starts
+            self.misty_post("/api/audio/play", {"FileName": "greeting_whatsup.wav", "Volume": 40})
+            time.sleep(1.2)  # let the greeting play before recording starts
         except Exception as e:
-            logger.debug(f"[Turn {turn}] Ready chime failed: {e}")
+            logger.debug(f"[Turn {turn}] Greeting playback failed, trying chime: {e}")
+            try:
+                self.misty_post("/api/audio/play", {"FileName": "s_Awe3.wav", "Volume": 30})
+                time.sleep(0.8)
+            except Exception:
+                pass
 
-        # 2. Record audio
+        # 2. Record audio — bright green LED + tally light = "I'm listening, speak now!"
+        self.set_led(0, 255, 0)  # green = recording active, speak now
+        
+        # Start laptop mic recording (primary audio source for STT)
+        use_laptop_mic = self._wake_word_listener and self._wake_word_listener.is_running
+        if use_laptop_mic:
+            self._wake_word_listener.start_recording()
+        
+        # Also start Misty recording for tally light indicator (audio not used for STT)
         self.start_recording(RECORDING_FILENAME)
-        time.sleep(RECORDING_DURATION_S)
+        record_start = time.time()
+        
+        if use_laptop_mic:
+            # Dynamic recording: laptop mic monitors speech and signals when to stop
+            speech_ended = threading.Event()
+            self._wake_word_listener.start_speech_monitor(
+                on_speech_end=lambda: speech_ended.set(),
+                min_duration=RECORDING_DURATION_S,  # at least the standard duration
+                max_duration=15.0,
+            )
+            speech_ended.wait(timeout=15.0)
+            self._wake_word_listener.stop_speech_monitor()
+        else:
+            # Fallback: fixed duration recording
+            time.sleep(RECORDING_DURATION_S)
+        
         self.stop_recording()
         self._recording_cycles += 1
-        logger.info(f"[Turn {turn}] Recorded {RECORDING_DURATION_S}s (recording cycle {self._recording_cycles})")
+        record_duration = time.time() - record_start
+        
+        # Get audio from laptop mic (preferred) or fall back to Misty's mic
+        if use_laptop_mic:
+            laptop_audio = self._wake_word_listener.stop_recording()
+            if len(laptop_audio) > 100:
+                logger.info(f"[Turn {turn}] Using LAPTOP mic: {len(laptop_audio)} bytes, {record_duration:.1f}s")
+                audio_bytes = laptop_audio
+            else:
+                logger.warning(f"[Turn {turn}] Laptop mic empty, falling back to Misty mic")
+                audio_bytes = None  # will fetch from Misty below
+        else:
+            audio_bytes = None
+
+        logger.info(f"[Turn {turn}] Recorded {record_duration:.1f}s (cycle {self._recording_cycles})")
 
         # Small delay for Misty to finalize the file
         time.sleep(0.5)
 
-        # 3. Retrieve recorded audio — thinking face
+        # 3. Retrieve recorded audio — wondering face + thinking sound
         self.set_state(State.PROCESSING)
         self.set_led(0, 0, 255)  # blue = processing
-        self.display_image("e_ContentRight.jpg")  # looking to the side — "thinking"
+        self.display_image("e_Contempt.jpg")  # one eyebrow raised — "hmm, let me think..."
         self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)  # tilt head — pondering
 
-        audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
-        if not audio_b64:
-            raise RuntimeError("Failed to retrieve recorded audio from Misty")
+        # Play thinking phrase so the user knows Misty heard them
+        try:
+            self.misty_post("/api/audio/play", {"FileName": "thinking.wav", "Volume": 40})
+        except Exception as e:
+            logger.debug(f"[Turn {turn}] Thinking sound failed: {e}")
 
-        audio_bytes = base64.b64decode(audio_b64)
-        logger.info(f"[Turn {turn}] Retrieved {len(audio_bytes)} bytes of audio")
+        # Fall back to Misty mic if laptop mic wasn't used or was empty
+        if audio_bytes is None:
+            audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
+            if not audio_b64:
+                raise RuntimeError("Failed to retrieve recorded audio from Misty")
+            audio_bytes = base64.b64decode(audio_b64)
+            logger.info(f"[Turn {turn}] Using MISTY mic: {len(audio_bytes)} bytes")
 
         if len(audio_bytes) < FOLLOWUP_SILENCE_THRESHOLD:
             raise RuntimeError(f"Recording too small ({len(audio_bytes)} bytes) — likely empty")
@@ -946,11 +1026,7 @@ class MistyController:
         Returns True if speech was detected and a response was played,
         False if no speech was detected (empty STT).
         """
-        # Processing state — thinking
-        self.set_state(State.PROCESSING)
-        self.set_led(0, 0, 255)  # blue = processing
-        self.display_image("e_ContentRight.jpg")  # thinking face
-        self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)  # head tilt — pondering
+        # Processing state already set by caller — just send to orchestration
 
         # Send to orchestration service
         response = requests.post(
@@ -1012,24 +1088,56 @@ class MistyController:
         self.display_image("e_Joy.jpg")  # warm, expectant — "go on..."
         self.move_head(pitch=-10, roll=-3, yaw=-10, velocity=40)  # slight head tilt — attentive
 
-        # Record a short clip
+        # Record a short clip — use VAD if available
+        use_laptop_mic = self._wake_word_listener and self._wake_word_listener.is_running
+        if use_laptop_mic:
+            self._wake_word_listener.start_recording()
+        
         self.start_recording(RECORDING_FILENAME)
-        time.sleep(FOLLOWUP_LISTEN_S)
+        if use_laptop_mic:
+            speech_ended = threading.Event()
+            self._wake_word_listener.start_speech_monitor(
+                on_speech_end=lambda: speech_ended.set(),
+                min_duration=2.0,   # shorter min for follow-ups
+                max_duration=10.0,  # shorter max for follow-ups
+            )
+            speech_ended.wait(timeout=10.0)
+            self._wake_word_listener.stop_speech_monitor()
+        else:
+            time.sleep(FOLLOWUP_LISTEN_S)
         self.stop_recording()
         self._recording_cycles += 1
         time.sleep(0.5)  # finalize
 
-        audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
-        if not audio_b64:
-            logger.warning(f"[Turn {turn}] Follow-up: failed to retrieve audio")
-            return False
+        # Get audio from laptop mic (preferred) or Misty
+        if use_laptop_mic:
+            laptop_audio = self._wake_word_listener.stop_recording()
+            if len(laptop_audio) > 100:
+                logger.info(f"[Turn {turn}] Follow-up using LAPTOP mic: {len(laptop_audio)} bytes")
+                audio_bytes = laptop_audio
+            else:
+                logger.warning(f"[Turn {turn}] Follow-up laptop mic empty, falling back to Misty mic")
+                audio_bytes = None
+        else:
+            audio_bytes = None
 
-        audio_bytes = base64.b64decode(audio_b64)
-        logger.info(f"[Turn {turn}] Follow-up recording: {len(audio_bytes)} bytes")
+        if audio_bytes is None:
+            audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
+            if not audio_b64:
+                logger.warning(f"[Turn {turn}] Follow-up: failed to retrieve audio")
+                return False
+            audio_bytes = base64.b64decode(audio_b64)
+            logger.info(f"[Turn {turn}] Follow-up using MISTY mic: {len(audio_bytes)} bytes")
 
         # Very small recordings are certainly silence
         if len(audio_bytes) < FOLLOWUP_SILENCE_THRESHOLD:
             return False
+
+        # Show thinking face while processing follow-up
+        self.set_state(State.PROCESSING)
+        self.set_led(0, 0, 255)  # blue = processing
+        self.display_image("e_Contempt.jpg")  # wondering face
+        self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)
 
         # Send through the full pipeline — orchestration returns empty_stt error
         # if no speech was detected, which we treat as silence
@@ -1281,6 +1389,10 @@ class MistyController:
         orch_ok = self.check_orchestration_health()
         if not orch_ok:
             logger.warning("Orchestration service not reachable — will retry during turns")
+
+        # Upload "What's up baby?" greeting to Misty via orchestration TTS
+        if orch_ok:
+            self._upload_greeting()
 
         # Cancel any lingering skills (e.g., built-in faceDetection)
         self.misty_post("/api/skills/cancel")

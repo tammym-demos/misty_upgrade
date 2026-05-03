@@ -238,8 +238,9 @@ class TestPromptLimiting(unittest.TestCase):
     def setUp(self):
         if self._svc is None:
             self.skipTest("orchestration_service could not be imported; skipping unit tests")
-        # Reset conversation history before every test to avoid cross-test pollution
+        # Reset conversation history and response mode before every test
         self._svc.conversation_history = []
+        self._svc._last_response_mode = "short"
 
     # ------------------------------------------------------------------
     # Helpers
@@ -363,9 +364,9 @@ class TestPromptLimiting(unittest.TestCase):
             f"History should be capped near 8, got {len(self._svc.conversation_history)}",
         )
 
-    def test_response_truncation_at_25_words(self):
-        """Responses over 25 words must be truncated to 25 words or 2 sentences."""
-        long_response = " ".join([f"word{i}" for i in range(40)])
+    def test_response_truncation_at_35_words(self):
+        """Responses over 35 words must be truncated to 35 words or 3 sentences."""
+        long_response = " ".join([f"word{i}" for i in range(50)])
         result, _ = self._call_llm_and_capture_payload(
             "test", mock_response_text=long_response
         )
@@ -373,33 +374,164 @@ class TestPromptLimiting(unittest.TestCase):
         words = result["text"].split()
         self.assertLessEqual(
             len(words),
-            26,  # 25 words + possible trailing period word
-            f"Response should be truncated to ~25 words, got {len(words)}",
+            36,  # 35 words + possible trailing period word
+            f"Response should be truncated to ~35 words, got {len(words)}",
         )
 
     def test_two_sentence_truncation(self):
-        """A response with 3+ sentences over 25 words should be truncated at 2 sentence boundaries."""
-        three_sentences = (
+        """A response with 4+ sentences over 35 words should be truncated at 3 sentence boundaries."""
+        four_sentences = (
             "This is the very first long sentence about robotics and AI technology. "
             "This is the equally long second sentence with more interesting details. "
-            "This is the third sentence that definitely should be cut out entirely."
+            "This is the third sentence that adds even more juicy context here. "
+            "This is the fourth sentence that definitely should be cut out entirely."
         )
         result, _ = self._call_llm_and_capture_payload(
-            "test", mock_response_text=three_sentences
+            "test", mock_response_text=four_sentences
         )
-        # Should keep at most 2 sentence-ending punctuation marks
+        # Should keep at most 3 sentence-ending punctuation marks
         text = result["text"]
         sentence_count = text.count(".") + text.count("!") + text.count("?")
-        self.assertLessEqual(sentence_count, 2, f"Expected at most 2 sentences in: {text}")
+        self.assertLessEqual(sentence_count, 3, f"Expected at most 3 sentences in: {text}")
 
-    def test_max_tokens_is_40(self):
-        """The LLM payload must use max_tokens=40."""
+    def test_max_tokens_is_60(self):
+        """The LLM payload must use max_tokens=60 for short mode."""
         _, payload = self._call_llm_and_capture_payload("test question")
         self.assertEqual(
             payload["max_tokens"],
-            40,
-            f"Expected max_tokens=40, got {payload['max_tokens']}",
+            60,
+            f"Expected max_tokens=60 for short mode, got {payload['max_tokens']}",
         )
+
+    # ------------------------------------------------------------------
+    # Intent classification tests
+    # ------------------------------------------------------------------
+
+    def test_classify_intent_short_default(self):
+        """Normal questions should classify as 'short'."""
+        for text in ["What's your name?", "How are you?", "Tell me a joke.", "What's 2+2?"]:
+            mode = self._svc.classify_intent(text, "short")
+            self.assertEqual(mode, "short", f"Expected 'short' for: {text}")
+
+    def test_classify_intent_story(self):
+        """Story requests should classify as 'summary'."""
+        for text in ["Tell me a bedtime story", "Make up a story about a robot",
+                      "Tell me a fairy tale", "Can you tell me a scary story?"]:
+            mode = self._svc.classify_intent(text, "short")
+            self.assertEqual(mode, "summary", f"Expected 'summary' for: {text}")
+
+    def test_classify_intent_recipe(self):
+        """Recipe requests should classify as 'summary'."""
+        for text in ["Give me a recipe for chicken pot pie",
+                      "How do I make chocolate chip cookies?",
+                      "How to cook a steak?"]:
+            mode = self._svc.classify_intent(text, "short")
+            self.assertEqual(mode, "summary", f"Expected 'summary' for: {text}")
+
+    def test_classify_intent_explain(self):
+        """Explanation requests should classify as 'summary'."""
+        for text in ["Explain how gravity works", "Tell me about the solar system",
+                      "How does a computer work?"]:
+            mode = self._svc.classify_intent(text, "short")
+            self.assertEqual(mode, "summary", f"Expected 'summary' for: {text}")
+
+    def test_classify_intent_continuation(self):
+        """Continuation phrases after a summary should classify as 'continuation'."""
+        for text in ["yes", "more", "continue", "go on", "tell me more",
+                      "what happens next", "keep going"]:
+            mode = self._svc.classify_intent(text, "summary")
+            self.assertEqual(mode, "continuation", f"Expected 'continuation' for: {text}")
+
+    def test_classify_intent_continuation_requires_prior_summary(self):
+        """Continuation phrases should NOT trigger if last mode was 'short'."""
+        mode = self._svc.classify_intent("yes", "short")
+        self.assertEqual(mode, "short", "'yes' after short mode should stay 'short'")
+
+    def test_classify_intent_continuation_chain(self):
+        """Continuation should chain — 'more' after continuation stays continuation."""
+        mode = self._svc.classify_intent("more", "continuation")
+        self.assertEqual(mode, "continuation", "'more' after continuation should stay 'continuation'")
+
+    def test_classify_intent_empty_input(self):
+        """Empty input should default to 'short'."""
+        self.assertEqual(self._svc.classify_intent("", "short"), "short")
+        self.assertEqual(self._svc.classify_intent("  ", "summary"), "short")
+
+    # ------------------------------------------------------------------
+    # Adaptive response mode tests
+    # ------------------------------------------------------------------
+
+    def test_summary_mode_max_tokens_80(self):
+        """Summary mode requests should use max_tokens=80."""
+        _, payload = self._call_llm_and_capture_payload("Tell me a bedtime story")
+        self.assertEqual(
+            payload["max_tokens"],
+            80,
+            f"Expected max_tokens=80 for summary mode, got {payload['max_tokens']}",
+        )
+
+    def test_summary_mode_includes_prompt_suffix(self):
+        """Summary mode should inject a mode-specific system prompt."""
+        _, payload = self._call_llm_and_capture_payload("Tell me a bedtime story")
+        system_msgs = [m for m in payload["messages"] if m["role"] == "system"]
+        system_text = " ".join(m["content"] for m in system_msgs)
+        self.assertIn("Want to hear more", system_text,
+                       "Summary mode should include 'Want to hear more?' in system prompt")
+
+    def test_summary_mode_truncation_50_words(self):
+        """Summary mode should truncate at 50 words, not 25."""
+        long_response = " ".join([f"word{i}" for i in range(60)])
+        result, _ = self._call_llm_and_capture_payload(
+            "Tell me a bedtime story", mock_response_text=long_response
+        )
+        words = result["text"].split()
+        self.assertLessEqual(len(words), 51)  # 50 + possible trailing period
+        self.assertGreater(len(words), 25, "Summary mode should allow more than 25 words")
+
+    def test_response_includes_mode_field(self):
+        """API response should include responseMode field."""
+        result, _ = self._call_llm_and_capture_payload("What's your name?")
+        self.assertIn("responseMode", result)
+        self.assertEqual(result["responseMode"], "short")
+
+    def test_response_mode_summary_in_result(self):
+        """Summary mode should be reflected in the response."""
+        result, _ = self._call_llm_and_capture_payload("Tell me a bedtime story")
+        self.assertEqual(result["responseMode"], "summary")
+
+    def test_continuation_mode_after_summary(self):
+        """After a summary response, 'yes' should trigger continuation mode."""
+        # First call: summary
+        self._call_llm_and_capture_payload("Tell me a bedtime story")
+        # Second call: continuation
+        result, payload = self._call_llm_and_capture_payload("yes")
+        self.assertEqual(result["responseMode"], "continuation")
+        self.assertEqual(payload["max_tokens"], 80)
+
+    def test_topic_change_resets_to_short(self):
+        """Changing topic after a summary should reset to short mode."""
+        # First call: summary
+        self._call_llm_and_capture_payload("Tell me a bedtime story")
+        # Second call: different topic
+        result, payload = self._call_llm_and_capture_payload("What's 2 plus 2?")
+        self.assertEqual(result["responseMode"], "short")
+        self.assertEqual(payload["max_tokens"], 60)
+
+    def test_brevity_reminder_suppressed_in_summary_mode(self):
+        """Brevity reminder should not appear in summary/continuation modes."""
+        # Fill history to trigger brevity reminder threshold (>4 messages)
+        self._svc.conversation_history = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"},
+            {"role": "user", "content": "hi again"},
+            {"role": "assistant", "content": "hello again"},
+            {"role": "user", "content": "one more"},
+        ]
+        _, payload = self._call_llm_and_capture_payload("Tell me a bedtime story")
+        system_msgs = [m for m in payload["messages"] if m["role"] == "system"]
+        system_text = " ".join(m["content"] for m in system_msgs)
+        self.assertNotIn("Stay punchy", system_text,
+                          "Brevity reminder should be suppressed in summary mode")
 
 
 if __name__ == "__main__":
