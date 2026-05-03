@@ -527,9 +527,6 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
                 assistant_text = " ".join(words[:max_words]) + "."
             logger.info(f"Truncated LLM response ({response_mode} mode) to: {assistant_text}")
         
-        # Update continuation tracking
-        _last_response_mode = response_mode
-
         # Add to history for context in next turn
         conversation_history.append({"role": "assistant", "content": assistant_text})
         
