@@ -2158,6 +2158,113 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
                 "turn_id": ctrl.turn_id,
                 "message": "Conversation turn started — Misty is recording",
             })
+
+        elif self.path == "/api/move":
+            # Teleop movement endpoint (#51) — strict parameter validation
+            ctrl = self.controller
+            try:
+                content_len = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(content_len)) if content_len > 0 else {}
+            except (json.JSONDecodeError, ValueError):
+                self._send_json(400, {"error": "invalid_json", "message": "Request body must be valid JSON"})
+                return
+
+            command = body.get("command")
+            valid_commands = ("forward", "backward", "rotate_left", "rotate_right", "halt")
+            if command not in valid_commands:
+                self._send_json(400, {
+                    "error": "invalid_command",
+                    "message": f"command must be one of: {valid_commands}",
+                    "received": command,
+                })
+                return
+
+            # Handle halt immediately (no state transition needed)
+            if command == "halt":
+                ctrl.halt()
+                self._send_json(200, {"status": "ok", "command": "halt", "message": "Emergency halt issued"})
+                return
+
+            # Validate parameters
+            distance_mm = body.get("distance_mm", 200)
+            speed_pct = body.get("speed_pct", 20)
+            angle_deg = body.get("angle_deg", 90)
+
+            # Strict bounds
+            if not isinstance(distance_mm, (int, float)) or distance_mm < 50 or distance_mm > 500:
+                self._send_json(400, {
+                    "error": "invalid_distance",
+                    "message": "distance_mm must be 50-500",
+                    "received": distance_mm,
+                })
+                return
+            if not isinstance(speed_pct, (int, float)) or speed_pct < 5 or speed_pct > 30:
+                self._send_json(400, {
+                    "error": "invalid_speed",
+                    "message": "speed_pct must be 5-30",
+                    "received": speed_pct,
+                })
+                return
+            if command in ("rotate_left", "rotate_right"):
+                if not isinstance(angle_deg, (int, float)) or angle_deg < 10 or angle_deg > 180:
+                    self._send_json(400, {
+                        "error": "invalid_angle",
+                        "message": "angle_deg must be 10-180",
+                        "received": angle_deg,
+                    })
+                    return
+
+            # Attempt to enter MOVING state
+            if not ctrl.start_moving(reason=f"teleop_{command}"):
+                state = ctrl.get_state()
+                self._send_json(409, {
+                    "error": "cannot_move",
+                    "state": state.name,
+                    "message": "Cannot start moving — check state, hazards, or battery",
+                })
+                return
+
+            # Execute movement command in background thread
+            def _execute_teleop():
+                try:
+                    if command in ("forward", "backward"):
+                        # Calculate duration from distance and speed
+                        # At speed_pct=30, max velocity ~135mm/s (30% of 450mm/s)
+                        velocity_mms = (speed_pct / 100.0) * 450.0
+                        duration_ms = int((distance_mm / velocity_mms) * 1000)
+                        duration_ms = max(100, min(ctrl.DRIVE_MAX_DURATION_MS, duration_ms))
+                        linear = speed_pct if command == "forward" else -speed_pct
+                        ctrl.drive_time(linear, 0, duration_ms)
+                        time.sleep(duration_ms / 1000.0 + 0.2)  # wait for completion + buffer
+                    elif command in ("rotate_left", "rotate_right"):
+                        # Rotate in place — angular velocity only
+                        # Approximate: at 20% angular, ~30 deg/s → duration = angle/30 * 1000ms
+                        angular_rate = (speed_pct / 100.0) * 150.0  # approx deg/s
+                        duration_ms = int((angle_deg / angular_rate) * 1000)
+                        duration_ms = max(100, min(ctrl.DRIVE_MAX_DURATION_MS, duration_ms))
+                        angular = speed_pct if command == "rotate_left" else -speed_pct
+                        ctrl.drive_time(0, angular, duration_ms)
+                        time.sleep(duration_ms / 1000.0 + 0.2)
+                except Exception as e:
+                    logger.error(f"Teleop execution error: {e}")
+                finally:
+                    if ctrl.get_state() == State.MOVING:
+                        ctrl.stop_moving(reason="move_complete")
+
+            threading.Thread(target=_execute_teleop, name="teleop-exec", daemon=True).start()
+
+            self._send_json(200, {
+                "status": "ok",
+                "command": command,
+                "message": f"Movement started: {command}",
+            })
+
+        elif self.path == "/api/sensors":
+            # Sensor telemetry snapshot (#49)
+            ctrl = self.controller
+            snapshot = ctrl.get_hazard_snapshot()
+            self._send_json(200, {"status": "ok", **snapshot})
+
         else:
             self._send_json(404, {"error": "not_found"})
 

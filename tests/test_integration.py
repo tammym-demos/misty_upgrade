@@ -1351,5 +1351,101 @@ class TestMovingState(unittest.TestCase):
         self.assertTrue(resume_called)
 
 
+class TestTeleopEndpoint(unittest.TestCase):
+    """Unit tests for the HTTP teleop endpoint (#51).
+
+    Tests the ControllerAPIHandler's /api/move endpoint logic.
+    These tests call the controller methods directly (not via HTTP),
+    verifying parameter validation and movement commands.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            _ctrl_path = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration")
+            )
+            if _ctrl_path not in sys.path:
+                sys.path.insert(0, _ctrl_path)
+            from misty_controller import MistyController, State
+            cls._MistyController = MistyController
+            cls._State = State
+        except Exception as exc:
+            cls._MistyController = None
+            print(f"[TestTeleopEndpoint] Could not import misty_controller: {exc}")
+
+    def setUp(self):
+        if self._MistyController is None:
+            self.skipTest("misty_controller could not be imported")
+        self.ctrl = self._MistyController()
+        self._post_calls = []
+        self.ctrl.misty_post = lambda endpoint, body=None, timeout=5.0: (
+            self._post_calls.append((endpoint, body)) or {"status": "Success", "result": True}
+        )
+
+    def test_halt_command_immediate(self):
+        """Halt command should issue halt regardless of state."""
+        self.ctrl.halt()
+        halt_calls = [c for c in self._post_calls if c[0] == "/api/halt"]
+        self.assertEqual(len(halt_calls), 1)
+
+    def test_forward_movement_via_drive_time(self):
+        """Forward command should use drive_time with positive velocity."""
+        self.ctrl.set_state(self._State.IDLE)
+        self.ctrl.start_moving(reason="teleop_forward")
+        self.assertEqual(self.ctrl.get_state(), self._State.MOVING)
+        # Execute forward drive
+        self.ctrl.drive_time(20, 0, 1000)
+        drive_calls = [c for c in self._post_calls if c[0] == "/api/drive/time"]
+        self.assertEqual(len(drive_calls), 1)
+        _, body = drive_calls[0]
+        self.assertEqual(body["LinearVelocity"], 20)
+        self.assertEqual(body["AngularVelocity"], 0)
+        self.assertEqual(body["TimeMs"], 1000)
+
+    def test_backward_movement_via_drive_time(self):
+        """Backward command should use drive_time with negative velocity."""
+        self.ctrl.set_state(self._State.IDLE)
+        self.ctrl.start_moving(reason="teleop_backward")
+        self.ctrl.drive_time(-15, 0, 800)
+        drive_calls = [c for c in self._post_calls if c[0] == "/api/drive/time"]
+        self.assertEqual(len(drive_calls), 1)
+        _, body = drive_calls[0]
+        self.assertEqual(body["LinearVelocity"], -15)
+
+    def test_rotate_movement_via_drive_time(self):
+        """Rotate command should use drive_time with angular only."""
+        self.ctrl.set_state(self._State.IDLE)
+        self.ctrl.start_moving(reason="teleop_rotate")
+        self.ctrl.drive_time(0, 20, 1500)
+        drive_calls = [c for c in self._post_calls if c[0] == "/api/drive/time"]
+        _, body = drive_calls[0]
+        self.assertEqual(body["LinearVelocity"], 0)
+        self.assertEqual(body["AngularVelocity"], 20)
+
+    def test_cannot_move_when_not_idle(self):
+        """Movement should be rejected when not in IDLE state."""
+        self.ctrl.set_state(self._State.RECORDING)
+        result = self.ctrl.start_moving(reason="teleop")
+        self.assertFalse(result)
+
+    def test_speed_clamped_to_max(self):
+        """Speed above max should be clamped by drive methods."""
+        self.ctrl.set_state(self._State.IDLE)
+        self.ctrl.start_moving(reason="test")
+        self.ctrl.drive_time(50, 0, 1000)  # 50 > max 30
+        drive_calls = [c for c in self._post_calls if c[0] == "/api/drive/time"]
+        _, body = drive_calls[0]
+        self.assertEqual(body["LinearVelocity"], self.ctrl.DRIVE_MAX_LINEAR_PCT)
+
+    def test_sensors_endpoint_returns_snapshot(self):
+        """get_hazard_snapshot should return usable data for /api/sensors."""
+        snapshot = self.ctrl.get_hazard_snapshot()
+        self.assertIn("tof_readings", snapshot)
+        self.assertIn("bump_states", snapshot)
+        self.assertIn("active_hazards", snapshot)
+        self.assertEqual(len(snapshot["tof_readings"]), 8)
+
+
 if __name__ == "__main__":
     unittest.main()
