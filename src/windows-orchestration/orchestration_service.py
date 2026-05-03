@@ -92,6 +92,60 @@ _INTENT_PATTERNS = {
     ),
 }
 
+# Movement intent patterns (#54) — detect commands to physically move the robot
+_MOVEMENT_PATTERNS = {
+    "forward": re.compile(
+        r"\b(?:(?:go|move|drive|roll|come)\s+(?:forward|ahead|straight)|"
+        r"(?:come|go)\s+(?:here|to\s+me|closer|over\s+here)|"
+        r"move\s+up|"
+        r"walk\s+(?:forward|to\s+me|over\s+here))\b",
+        re.IGNORECASE,
+    ),
+    "backward": re.compile(
+        r"\b(?:(?:go|move|drive|roll|back)\s+(?:back(?:ward)?s?|up)|"
+        r"reverse|"
+        r"back\s+(?:up|away)|"
+        r"move\s+(?:away|back))\b",
+        re.IGNORECASE,
+    ),
+    "rotate_left": re.compile(
+        r"\b(?:(?:turn|rotate|spin|face)\s+(?:left|around\s+to\s+(?:the\s+)?left)|"
+        r"look\s+(?:left|to\s+(?:the\s+)?left))\b",
+        re.IGNORECASE,
+    ),
+    "rotate_right": re.compile(
+        r"\b(?:(?:turn|rotate|spin|face)\s+(?:right|around\s+to\s+(?:the\s+)?right)|"
+        r"look\s+(?:right|to\s+(?:the\s+)?right))\b",
+        re.IGNORECASE,
+    ),
+    "stop": re.compile(
+        r"\b(?:stop|halt|freeze|don'?t\s+move|stay|hold\s+(?:it|still|on))\b",
+        re.IGNORECASE,
+    ),
+}
+
+
+def classify_movement_intent(user_text: str) -> dict | None:
+    """Classify if user text contains a movement command.
+
+    Returns dict with movement details if detected, None otherwise.
+    Only bounded relative commands are recognized (no absolute destinations).
+
+    Returns:
+        {"command": "forward"|"backward"|"rotate_left"|"rotate_right"|"stop"}
+        or None if no movement intent detected.
+    """
+    text = (user_text or "").strip()
+    if not text:
+        return None
+
+    for command, pattern in _MOVEMENT_PATTERNS.items():
+        if pattern.search(text):
+            logger.info(f"Movement intent detected: {command}")
+            return {"command": command}
+
+    return None
+
 _CONTINUATION_PATTERN = re.compile(
     r"^\s*(?:yes|yeah|yep|sure|ok(?:ay)?|more|continue|go\s+on|keep\s+going|"
     r"tell\s+me\s+more|what\s+happens?\s+next|and\s+then\??|"
@@ -316,6 +370,19 @@ def orchestrate():
             return jsonify({"status": "error", "error": "empty_stt"}), 400
         
         logger.info(f"[STT {stt_ms:.0f}ms] {user_text}")
+
+        # Step 1.5: Check for movement intent (#54) — bypass LLM for direct commands
+        movement = classify_movement_intent(user_text)
+        if movement:
+            total_ms = (time.time() - start_time) * 1000
+            logger.info(f"[Pipeline {total_ms:.0f}ms] Movement intent: {movement['command']} (STT={stt_ms:.0f}ms)")
+            return jsonify({
+                "status": "ok",
+                "type": "movement",
+                "movement": movement,
+                "user_text": user_text,
+                "pipeline_ms": round(total_ms),
+            }), 200
         
         # Step 2: Language Model Inference
         llm_start = time.time()

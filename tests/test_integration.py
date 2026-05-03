@@ -569,6 +569,143 @@ class TestPromptLimiting(unittest.TestCase):
                           "Brevity reminder should be suppressed in summary mode")
 
 
+class TestMovementIntentClassification(unittest.TestCase):
+    """Unit tests for movement intent detection (#54).
+
+    Tests the regex-based movement command classification in orchestration_service.
+    """
+
+    _svc = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import orchestration_service
+            cls._svc = orchestration_service
+        except Exception as exc:
+            cls._svc = None
+            print(f"[TestMovementIntentClassification] Could not import: {exc}")
+
+    def setUp(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+
+    # --- Forward commands ---
+
+    def test_go_forward(self):
+        result = self._svc.classify_movement_intent("go forward")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "forward")
+
+    def test_move_ahead(self):
+        result = self._svc.classify_movement_intent("move ahead")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "forward")
+
+    def test_come_here(self):
+        result = self._svc.classify_movement_intent("come here")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "forward")
+
+    def test_come_to_me(self):
+        result = self._svc.classify_movement_intent("come to me")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "forward")
+
+    def test_drive_straight(self):
+        result = self._svc.classify_movement_intent("drive straight")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "forward")
+
+    # --- Backward commands ---
+
+    def test_go_back(self):
+        result = self._svc.classify_movement_intent("go back")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "backward")
+
+    def test_move_backward(self):
+        result = self._svc.classify_movement_intent("move backward")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "backward")
+
+    def test_back_up(self):
+        result = self._svc.classify_movement_intent("back up")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "backward")
+
+    def test_reverse(self):
+        result = self._svc.classify_movement_intent("reverse")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "backward")
+
+    # --- Rotate commands ---
+
+    def test_turn_left(self):
+        result = self._svc.classify_movement_intent("turn left")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "rotate_left")
+
+    def test_rotate_right(self):
+        result = self._svc.classify_movement_intent("rotate right")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "rotate_right")
+
+    def test_spin_left(self):
+        result = self._svc.classify_movement_intent("spin left")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "rotate_left")
+
+    def test_look_right(self):
+        result = self._svc.classify_movement_intent("look right")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "rotate_right")
+
+    # --- Stop commands ---
+
+    def test_stop(self):
+        result = self._svc.classify_movement_intent("stop")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "stop")
+
+    def test_halt(self):
+        result = self._svc.classify_movement_intent("halt")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "stop")
+
+    def test_freeze(self):
+        result = self._svc.classify_movement_intent("freeze")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "stop")
+
+    def test_dont_move(self):
+        result = self._svc.classify_movement_intent("don't move")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "stop")
+
+    # --- Non-movement commands (should return None) ---
+
+    def test_hello(self):
+        result = self._svc.classify_movement_intent("hello misty")
+        self.assertIsNone(result)
+
+    def test_whats_the_weather(self):
+        result = self._svc.classify_movement_intent("what's the weather today")
+        self.assertIsNone(result)
+
+    def test_tell_me_a_story(self):
+        result = self._svc.classify_movement_intent("tell me a story")
+        self.assertIsNone(result)
+
+    def test_empty_string(self):
+        result = self._svc.classify_movement_intent("")
+        self.assertIsNone(result)
+
+    def test_none_input(self):
+        result = self._svc.classify_movement_intent(None)
+        self.assertIsNone(result)
+
+
 class TestDrivePrimitives(unittest.TestCase):
     """Unit tests for drive/locomotion methods (#48).
 
