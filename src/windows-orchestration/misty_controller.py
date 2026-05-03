@@ -1397,12 +1397,14 @@ class MistyController:
         # Cancel any lingering skills (e.g., built-in faceDetection)
         self.misty_post("/api/skills/cancel")
 
-        # Connect WebSocket (will enter IDLE or stay DISCONNECTED)
-        self._connect_ws()
-
-        # Start laptop wake word listener if enabled (#44)
+        # Start laptop wake word listener before opening the WebSocket so the
+        # first _on_ws_open() sees laptop-wake-word mode and does not subscribe
+        # to or start Misty keyphrase recognition.
         if USE_LAPTOP_WAKE_WORD:
             self._start_laptop_wake_word()
+
+        # Connect WebSocket (will enter IDLE or stay DISCONNECTED)
+        self._connect_ws()
 
         # If battery was critically low at startup, override to charging mode
         # (give WS a moment to connect first)
