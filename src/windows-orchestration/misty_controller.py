@@ -65,6 +65,12 @@ BATTERY_RESUME = 0.25         # exit charging mode (must also be charging)
 BATTERY_TEMP_WARN_C = 45.0    # log warning
 BATTERY_TEMP_THROTTLE_C = 50.0  # add delay between turns
 
+# Movement-specific battery thresholds (#52)
+BATTERY_MOVEMENT_CUTOFF = 0.25     # deny movement below 25% (motors draw heavy current)
+BATTERY_MOVEMENT_VOLTAGE_MIN = 7.5  # deny movement below 7.5V (near abrupt shutdown ~7V)
+BATTERY_SLAM_CUTOFF = 0.35         # deny SLAM below 35% (memory-intensive)
+BATTERY_VOLTAGE_DROP_HALT = 0.3    # halt if voltage drops >0.3V between readings (load-induced sag)
+
 # Idle timeout
 IDLE_TIMEOUT_S = float(os.getenv("IDLE_TIMEOUT_S", "900"))  # 15 minutes
 
@@ -400,6 +406,9 @@ class MistyController:
 
     # --- Movement Lifecycle (#50) ---
 
+    # Settle time after motors stop before resuming audio (#53)
+    MOVEMENT_SETTLE_MS = 500  # ms to wait after halt before resuming wake word
+
     def _safe_halt(self, reason: str = "unknown"):
         """Stop all motors safely. Called before any transition FROM MOVING state.
 
@@ -409,6 +418,19 @@ class MistyController:
         logger.warning(f"Safe halt: reason={reason}")
         self.halt()
 
+    def _pause_wake_word_for_movement(self):
+        """Pause wake word listener during movement (motor noise interference, #53)."""
+        if self._wake_word_listener:
+            self._wake_word_listener.pause()
+            logger.info("Wake word paused for movement")
+
+    def _resume_wake_word_after_movement(self):
+        """Resume wake word listener after movement + settle time (#53)."""
+        time.sleep(self.MOVEMENT_SETTLE_MS / 1000.0)
+        if self._wake_word_listener:
+            self._wake_word_listener.resume()
+            logger.info("Wake word resumed after movement")
+
     def start_moving(self, reason: str = "command") -> bool:
         """Transition to MOVING state if safe to do so.
 
@@ -416,7 +438,7 @@ class MistyController:
         - Must be in IDLE state
         - No active hazards
         - No active bump contacts
-        - Battery not critically low
+        - Battery above movement cutoff (25% or 7.5V) (#52)
 
         Returns True if transition succeeded, False if blocked.
         """
@@ -430,15 +452,24 @@ class MistyController:
                 return False
 
         with self.battery_lock:
-            if self.battery.charge_percent < BATTERY_LOW_CRITICAL and self.battery.last_updated > 0:
-                logger.warning(f"Cannot start moving: battery critical ({self.battery.charge_percent*100:.0f}%)")
-                return False
+            if self.battery.last_updated > 0:
+                if self.battery.charge_percent < BATTERY_MOVEMENT_CUTOFF:
+                    logger.warning(f"Cannot start moving: battery too low for movement "
+                                   f"({self.battery.charge_percent*100:.0f}% < {BATTERY_MOVEMENT_CUTOFF*100:.0f}%)")
+                    return False
+                if self.battery.voltage > 0 and self.battery.voltage < BATTERY_MOVEMENT_VOLTAGE_MIN:
+                    logger.warning(f"Cannot start moving: voltage too low "
+                                   f"({self.battery.voltage:.1f}V < {BATTERY_MOVEMENT_VOLTAGE_MIN}V)")
+                    return False
 
         # Atomic state transition
         if not self.try_set_state(State.IDLE, State.MOVING):
             current = self.get_state()
             logger.warning(f"Cannot start moving: not IDLE (state={current.value})")
             return False
+
+        # Pause wake word — motor noise interferes with detection (#53)
+        self._pause_wake_word_for_movement()
 
         logger.info(f"MOVING: started (reason={reason})")
         return True
@@ -458,6 +489,13 @@ class MistyController:
         self.last_activity_time = time.time()
         logger.info(f"Movement stopped: reason={reason}")
 
+        # Resume wake word after settle time (non-blocking, #53)
+        threading.Thread(
+            target=self._resume_wake_word_after_movement,
+            name="resume-wake-post-move",
+            daemon=True,
+        ).start()
+
     def preempt_movement(self, reason: str):
         """Force-stop movement due to higher-priority event.
 
@@ -471,6 +509,13 @@ class MistyController:
         logger.warning(f"Movement PREEMPTED: {reason}")
         self._safe_halt(reason)
         self.last_activity_time = time.time()
+
+        # Resume wake word after settle time (non-blocking, #53)
+        threading.Thread(
+            target=self._resume_wake_word_after_movement,
+            name="resume-wake-preempt",
+            daemon=True,
+        ).start()
 
     def start_keyphrase(self, force_restart=False):
         if force_restart:
@@ -679,10 +724,36 @@ class MistyController:
         """Check battery levels and trigger state changes as needed."""
         # Critical: auto-enter charging mode (atomic transition)
         if b.charge_percent < BATTERY_LOW_CRITICAL:
+            # If moving, preempt first
+            if self.get_state() == State.MOVING:
+                self.preempt_movement("battery_critical")
             if self.try_set_state(State.IDLE, State.CHARGING):
                 logger.warning(f"Battery critically low ({b.charge_percent*100:.0f}%) — entering charging mode")
                 self._apply_charging_mode()
             return
+
+        # Movement-specific: halt if battery drops below movement threshold (#52)
+        if self.get_state() == State.MOVING:
+            if b.charge_percent < BATTERY_MOVEMENT_CUTOFF:
+                logger.warning(f"Battery below movement cutoff during MOVING "
+                               f"({b.charge_percent*100:.0f}% < {BATTERY_MOVEMENT_CUTOFF*100:.0f}%)")
+                self.preempt_movement("battery_critical")
+                return
+            if b.voltage > 0 and b.voltage < BATTERY_MOVEMENT_VOLTAGE_MIN:
+                logger.warning(f"Voltage below movement minimum during MOVING "
+                               f"({b.voltage:.1f}V < {BATTERY_MOVEMENT_VOLTAGE_MIN}V)")
+                self.preempt_movement("battery_critical")
+                return
+
+        # Voltage drop detection: halt movement if voltage sags rapidly (#52)
+        if self.get_state() == State.MOVING and b.voltage > 0:
+            last_voltage = getattr(self, '_last_battery_voltage', 0.0)
+            if last_voltage > 0 and (last_voltage - b.voltage) > BATTERY_VOLTAGE_DROP_HALT:
+                logger.warning(f"Rapid voltage drop detected during movement: "
+                               f"{last_voltage:.2f}V → {b.voltage:.2f}V (drop={last_voltage - b.voltage:.2f}V)")
+                self.preempt_movement("battery_critical")
+        if b.voltage > 0:
+            self._last_battery_voltage = b.voltage
 
         # Exit charging mode when sufficiently charged (charge level alone, no is_charging requirement)
         if self.get_state() == State.CHARGING and b.charge_percent >= BATTERY_RESUME:

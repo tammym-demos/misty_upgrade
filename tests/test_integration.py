@@ -1107,10 +1107,17 @@ class TestMovingState(unittest.TestCase):
             )
             if _ctrl_path not in sys.path:
                 sys.path.insert(0, _ctrl_path)
-            from misty_controller import MistyController, State, PREEMPTION_PRIORITY
+            from misty_controller import (
+                MistyController, State, PREEMPTION_PRIORITY,
+                BATTERY_MOVEMENT_CUTOFF, BATTERY_MOVEMENT_VOLTAGE_MIN,
+                BATTERY_VOLTAGE_DROP_HALT,
+            )
             cls._MistyController = MistyController
             cls._State = State
             cls._PREEMPTION_PRIORITY = PREEMPTION_PRIORITY
+            cls._BATTERY_MOVEMENT_CUTOFF = BATTERY_MOVEMENT_CUTOFF
+            cls._BATTERY_MOVEMENT_VOLTAGE_MIN = BATTERY_MOVEMENT_VOLTAGE_MIN
+            cls._BATTERY_VOLTAGE_DROP_HALT = BATTERY_VOLTAGE_DROP_HALT
         except Exception as exc:
             cls._MistyController = None
             print(f"[TestMovingState] Could not import misty_controller: {exc}")
@@ -1171,13 +1178,33 @@ class TestMovingState(unittest.TestCase):
         self.assertFalse(result)
 
     def test_start_moving_blocked_battery_critical(self):
-        """start_moving should fail if battery is critically low."""
+        """start_moving should fail if battery is below movement cutoff (25%)."""
         self.ctrl.set_state(self._State.IDLE)
         with self.ctrl.battery_lock:
-            self.ctrl.battery.charge_percent = 0.05
+            self.ctrl.battery.charge_percent = 0.20  # below 25% movement cutoff
             self.ctrl.battery.last_updated = time.time()
         result = self.ctrl.start_moving(reason="test")
         self.assertFalse(result)
+
+    def test_start_moving_blocked_low_voltage(self):
+        """start_moving should fail if voltage is below movement minimum (#52)."""
+        self.ctrl.set_state(self._State.IDLE)
+        with self.ctrl.battery_lock:
+            self.ctrl.battery.charge_percent = 0.30  # above percentage cutoff
+            self.ctrl.battery.voltage = 7.2  # below 7.5V voltage minimum
+            self.ctrl.battery.last_updated = time.time()
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+
+    def test_start_moving_ok_with_good_battery(self):
+        """start_moving should succeed with good battery levels."""
+        self.ctrl.set_state(self._State.IDLE)
+        with self.ctrl.battery_lock:
+            self.ctrl.battery.charge_percent = 0.50
+            self.ctrl.battery.voltage = 8.0
+            self.ctrl.battery.last_updated = time.time()
+        result = self.ctrl.start_moving(reason="test")
+        self.assertTrue(result)
 
     # --- stop_moving ---
 
@@ -1258,6 +1285,70 @@ class TestMovingState(unittest.TestCase):
             "isContacted": False,
         })
         self.assertEqual(self.ctrl.get_state(), self._State.MOVING)
+
+    # --- Battery preemption during movement (#52) ---
+
+    def test_battery_low_preempts_movement(self):
+        """Battery dropping below movement cutoff during MOVING should preempt."""
+        self.ctrl.set_state(self._State.MOVING)
+        from misty_controller import BatteryState
+        b = BatteryState(charge_percent=0.20, voltage=7.8, last_updated=time.time())
+        self.ctrl._evaluate_battery_thresholds(b)
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
+    def test_battery_voltage_low_preempts_movement(self):
+        """Voltage below minimum during MOVING should preempt."""
+        self.ctrl.set_state(self._State.MOVING)
+        from misty_controller import BatteryState
+        b = BatteryState(charge_percent=0.30, voltage=7.2, last_updated=time.time())
+        self.ctrl._evaluate_battery_thresholds(b)
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
+    def test_battery_voltage_drop_preempts_movement(self):
+        """Rapid voltage drop during MOVING should preempt."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl._last_battery_voltage = 8.0
+        from misty_controller import BatteryState
+        # Drop of 0.4V (> 0.3V threshold)
+        b = BatteryState(charge_percent=0.40, voltage=7.6, last_updated=time.time())
+        self.ctrl._evaluate_battery_thresholds(b)
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
+    def test_battery_ok_no_preempt_during_movement(self):
+        """Normal battery during MOVING should not preempt."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl._last_battery_voltage = 8.0
+        from misty_controller import BatteryState
+        b = BatteryState(charge_percent=0.50, voltage=7.9, last_updated=time.time())
+        self.ctrl._evaluate_battery_thresholds(b)
+        self.assertEqual(self.ctrl.get_state(), self._State.MOVING)
+
+    # --- Wake word pause/resume (#53) ---
+
+    def test_start_moving_pauses_wake_word(self):
+        """start_moving should pause the wake word listener."""
+        self.ctrl.set_state(self._State.IDLE)
+        pause_called = []
+        mock_listener = unittest.mock.MagicMock()
+        mock_listener.pause = lambda: pause_called.append(True)
+        self.ctrl._wake_word_listener = mock_listener
+
+        self.ctrl.start_moving(reason="test")
+        self.assertTrue(pause_called)
+
+    def test_stop_moving_resumes_wake_word(self):
+        """stop_moving should resume the wake word listener after settle."""
+        self.ctrl.set_state(self._State.MOVING)
+        resume_called = []
+        mock_listener = unittest.mock.MagicMock()
+        mock_listener.resume = lambda: resume_called.append(True)
+        self.ctrl._wake_word_listener = mock_listener
+        # Override settle time for test speed
+        self.ctrl.MOVEMENT_SETTLE_MS = 10
+
+        self.ctrl.stop_moving(reason="test")
+        time.sleep(0.1)  # allow thread to complete
+        self.assertTrue(resume_called)
 
 
 if __name__ == "__main__":
