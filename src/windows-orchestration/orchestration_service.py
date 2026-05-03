@@ -535,7 +535,7 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
 
         # Update response mode tracking AFTER successful LLM response —
         # prevents stale state when LLM times out or fails.
-        globals()["_last_response_mode"] = response_mode
+        _last_response_mode = response_mode
         
         logger.debug(f"LLM result ({response_mode}): {assistant_text}")
         return {"status": "ok", "text": assistant_text, "responseMode": response_mode}
