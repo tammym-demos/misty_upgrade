@@ -517,6 +517,116 @@ class MistyController:
             daemon=True,
         ).start()
 
+    def _execute_voice_movement(self, turn: int, movement: dict):
+        """Execute a voice-triggered movement command (#56).
+
+        Called after the acknowledgment audio has already been played.
+        Transitions IDLE → MOVING, executes the command, then returns.
+        On hazard preemption, generates verbal feedback ("something's in my way!").
+
+        Args:
+            turn: Current conversation turn number (for logging).
+            movement: Movement command dict from orchestration service
+                      (keys: "command", optionally "distance_mm", "speed_pct", "angle_deg").
+        """
+        command = movement.get("command", "")
+        distance_mm = movement.get("distance_mm", 200)
+        speed_pct = movement.get("speed_pct", 20)
+        angle_deg = movement.get("angle_deg", 90)
+
+        # Clamp to safe bounds (same as teleop endpoint)
+        distance_mm = max(50, min(500, distance_mm))
+        speed_pct = max(5, min(int(self.DRIVE_MAX_LINEAR_PCT), speed_pct))
+        angle_deg = max(10, min(180, angle_deg))
+
+        if command == "stop":
+            self.halt()
+            logger.info(f"[Turn {turn}] Voice halt executed")
+            return
+
+        # Transition to IDLE first (we're in PLAYING after the ack audio)
+        self.set_state(State.IDLE)
+        time.sleep(0.3)  # brief settle
+
+        # Enter MOVING state (pre-flight checks: hazards, battery, etc.)
+        if not self.start_moving(reason=f"voice_{command}"):
+            logger.warning(f"[Turn {turn}] Cannot execute voice movement — blocked by safety checks")
+            self._speak_movement_failure(turn, "I can't move right now. Something's blocking me.")
+            return
+
+        # Visual feedback — orange LED + adventurous face
+        self.set_led(255, 165, 0)  # orange = moving
+        self.display_image("e_Joy2.jpg")
+
+        try:
+            if command in ("forward", "backward"):
+                velocity_mms = (speed_pct / 100.0) * 450.0
+                duration_ms = int((distance_mm / velocity_mms) * 1000)
+                duration_ms = max(100, min(self.DRIVE_MAX_DURATION_MS, duration_ms))
+                linear = speed_pct if command == "forward" else -speed_pct
+                self.drive_time(linear, 0, duration_ms)
+
+                # Wait for completion, checking for preemption
+                wait_s = duration_ms / 1000.0 + 0.5
+                preempted = self._wait_for_move_completion(wait_s)
+                if preempted:
+                    self._speak_movement_failure(turn, "Oops, something's in my way!")
+                    return
+
+            elif command in ("rotate_left", "rotate_right"):
+                angular_rate = (speed_pct / 100.0) * 150.0
+                duration_ms = int((angle_deg / angular_rate) * 1000)
+                duration_ms = max(100, min(self.DRIVE_MAX_DURATION_MS, duration_ms))
+                angular = speed_pct if command == "rotate_left" else -speed_pct
+                self.drive_time(0, angular, duration_ms)
+
+                wait_s = duration_ms / 1000.0 + 0.5
+                preempted = self._wait_for_move_completion(wait_s)
+                if preempted:
+                    self._speak_movement_failure(turn, "Oops, something's in my way!")
+                    return
+            else:
+                logger.warning(f"[Turn {turn}] Unknown voice movement command: {command}")
+                return
+
+            logger.info(f"[Turn {turn}] Voice movement complete: {command}")
+
+        except Exception as e:
+            logger.error(f"[Turn {turn}] Voice movement error: {e}", exc_info=True)
+        finally:
+            if self.get_state() == State.MOVING:
+                self.stop_moving(reason="voice_move_complete")
+
+    def _wait_for_move_completion(self, timeout_s: float) -> bool:
+        """Wait for movement to finish, checking for preemption.
+
+        Returns True if movement was preempted (state changed from MOVING),
+        False if movement completed normally.
+        """
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if self.get_state() != State.MOVING:
+                return True  # preempted
+            time.sleep(0.1)
+        return False  # completed normally
+
+    def _speak_movement_failure(self, turn: int, text: str):
+        """Generate and play a verbal notification about movement failure (#56)."""
+        try:
+            response = requests.post(
+                f"{ORCHESTRATION_URL}/api/tts",
+                json={"text": text},
+                timeout=10.0,
+            )
+            if response.status_code == 200 and len(response.content) > 100:
+                self.set_state(State.PLAYING)
+                self.set_led(255, 255, 0)  # yellow = warning
+                self.display_image("e_Sadness.jpg")
+                play_duration = self.upload_and_play_audio(response.content, RESPONSE_FILENAME)
+                time.sleep(play_duration + 1.0)
+        except Exception as e:
+            logger.warning(f"[Turn {turn}] Movement failure speech failed: {e}")
+
     def start_keyphrase(self, force_restart=False):
         if force_restart:
             self.misty_post("/api/audio/keyphrase/stop")
@@ -1489,7 +1599,16 @@ class MistyController:
             time.sleep(2.0)
 
         try:
-            had_speech = self._do_conversation_exchange(turn, turn_start)
+            exchange_result = self._do_conversation_exchange(turn, turn_start)
+
+            # Determine if speech was detected and if movement was requested
+            if isinstance(exchange_result, dict):
+                # Movement response (#56) — speech was detected, movement command returned
+                had_speech = exchange_result.get("had_speech", True)
+                movement = exchange_result.get("movement")
+            else:
+                had_speech = exchange_result
+                movement = None
 
             # Only count cycles with actual speech for proactive reboot tracking.
             # Empty STT (user too far from Misty's mic) shouldn't trigger a reboot.
@@ -1498,6 +1617,13 @@ class MistyController:
                 logger.info(f"[Turn {turn}] Conversation cycle {self._conversation_cycles}/{PROACTIVE_REBOOT_AFTER_CYCLES}")
             else:
                 logger.info(f"[Turn {turn}] No speech — not counting toward reboot cycles")
+
+            # Execute voice movement if requested (#56) — after ack audio has played
+            if movement:
+                logger.info(f"[Turn {turn}] Executing voice movement: {movement.get('command')}")
+                self._execute_voice_movement(turn, movement)
+                # After movement, skip follow-up listening — re-arm and wait for next wake word
+                return
 
             # Follow-up listening loop — listen for continued conversation
             # without requiring the wake word again
@@ -1516,6 +1642,13 @@ class MistyController:
                             f"({remaining:.0f}s remaining in window)")
 
                 had_speech = self._listen_for_followup(turn)
+                if isinstance(had_speech, dict):
+                    # Follow-up was a movement command (#56) — execute and end conversation
+                    movement = had_speech.get("movement")
+                    if movement:
+                        logger.info(f"[Turn {turn}] Follow-up movement: {movement.get('command')}")
+                        self._execute_voice_movement(turn, movement)
+                    break
                 if not had_speech:
                     logger.info(f"[Turn {turn}] No follow-up speech — ending conversation")
                     break
@@ -1647,8 +1780,11 @@ class MistyController:
     def _do_orchestrate_and_respond(self, turn: int, audio_bytes: bytes, turn_start: float):
         """Send audio to orchestration service and play response on Misty.
         
-        Returns True if speech was detected and a response was played,
-        False if no speech was detected (empty STT).
+        Returns:
+            dict — if orchestration returned a movement command.
+                   Keys: "movement" (command dict), "had_speech" (True).
+            True  — if speech was detected and a conversational response was played.
+            False — if no speech was detected (empty STT).
         """
         # Processing state already set by caller — just send to orchestration
 
@@ -1673,6 +1809,36 @@ class MistyController:
         if result.get("status") != "ok":
             raise RuntimeError(f"Orchestration error: {result.get('error', 'unknown')}")
 
+        # --- Movement response (#56) ---
+        if result.get("type") == "movement":
+            movement = result.get("movement", {})
+            ack_text = result.get("response_text", "")
+            pipeline_ms = result.get("pipeline_ms", 0)
+            user_text = result.get("user_text", "")
+            logger.info(f"[Turn {turn}] MOVEMENT: '{user_text}' -> {movement.get('command')} "
+                         f"ack='{ack_text}' ({pipeline_ms}ms)")
+
+            # Download and play acknowledgment audio (speak first, then move)
+            audio_file = result.get("audio_file")
+            if audio_file:
+                audio_url = f"{ORCHESTRATION_URL}/api/audio/{audio_file}"
+                try:
+                    audio_resp = requests.get(audio_url, timeout=10.0)
+                    audio_resp.raise_for_status()
+                    response_wav = audio_resp.content
+                    logger.info(f"[Turn {turn}] Downloaded movement ack audio: {len(response_wav)} bytes")
+
+                    self.set_state(State.PLAYING)
+                    self.set_led(148, 0, 211)  # purple = speaking
+                    self.display_image("e_EcstacyHilarious.jpg")
+                    play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
+                    time.sleep(play_duration + 1.0)
+                except Exception as e:
+                    logger.warning(f"[Turn {turn}] Movement ack audio failed: {e}")
+
+            return {"movement": movement, "had_speech": True}
+
+        # --- Normal conversational response ---
         transcribed = result.get("transcribedText", "")
         llm_response = result.get("inferenceResponse", "")
         audio_uri = result.get("responseAudio", "")
@@ -1788,6 +1954,27 @@ class MistyController:
             if response.status_code != 200 or result.get("status") != "ok":
                 logger.warning(f"[Turn {turn}] Follow-up: orchestration error: {result.get('error', 'unknown')}")
                 return False
+
+            # Movement response in follow-up (#56)
+            if result.get("type") == "movement":
+                movement = result.get("movement", {})
+                ack_text = result.get("response_text", "")
+                logger.info(f"[Turn {turn}] Follow-up movement: {movement.get('command')} ack='{ack_text}'")
+
+                audio_file = result.get("audio_file")
+                if audio_file:
+                    try:
+                        audio_url = f"{ORCHESTRATION_URL}/api/audio/{audio_file}"
+                        audio_resp = requests.get(audio_url, timeout=10.0)
+                        audio_resp.raise_for_status()
+                        self.set_state(State.PLAYING)
+                        self.set_led(148, 0, 211)
+                        play_duration = self.upload_and_play_audio(audio_resp.content, RESPONSE_FILENAME)
+                        time.sleep(play_duration + 1.0)
+                    except Exception as e:
+                        logger.warning(f"[Turn {turn}] Follow-up movement ack audio failed: {e}")
+
+                return {"movement": movement, "had_speech": True}
 
             # Speech detected — download and play the response
             transcribed = result.get("transcribedText", "")

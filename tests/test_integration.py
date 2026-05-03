@@ -12,6 +12,7 @@ import requests
 import json
 import time
 import os
+import threading
 from io import BytesIO
 from urllib.parse import urlparse, urlunparse
 
@@ -1609,6 +1610,240 @@ class TestTeleopEndpoint(unittest.TestCase):
         self.assertIn("bump_states", snapshot)
         self.assertIn("active_hazards", snapshot)
         self.assertEqual(len(snapshot["tof_readings"]), 8)
+
+
+class TestSpeakMoveIntegration(unittest.TestCase):
+    """Unit tests for combined speak + move responses (#56).
+
+    Validates that movement responses from orchestration are correctly
+    detected, acknowledgment audio is played, and movement is executed.
+    Uses mocked HTTP and state machine.
+    """
+
+    _ctrl = None
+    _ctrl_mod = None
+    _State = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            _ctrl_path = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration")
+            )
+            if _ctrl_path not in sys.path:
+                sys.path.insert(0, _ctrl_path)
+            import misty_controller as _ctrl_mod
+            cls._ctrl_mod = _ctrl_mod
+            cls._State = _ctrl_mod.State
+        except Exception as e:
+            raise unittest.SkipTest(f"Cannot import misty_controller: {e}")
+
+    def setUp(self):
+        """Create controller with mocked HTTP and WebSocket."""
+        self._post_calls = []
+
+        def mock_post(path, body=None, timeout=None):
+            self._post_calls.append((path, body))
+            return {"status": "Success"}
+
+        self.ctrl = self._ctrl_mod.MistyController.__new__(self._ctrl_mod.MistyController)
+        self.ctrl.misty_ip = "10.0.0.99"
+        self.ctrl.state = self._State.IDLE
+        self.ctrl.state_lock = threading.Lock()
+        self.ctrl.battery = self._ctrl_mod.BatteryState()
+        self.ctrl.battery_lock = threading.Lock()
+        self.ctrl.battery.charge_percent = 0.50
+        self.ctrl.battery.voltage = 8.0
+        self.ctrl.battery.last_updated = time.time()
+        self.ctrl.hazard = self._ctrl_mod.HazardState()
+        self.ctrl.hazard_lock = threading.Lock()
+        self.ctrl.last_activity_time = time.time()
+        self.ctrl._wake_word_listener = None
+        self.ctrl.misty_post = mock_post
+        self.ctrl.DRIVE_MAX_DURATION_MS = 3000
+        self.ctrl.MOVEMENT_SETTLE_MS = 100  # fast for tests
+
+    # --- _do_orchestrate_and_respond movement detection ---
+
+    def test_movement_response_detected(self):
+        """When orchestrate returns type=movement, return dict with movement info."""
+        movement_result = {
+            "status": "ok",
+            "type": "movement",
+            "movement": {"command": "forward"},
+            "user_text": "come here",
+            "response_text": "On my way!",
+            "pipeline_ms": 150,
+        }
+        # Mock requests.post and requests.get
+        import unittest.mock as mock
+        mock_resp = mock.MagicMock()
+        mock_resp.json.return_value = movement_result
+        mock_resp.status_code = 200
+
+        with mock.patch("requests.post", return_value=mock_resp):
+            result = self.ctrl._do_orchestrate_and_respond(1, b"fake_audio", time.time())
+
+        self.assertIsInstance(result, dict)
+        self.assertTrue(result["had_speech"])
+        self.assertEqual(result["movement"]["command"], "forward")
+
+    def test_normal_response_returns_true(self):
+        """Normal conversational response should return True (not a dict)."""
+        normal_result = {
+            "status": "ok",
+            "transcribedText": "hello",
+            "inferenceResponse": "Hi there!",
+            "responseAudio": "/api/audio/resp.wav",
+            "latencyMs": 500,
+        }
+        import unittest.mock as mock
+        mock_post_resp = mock.MagicMock()
+        mock_post_resp.json.return_value = normal_result
+        mock_post_resp.status_code = 200
+
+        mock_get_resp = mock.MagicMock()
+        mock_get_resp.content = b"\x00" * 1000  # fake WAV data
+        mock_get_resp.raise_for_status = mock.MagicMock()
+
+        # Mock upload_and_play_audio to return short duration
+        self.ctrl.upload_and_play_audio = mock.MagicMock(return_value=0.1)
+        self.ctrl.set_led = mock.MagicMock()
+        self.ctrl.display_image = mock.MagicMock()
+        self.ctrl.move_head = mock.MagicMock()
+
+        with mock.patch("requests.post", return_value=mock_post_resp), \
+             mock.patch("requests.get", return_value=mock_get_resp), \
+             mock.patch("time.sleep"):
+            result = self.ctrl._do_orchestrate_and_respond(1, b"fake", time.time())
+
+        self.assertTrue(result)
+        self.assertNotIsInstance(result, dict)
+
+    def test_empty_stt_returns_false(self):
+        """Empty STT should return False."""
+        import unittest.mock as mock
+        mock_resp = mock.MagicMock()
+        mock_resp.json.return_value = {"status": "error", "error": "empty_stt"}
+        mock_resp.status_code = 400
+
+        with mock.patch("requests.post", return_value=mock_resp):
+            result = self.ctrl._do_orchestrate_and_respond(1, b"fake", time.time())
+
+        self.assertFalse(result)
+
+    # --- _execute_voice_movement ---
+
+    def test_voice_movement_forward(self):
+        """Voice forward command should call drive_time with positive linear."""
+        import unittest.mock as mock
+
+        self.ctrl.set_led = mock.MagicMock()
+        self.ctrl.display_image = mock.MagicMock()
+        self.ctrl.halt = mock.MagicMock()
+        self.ctrl.drive_time = mock.MagicMock()
+
+        movement = {"command": "forward", "distance_mm": 200, "speed_pct": 20}
+        self.ctrl._execute_voice_movement(1, movement)
+
+        # Should have called drive_time with positive linear velocity
+        self.ctrl.drive_time.assert_called_once()
+        args = self.ctrl.drive_time.call_args[0]
+        self.assertGreater(args[0], 0)  # positive linear
+        self.assertEqual(args[1], 0)     # no angular
+
+    def test_voice_movement_stop_halts_immediately(self):
+        """Voice stop command should halt immediately without state transition."""
+        import unittest.mock as mock
+        self.ctrl.halt = mock.MagicMock()
+        self.ctrl._execute_voice_movement(1, {"command": "stop"})
+        self.ctrl.halt.assert_called_once()
+
+    def test_voice_movement_blocked_by_hazard(self):
+        """Voice movement should be blocked when hazards are active."""
+        import unittest.mock as mock
+
+        self.ctrl.set_led = mock.MagicMock()
+        self.ctrl.display_image = mock.MagicMock()
+
+        # Set active hazard
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.active_hazards = ["TOF_FrontCenter"]
+
+        self.ctrl._speak_movement_failure = mock.MagicMock()
+        self.ctrl._execute_voice_movement(1, {"command": "forward"})
+
+        # Should have called failure speech, not drive
+        self.ctrl._speak_movement_failure.assert_called_once()
+
+    def test_voice_movement_clamps_speed(self):
+        """Voice movement should clamp speed to DRIVE_MAX_LINEAR_PCT."""
+        import unittest.mock as mock
+
+        self.ctrl.set_led = mock.MagicMock()
+        self.ctrl.display_image = mock.MagicMock()
+        self.ctrl.halt = mock.MagicMock()
+        self.ctrl.drive_time = mock.MagicMock()
+
+        # Request 50% speed — should be clamped to DRIVE_MAX_LINEAR_PCT (30)
+        movement = {"command": "forward", "distance_mm": 200, "speed_pct": 50}
+        self.ctrl._execute_voice_movement(1, movement)
+
+        # The speed_pct clamped internally, but drive_time gets the clamped value
+        self.ctrl.drive_time.assert_called_once()
+        args = self.ctrl.drive_time.call_args[0]
+        self.assertLessEqual(args[0], self._ctrl_mod.MistyController.DRIVE_MAX_LINEAR_PCT)
+
+    def test_voice_movement_backward(self):
+        """Voice backward command should use negative linear velocity."""
+        import unittest.mock as mock
+
+        self.ctrl.set_led = mock.MagicMock()
+        self.ctrl.display_image = mock.MagicMock()
+        self.ctrl.halt = mock.MagicMock()
+        self.ctrl.drive_time = mock.MagicMock()
+
+        self.ctrl._execute_voice_movement(1, {"command": "backward", "distance_mm": 150})
+
+        self.ctrl.drive_time.assert_called_once()
+        args = self.ctrl.drive_time.call_args[0]
+        self.assertLess(args[0], 0)  # negative linear
+
+    def test_voice_movement_rotate(self):
+        """Voice rotate command should use angular velocity, zero linear."""
+        import unittest.mock as mock
+
+        self.ctrl.set_led = mock.MagicMock()
+        self.ctrl.display_image = mock.MagicMock()
+        self.ctrl.halt = mock.MagicMock()
+        self.ctrl.drive_time = mock.MagicMock()
+
+        self.ctrl._execute_voice_movement(1, {"command": "rotate_left", "angle_deg": 90})
+
+        self.ctrl.drive_time.assert_called_once()
+        args = self.ctrl.drive_time.call_args[0]
+        self.assertEqual(args[0], 0)     # no linear
+        self.assertGreater(args[1], 0)   # positive angular
+
+    # --- _wait_for_move_completion ---
+
+    def test_wait_for_move_returns_false_on_normal_completion(self):
+        """Should return False (not preempted) if state stays MOVING until timeout."""
+        self.ctrl.set_state(self._State.MOVING)
+        result = self.ctrl._wait_for_move_completion(0.3)
+        self.assertFalse(result)  # completed normally
+
+    def test_wait_for_move_returns_true_on_preemption(self):
+        """Should return True if state changes from MOVING (preempted)."""
+        self.ctrl.set_state(self._State.MOVING)
+
+        def preempt_after_delay():
+            time.sleep(0.1)
+            self.ctrl.set_state(self._State.IDLE)
+
+        threading.Thread(target=preempt_after_delay, daemon=True).start()
+        result = self.ctrl._wait_for_move_completion(2.0)
+        self.assertTrue(result)  # preempted
 
 
 if __name__ == "__main__":
