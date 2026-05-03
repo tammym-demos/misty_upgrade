@@ -944,8 +944,8 @@ class MistyController:
             try:
                 self.misty_post("/api/audio/play", {"FileName": "s_Awe3.wav", "Volume": 30})
                 time.sleep(0.8)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"[Turn {turn}] Chime fallback playback failed; continuing without audio cue: {e}")
 
         # 2. Record audio — bright green LED + tally light = "I'm listening, speak now!"
         self.set_led(0, 255, 0)  # green = recording active, speak now
