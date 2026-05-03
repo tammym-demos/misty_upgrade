@@ -705,6 +705,33 @@ class TestMovementIntentClassification(unittest.TestCase):
         result = self._svc.classify_movement_intent(None)
         self.assertIsNone(result)
 
+    # --- Movement acknowledgments (#55) ---
+
+    def test_get_movement_ack_forward(self):
+        """Movement acknowledgment for forward should be a non-empty string."""
+        ack = self._svc._get_movement_acknowledgment("forward")
+        self.assertIsInstance(ack, str)
+        self.assertTrue(len(ack) > 0)
+
+    def test_get_movement_ack_stop(self):
+        ack = self._svc._get_movement_acknowledgment("stop")
+        self.assertIsInstance(ack, str)
+        self.assertTrue(len(ack) > 0)
+
+    def test_get_movement_ack_unknown_command(self):
+        """Unknown command should return fallback 'Okay!'."""
+        ack = self._svc._get_movement_acknowledgment("unknown_cmd")
+        self.assertEqual(ack, "Okay!")
+
+    def test_movement_prompt_supplement_exists(self):
+        """MOVEMENT_PROMPT_SUPPLEMENT should be defined."""
+        self.assertTrue(hasattr(self._svc, 'MOVEMENT_PROMPT_SUPPLEMENT'))
+        self.assertIn("move", self._svc.MOVEMENT_PROMPT_SUPPLEMENT.lower())
+
+    def test_system_prompt_mentions_movement(self):
+        """System prompt should mention Misty can move."""
+        self.assertIn("move", self._svc.SYSTEM_PROMPT.lower())
+
 
 class TestDrivePrimitives(unittest.TestCase):
     """Unit tests for drive/locomotion methods (#48).
