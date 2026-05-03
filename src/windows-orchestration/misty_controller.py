@@ -218,6 +218,108 @@ class MistyController:
             body["RightArmPosition"] = right
         self.misty_post("/api/arms", body)
 
+    # --- Drive / Locomotion (#48) ---
+
+    # Safety bounds — enforced on all drive commands
+    DRIVE_MAX_LINEAR_PCT = 30      # max linear velocity percent
+    DRIVE_MAX_ANGULAR_PCT = 30     # max angular velocity percent
+    DRIVE_MAX_DURATION_MS = 5000   # max single drive command duration (5s)
+
+    def drive(self, linear_velocity: float, angular_velocity: float):
+        """Drive Misty continuously until stop() or halt() is called.
+
+        Args:
+            linear_velocity: -100 (full backward) to 100 (full forward).
+            angular_velocity: -100 (clockwise) to 100 (counter-clockwise).
+        """
+        linear_velocity = max(-self.DRIVE_MAX_LINEAR_PCT, min(self.DRIVE_MAX_LINEAR_PCT, linear_velocity))
+        angular_velocity = max(-self.DRIVE_MAX_ANGULAR_PCT, min(self.DRIVE_MAX_ANGULAR_PCT, angular_velocity))
+        logger.info(f"Drive: linear={linear_velocity:.0f}%, angular={angular_velocity:.0f}%")
+        return self.misty_post("/api/drive", {
+            "LinearVelocity": linear_velocity,
+            "AngularVelocity": angular_velocity,
+        })
+
+    def drive_time(self, linear_velocity: float, angular_velocity: float, time_ms: int):
+        """Drive Misty for a specified duration then stop automatically.
+
+        Args:
+            linear_velocity: -100 (full backward) to 100 (full forward).
+            angular_velocity: -100 (clockwise) to 100 (counter-clockwise).
+            time_ms: Duration in milliseconds (min 100, max DRIVE_MAX_DURATION_MS).
+        """
+        linear_velocity = max(-self.DRIVE_MAX_LINEAR_PCT, min(self.DRIVE_MAX_LINEAR_PCT, linear_velocity))
+        angular_velocity = max(-self.DRIVE_MAX_ANGULAR_PCT, min(self.DRIVE_MAX_ANGULAR_PCT, angular_velocity))
+        time_ms = max(100, min(self.DRIVE_MAX_DURATION_MS, int(time_ms)))
+        logger.info(f"DriveTime: linear={linear_velocity:.0f}%, angular={angular_velocity:.0f}%, duration={time_ms}ms")
+        return self.misty_post("/api/drive/time", {
+            "LinearVelocity": linear_velocity,
+            "AngularVelocity": angular_velocity,
+            "TimeMs": time_ms,
+        })
+
+    def drive_track(self, left_speed: float, right_speed: float):
+        """Drive Misty using individual track speeds.
+
+        Args:
+            left_speed: -100 (full backward) to 100 (full forward).
+            right_speed: -100 (full backward) to 100 (full forward).
+        """
+        left_speed = max(-self.DRIVE_MAX_LINEAR_PCT, min(self.DRIVE_MAX_LINEAR_PCT, left_speed))
+        right_speed = max(-self.DRIVE_MAX_LINEAR_PCT, min(self.DRIVE_MAX_LINEAR_PCT, right_speed))
+        logger.info(f"DriveTrack: left={left_speed:.0f}%, right={right_speed:.0f}%")
+        return self.misty_post("/api/drive/track", {
+            "LeftTrackSpeed": left_speed,
+            "RightTrackSpeed": right_speed,
+        })
+
+    def halt(self):
+        """Emergency stop — halts ALL motors (drive, head, arms). Use for safety stops."""
+        logger.warning("HALT: stopping all motors")
+        return self.misty_post("/api/halt")
+
+    def stop_driving(self):
+        """Stop drive motors only (head/arms unaffected)."""
+        logger.info("Stop driving")
+        return self.misty_post("/api/drive/stop")
+
+    def drive_arc(self, heading: float, radius: float, time_ms: int, reverse: bool = False):
+        """Drive in an arc to reach an absolute heading.
+
+        Args:
+            heading: Target absolute heading (0-360 or -180 to 180).
+            radius: Arc radius in meters.
+            time_ms: Duration in milliseconds.
+            reverse: If True, drive in reverse.
+        """
+        time_ms = max(100, min(self.DRIVE_MAX_DURATION_MS, int(time_ms)))
+        logger.info(f"DriveArc: heading={heading:.0f}°, radius={radius:.2f}m, duration={time_ms}ms")
+        return self.misty_post("/api/drive/arc", {
+            "Heading": heading,
+            "Radius": radius,
+            "TimeMs": time_ms,
+            "Reverse": reverse,
+        })
+
+    def drive_heading(self, heading: float, distance: float, time_ms: int, reverse: bool = False):
+        """Drive in a straight line maintaining an absolute heading.
+
+        Args:
+            heading: Absolute heading to maintain (0-360 or -180 to 180).
+            distance: Distance in meters (max 1.0m per command for safety).
+            time_ms: Duration in milliseconds.
+            reverse: If True, drive in reverse.
+        """
+        distance = max(0.01, min(1.0, distance))
+        time_ms = max(100, min(self.DRIVE_MAX_DURATION_MS, int(time_ms)))
+        logger.info(f"DriveHeading: heading={heading:.0f}°, distance={distance:.2f}m, duration={time_ms}ms")
+        return self.misty_post("/api/drive/hdt", {
+            "Heading": heading,
+            "Distance": distance,
+            "TimeMs": time_ms,
+            "Reverse": reverse,
+        })
+
     def start_keyphrase(self, force_restart=False):
         if force_restart:
             self.misty_post("/api/audio/keyphrase/stop")

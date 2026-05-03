@@ -569,5 +569,162 @@ class TestPromptLimiting(unittest.TestCase):
                           "Brevity reminder should be suppressed in summary mode")
 
 
+class TestDrivePrimitives(unittest.TestCase):
+    """Unit tests for drive/locomotion methods (#48).
+
+    These tests mock HTTP calls — no live robot required.
+    """
+
+    _ctrl = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            _ctrl_path = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration")
+            )
+            if _ctrl_path not in sys.path:
+                sys.path.insert(0, _ctrl_path)
+            from misty_controller import MistyController
+            cls._MistyController = MistyController
+        except Exception as exc:
+            cls._MistyController = None
+            print(f"[TestDrivePrimitives] Could not import misty_controller: {exc}")
+
+    def setUp(self):
+        if self._MistyController is None:
+            self.skipTest("misty_controller could not be imported")
+        self.ctrl = self._MistyController()
+        # Mock misty_post to capture calls without network
+        self._post_calls = []
+        self.ctrl.misty_post = lambda endpoint, body=None, timeout=5.0: (
+            self._post_calls.append((endpoint, body)) or {"status": "Success", "result": True}
+        )
+
+    # --- Parameter clamping tests ---
+
+    def test_drive_clamps_linear_velocity(self):
+        """Linear velocity should be clamped to ±DRIVE_MAX_LINEAR_PCT."""
+        self.ctrl.drive(200, 0)
+        endpoint, body = self._post_calls[-1]
+        self.assertEqual(endpoint, "/api/drive")
+        self.assertEqual(body["LinearVelocity"], self.ctrl.DRIVE_MAX_LINEAR_PCT)
+
+    def test_drive_clamps_negative_linear_velocity(self):
+        """Negative linear velocity should be clamped."""
+        self.ctrl.drive(-200, 0)
+        _, body = self._post_calls[-1]
+        self.assertEqual(body["LinearVelocity"], -self.ctrl.DRIVE_MAX_LINEAR_PCT)
+
+    def test_drive_clamps_angular_velocity(self):
+        """Angular velocity should be clamped to ±DRIVE_MAX_ANGULAR_PCT."""
+        self.ctrl.drive(0, 150)
+        _, body = self._post_calls[-1]
+        self.assertEqual(body["AngularVelocity"], self.ctrl.DRIVE_MAX_ANGULAR_PCT)
+
+    def test_drive_passes_valid_values_unchanged(self):
+        """Values within bounds pass through unchanged."""
+        self.ctrl.drive(15, -10)
+        _, body = self._post_calls[-1]
+        self.assertEqual(body["LinearVelocity"], 15)
+        self.assertEqual(body["AngularVelocity"], -10)
+
+    # --- DriveTime tests ---
+
+    def test_drive_time_clamps_duration(self):
+        """Duration should be clamped to DRIVE_MAX_DURATION_MS."""
+        self.ctrl.drive_time(10, 0, 99999)
+        _, body = self._post_calls[-1]
+        self.assertEqual(body["TimeMs"], self.ctrl.DRIVE_MAX_DURATION_MS)
+
+    def test_drive_time_enforces_minimum_duration(self):
+        """Duration below 100ms should be raised to 100."""
+        self.ctrl.drive_time(10, 0, 50)
+        _, body = self._post_calls[-1]
+        self.assertEqual(body["TimeMs"], 100)
+
+    def test_drive_time_valid_params(self):
+        """Valid parameters pass through correctly."""
+        self.ctrl.drive_time(20, -15, 2000)
+        endpoint, body = self._post_calls[-1]
+        self.assertEqual(endpoint, "/api/drive/time")
+        self.assertEqual(body["LinearVelocity"], 20)
+        self.assertEqual(body["AngularVelocity"], -15)
+        self.assertEqual(body["TimeMs"], 2000)
+
+    # --- DriveTrack tests ---
+
+    def test_drive_track_clamps_speeds(self):
+        """Track speeds should be clamped to ±DRIVE_MAX_LINEAR_PCT."""
+        self.ctrl.drive_track(100, -100)
+        endpoint, body = self._post_calls[-1]
+        self.assertEqual(endpoint, "/api/drive/track")
+        self.assertEqual(body["LeftTrackSpeed"], self.ctrl.DRIVE_MAX_LINEAR_PCT)
+        self.assertEqual(body["RightTrackSpeed"], -self.ctrl.DRIVE_MAX_LINEAR_PCT)
+
+    def test_drive_track_valid_params(self):
+        """Valid track speeds pass through."""
+        self.ctrl.drive_track(20, 25)
+        _, body = self._post_calls[-1]
+        self.assertEqual(body["LeftTrackSpeed"], 20)
+        self.assertEqual(body["RightTrackSpeed"], 25)
+
+    # --- Halt / Stop tests ---
+
+    def test_halt_calls_correct_endpoint(self):
+        """halt() should call POST /api/halt."""
+        self.ctrl.halt()
+        endpoint, body = self._post_calls[-1]
+        self.assertEqual(endpoint, "/api/halt")
+
+    def test_stop_driving_calls_correct_endpoint(self):
+        """stop_driving() should call POST /api/drive/stop."""
+        self.ctrl.stop_driving()
+        endpoint, body = self._post_calls[-1]
+        self.assertEqual(endpoint, "/api/drive/stop")
+
+    # --- DriveArc tests ---
+
+    def test_drive_arc_clamps_duration(self):
+        """DriveArc duration should be clamped."""
+        self.ctrl.drive_arc(90, 0.5, 99999)
+        endpoint, body = self._post_calls[-1]
+        self.assertEqual(endpoint, "/api/drive/arc")
+        self.assertEqual(body["TimeMs"], self.ctrl.DRIVE_MAX_DURATION_MS)
+        self.assertEqual(body["Heading"], 90)
+        self.assertEqual(body["Radius"], 0.5)
+        self.assertFalse(body["Reverse"])
+
+    def test_drive_arc_reverse(self):
+        """DriveArc with reverse=True."""
+        self.ctrl.drive_arc(180, 1.0, 3000, reverse=True)
+        _, body = self._post_calls[-1]
+        self.assertTrue(body["Reverse"])
+
+    # --- DriveHeading tests ---
+
+    def test_drive_heading_clamps_distance(self):
+        """Distance should be clamped to max 1.0m."""
+        self.ctrl.drive_heading(0, 5.0, 3000)
+        endpoint, body = self._post_calls[-1]
+        self.assertEqual(endpoint, "/api/drive/hdt")
+        self.assertEqual(body["Distance"], 1.0)
+
+    def test_drive_heading_clamps_min_distance(self):
+        """Distance below 0.01m should be raised."""
+        self.ctrl.drive_heading(0, 0.001, 1000)
+        _, body = self._post_calls[-1]
+        self.assertEqual(body["Distance"], 0.01)
+
+    def test_drive_heading_valid_params(self):
+        """Valid heading parameters pass through."""
+        self.ctrl.drive_heading(45, 0.5, 2000, reverse=True)
+        _, body = self._post_calls[-1]
+        self.assertEqual(body["Heading"], 45)
+        self.assertEqual(body["Distance"], 0.5)
+        self.assertEqual(body["TimeMs"], 2000)
+        self.assertTrue(body["Reverse"])
+
+
 if __name__ == "__main__":
     unittest.main()
