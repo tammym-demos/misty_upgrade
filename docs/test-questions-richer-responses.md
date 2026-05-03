@@ -182,9 +182,9 @@ Tests unique to the laptop mic wake word mode:
 | 44-byte recording (empty) | Misty keyphrase still active during recording | Fixed in PR #45 — keyphrase stopped before recording in laptop mode |
 | Response too long/wordy | Brevity drift past 25 words | Post-truncation should catch this; check max_tokens=40 |
 | Response too short | Old behavior persisted | Verify running updated code; check system prompt |
-| Follow-up doesn't work | Silence threshold too aggressive | Check `FOLLOWUP_SILENCE_THRESHOLD` (default 5000 bytes) |
-| Laptop wake word false positives | Threshold too low | Increase threshold: `WAKE_WORD_THRESHOLD=0.7` |
-| Laptop wake word misses | Threshold too high or mic issue | Decrease threshold or check `sounddevice` mic selection |
+| Follow-up doesn't work | Silence threshold too aggressive | Check `FOLLOWUP_SILENCE_THRESHOLD` (default 1000 bytes) |
+| Laptop wake word false positives | Threshold too low | Increase threshold: `OWW_THRESHOLD=0.7` |
+| Laptop wake word misses | Threshold too high or mic issue | Decrease `OWW_THRESHOLD` or check `sounddevice` mic selection |
 | Self-wake (Misty triggers herself) | Pause/resume not working | Check `wake_word_listener.py` pause/resume flow in logs |
 
 ---
