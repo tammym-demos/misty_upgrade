@@ -4,10 +4,10 @@ Updated for the richer responses changes in PR #45 and adaptive conversations (i
 
 | Setting | Before | After |
 |---------|--------|-------|
-| Response length (short) | ≤10 words, 1 sentence | ~20 words, 1-2 sentences |
+| Response length (short) | ≤10 words, 1 sentence | ~35 words, 1-2 sentences |
 | Response length (summary) | N/A | ~40 words, 2-3 sentences + "Want more?" |
 | Response length (continuation) | N/A | ~40 words, 2-3 sentences per chunk |
-| max_tokens (short / summary) | 20 | 40 / 80 |
+| max_tokens (short / summary) | 20 | 60 / 80 |
 | Recording duration | Fixed 6s | VAD-controlled: 3-15s (adaptive) |
 | Follow-up window | 60s | 90s |
 | Follow-up turn cap | unlimited | 12 turns |
