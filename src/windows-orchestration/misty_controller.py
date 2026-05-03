@@ -570,13 +570,22 @@ class MistyController:
 
     def exit_charging_mode(self):
         """Resume normal operation from charging mode."""
-        if self.start_keyphrase(force_restart=True):
+        # In laptop wake word mode, resume the listener instead of Misty's keyphrase
+        if self._wake_word_listener:
+            self._wake_word_listener.resume()
             self.set_led(0, 255, 0)
             self.display_image("e_DefaultContent.jpg")
             self.last_activity_time = time.time()
             self._is_dimmed = False
             self.set_state(State.IDLE)
-            logger.info("Exited charging mode — resumed normal operation")
+            logger.info("Exited charging mode — resumed laptop wake word listener")
+        elif self.start_keyphrase(force_restart=True):
+            self.set_led(0, 255, 0)
+            self.display_image("e_DefaultContent.jpg")
+            self.last_activity_time = time.time()
+            self._is_dimmed = False
+            self.set_state(State.IDLE)
+            logger.info("Exited charging mode — resumed Misty keyphrase")
         else:
             logger.error("Failed to resume from charging mode")
             self.set_state(State.ERROR)
@@ -936,16 +945,17 @@ class MistyController:
 
         # Play "What's up baby?" greeting via pre-uploaded TTS audio.
         # Falls back to chime if greeting audio isn't available.
-        try:
-            self.misty_post("/api/audio/play", {"FileName": "greeting_whatsup.wav", "Volume": 40})
+        # Note: misty_post returns None on failure (doesn't raise), so check return value.
+        greeting_result = self.misty_post("/api/audio/play", {"FileName": "greeting_whatsup.wav", "Volume": 40})
+        if greeting_result:
             time.sleep(1.2)  # let the greeting play before recording starts
-        except Exception as e:
-            logger.debug(f"[Turn {turn}] Greeting playback failed, trying chime: {e}")
-            try:
-                self.misty_post("/api/audio/play", {"FileName": "s_Awe3.wav", "Volume": 30})
+        else:
+            logger.debug(f"[Turn {turn}] Greeting playback failed, trying chime")
+            chime_result = self.misty_post("/api/audio/play", {"FileName": "s_Awe3.wav", "Volume": 30})
+            if chime_result:
                 time.sleep(0.8)
-            except Exception as e:
-                logger.debug(f"[Turn {turn}] Chime fallback playback failed; continuing without audio cue: {e}")
+            else:
+                logger.debug(f"[Turn {turn}] Chime fallback also failed; continuing without audio cue")
 
         # 2. Record audio — bright green LED + tally light = "I'm listening, speak now!"
         self.set_led(0, 255, 0)  # green = recording active, speak now
@@ -960,7 +970,9 @@ class MistyController:
         record_start = time.time()
         
         if use_laptop_mic:
-            # Dynamic recording: laptop mic monitors speech and signals when to stop
+            # Dynamic recording: laptop mic monitors speech and signals when to stop.
+            # Misty recording runs for at least RECORDING_DURATION_S regardless —
+            # decoupled from laptop VAD so the fallback has full audio if needed.
             speech_ended = threading.Event()
             self._wake_word_listener.start_speech_monitor(
                 on_speech_end=lambda: speech_ended.set(),
@@ -969,6 +981,10 @@ class MistyController:
             )
             speech_ended.wait(timeout=15.0)
             self._wake_word_listener.stop_speech_monitor()
+            # Ensure Misty has recorded at least the standard duration for fallback
+            elapsed = time.time() - record_start
+            if elapsed < RECORDING_DURATION_S:
+                time.sleep(RECORDING_DURATION_S - elapsed)
         else:
             # Fallback: fixed duration recording
             time.sleep(RECORDING_DURATION_S)
@@ -1036,8 +1052,10 @@ class MistyController:
         )
         result = response.json()
 
-        # Handle empty STT gracefully — not an error, just no speech detected
-        if result.get("error") == "empty_stt" or response.status_code == 400:
+        # Handle empty STT gracefully — not an error, just no speech detected.
+        # Only treat as silence if the error is specifically empty_stt (not other 400s
+        # like stt_failure or no_file which indicate real problems).
+        if result.get("error") == "empty_stt":
             logger.info(f"[Turn {turn}] No speech detected in recording (empty STT) — treating as silence")
             return False
 
@@ -1094,6 +1112,7 @@ class MistyController:
             self._wake_word_listener.start_recording()
         
         self.start_recording(RECORDING_FILENAME)
+        record_start = time.time()
         if use_laptop_mic:
             speech_ended = threading.Event()
             self._wake_word_listener.start_speech_monitor(
@@ -1103,6 +1122,10 @@ class MistyController:
             )
             speech_ended.wait(timeout=10.0)
             self._wake_word_listener.stop_speech_monitor()
+            # Ensure Misty records at least FOLLOWUP_LISTEN_S for fallback
+            elapsed = time.time() - record_start
+            if elapsed < FOLLOWUP_LISTEN_S:
+                time.sleep(FOLLOWUP_LISTEN_S - elapsed)
         else:
             time.sleep(FOLLOWUP_LISTEN_S)
         self.stop_recording()

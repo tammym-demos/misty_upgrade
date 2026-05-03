@@ -455,7 +455,8 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         # Classify intent for adaptive response mode
         previous_response_mode = _last_response_mode
         response_mode = classify_intent(user_text, previous_response_mode)
-        globals()["_last_response_mode"] = response_mode
+        # Note: _last_response_mode is updated AFTER successful LLM response (below)
+        # to avoid stale state if the LLM call fails or times out.
         mode_config = RESPONSE_MODE_CONFIG[response_mode]
         logger.info(f"Response mode: {response_mode} (last={previous_response_mode})")
 
@@ -531,6 +532,10 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         
         # Add to history for context in next turn
         conversation_history.append({"role": "assistant", "content": assistant_text})
+
+        # Update response mode tracking AFTER successful LLM response —
+        # prevents stale state when LLM times out or fails.
+        globals()["_last_response_mode"] = response_mode
         
         logger.debug(f"LLM result ({response_mode}): {assistant_text}")
         return {"status": "ok", "text": assistant_text, "responseMode": response_mode}

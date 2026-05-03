@@ -108,6 +108,7 @@ class WakeWordListener:
         # Laptop mic recording (capture audio for STT instead of Misty's mic)
         self._recording = False
         self._recorded_frames: list[bytes] = []
+        self._recorded_bytes_total = 0  # O(1) tracking instead of summing every callback
 
         # openWakeWord model (lazy init)
         self._oww_model = None
@@ -306,6 +307,7 @@ class WakeWordListener:
         laptop mic as the audio source. Frames are buffered in memory.
         """
         self._recorded_frames = []
+        self._recorded_bytes_total = 0
         self._recording = True
         # Ensure audio flows even if paused
         self._pause_event.set()
@@ -320,6 +322,7 @@ class WakeWordListener:
         self._recording = False
         frames = self._recorded_frames
         self._recorded_frames = []
+        self._recorded_bytes_total = 0
 
         if not frames:
             logger.warning("Laptop mic recording: no frames captured")
@@ -385,10 +388,11 @@ class WakeWordListener:
         
         # Buffer frames for laptop mic recording (independent of wake word state)
         if self._recording:
-            total_size = sum(len(f) for f in self._recorded_frames)
-            if total_size < MAX_RECORDING_BYTES:
-                self._recorded_frames.append(bytes(indata))
-            elif total_size >= MAX_RECORDING_BYTES and self._recording:
+            if self._recorded_bytes_total < MAX_RECORDING_BYTES:
+                frame_bytes = bytes(indata)
+                self._recorded_frames.append(frame_bytes)
+                self._recorded_bytes_total += len(frame_bytes)
+            elif self._recording:
                 logger.warning("Recording buffer full — stopping capture")
                 self._recording = False
 

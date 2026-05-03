@@ -36,7 +36,9 @@ This project integrates a **Misty II** social robot with **Microsoft Foundry Loc
 └──────────────────────────────┘         └──────────────────────────────────┘
 ```
 
-**Pipeline flow:** Wake word (laptop mic + openWakeWord) → Record via laptop mic (Misty tally light only) → `POST /api/orchestrate` → STT → LLM → TTS → Upload audio to Misty → Playback → Re-arm wake word
+**Pipeline flow (laptop wake word mode):** Wake word (laptop mic + openWakeWord) → Record via laptop mic (Misty tally light only) → `POST /api/orchestrate` → STT → LLM → TTS → Upload audio to Misty → Playback → Re-arm wake word
+
+> **Note:** Laptop wake word mode is opt-in via `USE_LAPTOP_WAKE_WORD=true`. Without it, the default path uses Misty's built-in "Hey Misty" keyphrase (subject to degradation — see #22).
 
 > **Note:** We use the REST API + WebSocket approach (code runs on the laptop) instead of Misty's on-robot JavaScript SDK. The skill runtime proved unreliable — see [Implementation Guide](docs/IMPLEMENTATION_GUIDE.md) for details.
 
@@ -155,9 +157,9 @@ Misty is a sassy little robot with big personality. She lives on a farm with Tam
 
 ### Audio Architecture
 
-- **Wake word**: Detected via laptop microphone using openWakeWord (not Misty's onboard mic)
-- **Speech recording**: Captured from the laptop mic via sounddevice (16kHz, 16-bit mono)
-- **Misty's mic**: Not used for the primary STT path, but Misty's recorded audio may be used as a fallback for STT if laptop capture is empty; it also drives Misty's recording/tally-light behavior during capture
+- **Wake word**: When `USE_LAPTOP_WAKE_WORD=true`, detected via laptop microphone using openWakeWord (not Misty's onboard mic). Otherwise, uses Misty's built-in "Hey Misty" keyphrase (default)
+- **Speech recording**: In laptop mode, captured from the laptop mic via sounddevice (16kHz, 16-bit mono)
+- **Misty's mic**: Not used for the primary STT path in laptop mode, but Misty's recorded audio is used as a fallback for STT if laptop capture is empty; it also drives Misty's recording/tally-light behavior during capture
 - **TTS phrases**: "What's up baby?" (greeting) and "Let me think about that." (thinking) are generated via Kokoro TTS at startup and uploaded to Misty
 
 ### Expressive Behavior

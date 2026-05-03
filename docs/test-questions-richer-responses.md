@@ -8,7 +8,7 @@ Updated for the richer responses changes in PR #45 and adaptive conversations (i
 | Response length (summary) | N/A | ~40 words, 2-3 sentences + "Want more?" |
 | Response length (continuation) | N/A | ~40 words, 2-3 sentences per chunk |
 | max_tokens (short / summary) | 20 | 60 / 80 |
-| Recording duration | Fixed 6s | VAD-controlled: 3-15s (adaptive) |
+| Recording duration | Fixed 6s | VAD-controlled: 6-15s (min_duration=RECORDING_DURATION_S) |
 | Follow-up window | 60s | 90s |
 | Follow-up turn cap | unlimited | 12 turns |
 | Conversation history | 4 messages (2 turns) | 8 messages (4 turns) |
@@ -168,9 +168,9 @@ Tests unique to the laptop mic wake word mode:
 | 🔴 Red | Error | Check logs |
 
 **Response time**: ~2s for follow-ups, ~5s for first turn (TTS cold start)
-**Response length (short)**: 1-2 sentences, ~20 words (max_tokens=40, truncation at 25 words)
+**Response length (short)**: 1-2 sentences, ~35 words (max_tokens=60, truncation at 35 words)
 **Response length (summary/continuation)**: 2-3 sentences, ~40 words (max_tokens=80, truncation at 50 words)
-**Recording duration**: VAD-controlled — 3s minimum, up to 15s for long utterances
+**Recording duration**: VAD-controlled — 6s minimum (RECORDING_DURATION_S), up to 15s for long utterances
 **Follow-up window**: 90 seconds or 12 turns, whichever comes first
 **History**: Misty remembers the last 4 turns (8 messages) of conversation
 
@@ -180,7 +180,7 @@ Tests unique to the laptop mic wake word mode:
 |---------|-------------|-----|
 | No response to wake word | Keyphrase silent failure (#22) or laptop mic issue | Check logs; try `USE_LAPTOP_WAKE_WORD=true` |
 | 44-byte recording (empty) | Misty keyphrase still active during recording | Fixed in PR #45 — keyphrase stopped before recording in laptop mode |
-| Response too long/wordy | Brevity drift past 25 words | Post-truncation should catch this; check max_tokens=40 |
+| Response too long/wordy | Brevity drift past 35 words | Post-truncation should catch this; check max_tokens=60 |
 | Response too short | Old behavior persisted | Verify running updated code; check system prompt |
 | Follow-up doesn't work | Silence threshold too aggressive | Check `FOLLOWUP_SILENCE_THRESHOLD` (default 1000 bytes) |
 | Laptop wake word false positives | Threshold too low | Increase threshold: `OWW_THRESHOLD=0.7` |
