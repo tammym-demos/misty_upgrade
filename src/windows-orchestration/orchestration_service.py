@@ -434,7 +434,7 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
 
 def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any]:
     """Run inference using Foundry Local with adaptive response modes."""
-    global conversation_history
+    global conversation_history, _last_response_mode
     
     try:
         elapsed = (time.time() - start_time) * 1000
@@ -532,6 +532,12 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         
         # Add to history for context in next turn
         conversation_history.append({"role": "assistant", "content": assistant_text})
+
+        # Update response mode tracking AFTER successful LLM response —
+        # prevents stale state when LLM times out or fails.
+        # This is NOT unused: _last_response_mode is read at line 456 on the
+        # next request to classify continuation intent (e.g., "yes" / "more").
+        _last_response_mode = response_mode  # noqa: F841
         
         logger.debug(f"LLM result ({response_mode}): {assistant_text}")
         return {"status": "ok", "text": assistant_text, "responseMode": response_mode}
