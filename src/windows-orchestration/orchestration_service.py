@@ -52,8 +52,18 @@ SYSTEM_PROMPT = os.getenv(
         "You love teasing (gently!), cracking jokes, adding flair, and throwing in the occasional eye-roll. "
         "Use casual language, slang, and expressive phrases like 'oh honey', 'girl please', 'I mean...', 'not gonna lie'. "
         "RULE: Keep responses to 2-3 short sentences. Be fun, not flat. "
-        "Never say you're an AI or assistant. You're Misty, and you own it."
+        "Never say you're an AI or assistant. You're Misty, and you own it. "
+        "You can move! If asked to come closer, go forward, back up, or turn — say something fun like "
+        "'On my way!' or 'Coming right up!' but keep it short. Movement commands are handled separately."
     )
+)
+
+# Movement-capable system prompt supplement (#55)
+# Appended when movement intent is detected alongside conversation
+MOVEMENT_PROMPT_SUPPLEMENT = (
+    "The user asked you to move. Respond with a short, fun acknowledgment "
+    "(1 sentence max). The actual movement is handled separately — "
+    "just be your sassy self about it."
 )
 
 # ---- Response mode configuration ----
@@ -91,6 +101,105 @@ _INTENT_PATTERNS = {
         re.IGNORECASE,
     ),
 }
+
+# Movement intent patterns (#54) — detect commands to physically move the robot
+_MOVEMENT_PATTERNS = {
+    "forward": re.compile(
+        r"\b(?:(?:go|move|drive|roll|come)\s+(?:forward|ahead|straight)|"
+        r"(?:come|go)\s+(?:here|to\s+me|closer|over\s+here)|"
+        r"move\s+up|"
+        r"walk\s+(?:forward|to\s+me|over\s+here))\b",
+        re.IGNORECASE,
+    ),
+    "backward": re.compile(
+        r"\b(?:(?:go|move|drive|roll|back)\s+(?:back(?:ward)?s?|up)|"
+        r"reverse|"
+        r"back\s+(?:up|away)|"
+        r"move\s+(?:away|back))\b",
+        re.IGNORECASE,
+    ),
+    "rotate_left": re.compile(
+        r"\b(?:(?:turn|rotate|spin|face)\s+(?:left|around\s+to\s+(?:the\s+)?left)|"
+        r"look\s+(?:left|to\s+(?:the\s+)?left))\b",
+        re.IGNORECASE,
+    ),
+    "rotate_right": re.compile(
+        r"\b(?:(?:turn|rotate|spin|face)\s+(?:right|around\s+to\s+(?:the\s+)?right)|"
+        r"look\s+(?:right|to\s+(?:the\s+)?right))\b",
+        re.IGNORECASE,
+    ),
+    "stop": re.compile(
+        r"\b(?:stop|halt|freeze|don'?t\s+move|stay|hold\s+(?:it|still|on))\b",
+        re.IGNORECASE,
+    ),
+}
+
+
+def classify_movement_intent(user_text: str) -> dict | None:
+    """Classify if user text contains a movement command.
+
+    Returns dict with movement details if detected, None otherwise.
+    Only bounded relative commands are recognized (no absolute destinations).
+
+    Returns:
+        {"command": "forward"|"backward"|"rotate_left"|"rotate_right"|"stop"}
+        or None if no movement intent detected.
+    """
+    text = (user_text or "").strip()
+    if not text:
+        return None
+
+    for command, pattern in _MOVEMENT_PATTERNS.items():
+        if pattern.search(text):
+            logger.info(f"Movement intent detected: {command}")
+            return {"command": command}
+
+    return None
+
+
+import random
+
+# Pre-built movement acknowledgments (#55) — short, sassy, no LLM needed
+_MOVEMENT_ACKS = {
+    "forward": [
+        "On my way!",
+        "Coming right up!",
+        "Here I come!",
+        "Watch out, I'm rolling!",
+        "Ooh, road trip!",
+    ],
+    "backward": [
+        "Backing it up!",
+        "Beep beep beep!",
+        "Going in reverse, honey!",
+        "Watch out behind me!",
+    ],
+    "rotate_left": [
+        "Spinning left!",
+        "Look at me go!",
+        "Turning, turning!",
+        "Left it is!",
+    ],
+    "rotate_right": [
+        "Spinning right!",
+        "Right turn coming up!",
+        "Rotating like a pro!",
+        "Making my turn!",
+    ],
+    "stop": [
+        "Stopping!",
+        "I'll stay right here.",
+        "Okay okay, I'm stopped!",
+        "Holding still!",
+    ],
+}
+
+
+def _get_movement_acknowledgment(command: str) -> str:
+    """Get a random sassy acknowledgment for a movement command."""
+    acks = _MOVEMENT_ACKS.get(command, ["Okay!"])
+    return random.choice(acks)
+
 
 _CONTINUATION_PATTERN = re.compile(
     r"^\s*(?:yes|yeah|yep|sure|ok(?:ay)?|more|continue|go\s+on|keep\s+going|"
@@ -316,6 +425,29 @@ def orchestrate():
             return jsonify({"status": "error", "error": "empty_stt"}), 400
         
         logger.info(f"[STT {stt_ms:.0f}ms] {user_text}")
+
+        # Step 1.5: Check for movement intent (#54, #55) — short-circuit for direct commands
+        movement = classify_movement_intent(user_text)
+        if movement:
+            # Generate a quick verbal acknowledgment via TTS (no LLM needed)
+            ack_text = _get_movement_acknowledgment(movement["command"])
+            tts_start = time.time()
+            tts_result = text_to_speech(ack_text, tts_start)
+            tts_ms = (time.time() - tts_start) * 1000
+            total_ms = (time.time() - start_time) * 1000
+            logger.info(f"[Pipeline {total_ms:.0f}ms] Movement: {movement['command']} "
+                         f"(STT={stt_ms:.0f}ms, TTS={tts_ms:.0f}ms)")
+            result = {
+                "status": "ok",
+                "type": "movement",
+                "movement": movement,
+                "user_text": user_text,
+                "response_text": ack_text,
+                "pipeline_ms": round(total_ms),
+            }
+            if tts_result.get("status") == "ok":
+                result["audio_file"] = tts_result.get("audio_file")
+            return jsonify(result), 200
         
         # Step 2: Language Model Inference
         llm_start = time.time()

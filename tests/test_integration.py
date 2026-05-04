@@ -12,6 +12,7 @@ import requests
 import json
 import time
 import os
+import threading
 from io import BytesIO
 from urllib.parse import urlparse, urlunparse
 
@@ -569,6 +570,170 @@ class TestPromptLimiting(unittest.TestCase):
                           "Brevity reminder should be suppressed in summary mode")
 
 
+class TestMovementIntentClassification(unittest.TestCase):
+    """Unit tests for movement intent detection (#54).
+
+    Tests the regex-based movement command classification in orchestration_service.
+    """
+
+    _svc = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import orchestration_service
+            cls._svc = orchestration_service
+        except Exception as exc:
+            cls._svc = None
+            print(f"[TestMovementIntentClassification] Could not import: {exc}")
+
+    def setUp(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+
+    # --- Forward commands ---
+
+    def test_go_forward(self):
+        result = self._svc.classify_movement_intent("go forward")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "forward")
+
+    def test_move_ahead(self):
+        result = self._svc.classify_movement_intent("move ahead")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "forward")
+
+    def test_come_here(self):
+        result = self._svc.classify_movement_intent("come here")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "forward")
+
+    def test_come_to_me(self):
+        result = self._svc.classify_movement_intent("come to me")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "forward")
+
+    def test_drive_straight(self):
+        result = self._svc.classify_movement_intent("drive straight")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "forward")
+
+    # --- Backward commands ---
+
+    def test_go_back(self):
+        result = self._svc.classify_movement_intent("go back")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "backward")
+
+    def test_move_backward(self):
+        result = self._svc.classify_movement_intent("move backward")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "backward")
+
+    def test_back_up(self):
+        result = self._svc.classify_movement_intent("back up")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "backward")
+
+    def test_reverse(self):
+        result = self._svc.classify_movement_intent("reverse")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "backward")
+
+    # --- Rotate commands ---
+
+    def test_turn_left(self):
+        result = self._svc.classify_movement_intent("turn left")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "rotate_left")
+
+    def test_rotate_right(self):
+        result = self._svc.classify_movement_intent("rotate right")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "rotate_right")
+
+    def test_spin_left(self):
+        result = self._svc.classify_movement_intent("spin left")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "rotate_left")
+
+    def test_look_right(self):
+        result = self._svc.classify_movement_intent("look right")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "rotate_right")
+
+    # --- Stop commands ---
+
+    def test_stop(self):
+        result = self._svc.classify_movement_intent("stop")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "stop")
+
+    def test_halt(self):
+        result = self._svc.classify_movement_intent("halt")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "stop")
+
+    def test_freeze(self):
+        result = self._svc.classify_movement_intent("freeze")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "stop")
+
+    def test_dont_move(self):
+        result = self._svc.classify_movement_intent("don't move")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["command"], "stop")
+
+    # --- Non-movement commands (should return None) ---
+
+    def test_hello(self):
+        result = self._svc.classify_movement_intent("hello misty")
+        self.assertIsNone(result)
+
+    def test_whats_the_weather(self):
+        result = self._svc.classify_movement_intent("what's the weather today")
+        self.assertIsNone(result)
+
+    def test_tell_me_a_story(self):
+        result = self._svc.classify_movement_intent("tell me a story")
+        self.assertIsNone(result)
+
+    def test_empty_string(self):
+        result = self._svc.classify_movement_intent("")
+        self.assertIsNone(result)
+
+    def test_none_input(self):
+        result = self._svc.classify_movement_intent(None)
+        self.assertIsNone(result)
+
+    # --- Movement acknowledgments (#55) ---
+
+    def test_get_movement_ack_forward(self):
+        """Movement acknowledgment for forward should be a non-empty string."""
+        ack = self._svc._get_movement_acknowledgment("forward")
+        self.assertIsInstance(ack, str)
+        self.assertTrue(len(ack) > 0)
+
+    def test_get_movement_ack_stop(self):
+        ack = self._svc._get_movement_acknowledgment("stop")
+        self.assertIsInstance(ack, str)
+        self.assertTrue(len(ack) > 0)
+
+    def test_get_movement_ack_unknown_command(self):
+        """Unknown command should return fallback 'Okay!'."""
+        ack = self._svc._get_movement_acknowledgment("unknown_cmd")
+        self.assertEqual(ack, "Okay!")
+
+    def test_movement_prompt_supplement_exists(self):
+        """MOVEMENT_PROMPT_SUPPLEMENT should be defined."""
+        self.assertTrue(hasattr(self._svc, 'MOVEMENT_PROMPT_SUPPLEMENT'))
+        self.assertIn("move", self._svc.MOVEMENT_PROMPT_SUPPLEMENT.lower())
+
+    def test_system_prompt_mentions_movement(self):
+        """System prompt should mention Misty can move."""
+        self.assertIn("move", self._svc.SYSTEM_PROMPT.lower())
+
+
 class TestDrivePrimitives(unittest.TestCase):
     """Unit tests for drive/locomotion methods (#48).
 
@@ -724,6 +889,1007 @@ class TestDrivePrimitives(unittest.TestCase):
         self.assertEqual(body["Distance"], 0.5)
         self.assertEqual(body["TimeMs"], 2000)
         self.assertTrue(body["Reverse"])
+
+
+class TestHazardTelemetry(unittest.TestCase):
+    """Unit tests for hazard/sensor telemetry subscription and handling (#49).
+
+    These tests mock WebSocket — no live robot required.
+    """
+
+    _ctrl = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            _ctrl_path = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration")
+            )
+            if _ctrl_path not in sys.path:
+                sys.path.insert(0, _ctrl_path)
+            from misty_controller import (
+                MistyController, HazardState, ToFReading,
+                TOF_SENSORS, TOF_FORWARD_SENSORS, TOF_REVERSE_SENSORS,
+                TELEMETRY_STALE_TIMEOUT_S,
+            )
+            cls._MistyController = MistyController
+            cls._HazardState = HazardState
+            cls._ToFReading = ToFReading
+            cls._TOF_SENSORS = TOF_SENSORS
+            cls._TOF_FORWARD_SENSORS = TOF_FORWARD_SENSORS
+            cls._TOF_REVERSE_SENSORS = TOF_REVERSE_SENSORS
+            cls._TELEMETRY_STALE_TIMEOUT_S = TELEMETRY_STALE_TIMEOUT_S
+        except Exception as exc:
+            cls._MistyController = None
+            print(f"[TestHazardTelemetry] Could not import misty_controller: {exc}")
+
+    def setUp(self):
+        if self._MistyController is None:
+            self.skipTest("misty_controller could not be imported")
+        self.ctrl = self._MistyController()
+        # Mock misty_post to capture calls
+        self._post_calls = []
+        self.ctrl.misty_post = lambda endpoint, body=None, timeout=5.0: (
+            self._post_calls.append((endpoint, body)) or {"status": "Success", "result": True}
+        )
+
+    # --- HazardState initialization ---
+
+    def test_hazard_state_initialized(self):
+        """Controller should initialize with empty HazardState."""
+        self.assertIsNotNone(self.ctrl.hazard)
+        self.assertEqual(self.ctrl.hazard.active_hazards, [])
+        self.assertEqual(self.ctrl.hazard.last_hazard_time, 0.0)
+        self.assertFalse(self.ctrl.hazard.hazard_halt_issued)
+        self.assertFalse(self.ctrl.hazard.any_bump_active)
+
+    def test_tof_readings_initialized_for_all_sensors(self):
+        """ToF readings dict should have entries for all 8 sensors."""
+        self.assertEqual(len(self.ctrl.hazard.tof_readings), 8)
+        for sid in self._TOF_SENSORS:
+            self.assertIn(sid, self.ctrl.hazard.tof_readings)
+            reading = self.ctrl.hazard.tof_readings[sid]
+            self.assertEqual(reading.sensor_id, sid)
+            self.assertFalse(reading.is_valid)
+
+    # --- ToF event handling ---
+
+    def test_handle_tof_event_updates_reading(self):
+        """ToF event should update the per-sensor reading."""
+        self.ctrl._handle_tof_event({
+            "sensorId": "toffc",
+            "distanceInMeters": 0.350,
+            "status": 0,
+        })
+        reading = self.ctrl.hazard.tof_readings["toffc"]
+        self.assertAlmostEqual(reading.distance_mm, 350.0, places=1)
+        self.assertEqual(reading.status, 0)
+        self.assertTrue(reading.is_valid)
+        self.assertGreater(reading.last_updated, 0)
+
+    def test_handle_tof_event_invalid_status(self):
+        """ToF event with high status should mark reading as invalid."""
+        self.ctrl._handle_tof_event({
+            "sensorId": "toffr",
+            "distanceInMeters": 0.100,
+            "status": 255,
+        })
+        reading = self.ctrl.hazard.tof_readings["toffr"]
+        self.assertFalse(reading.is_valid)
+        self.assertEqual(reading.status, 255)
+
+    def test_handle_tof_event_status_2_is_valid(self):
+        """Status 2 (ranging complete) should be treated as valid."""
+        self.ctrl._handle_tof_event({
+            "sensorId": "toffl",
+            "distanceInMeters": 0.500,
+            "status": 2,
+        })
+        self.assertTrue(self.ctrl.hazard.tof_readings["toffl"].is_valid)
+
+    def test_handle_tof_ignores_unknown_sensor(self):
+        """Unknown sensor ID should be silently ignored."""
+        self.ctrl._handle_tof_event({
+            "sensorId": "unknown_sensor",
+            "distanceInMeters": 0.100,
+            "status": 0,
+        })
+        # No crash, no new entry
+        self.assertNotIn("unknown_sensor", self.ctrl.hazard.tof_readings)
+
+    # --- Hazard event handling ---
+
+    def test_handle_hazard_event_with_bump(self):
+        """HazardNotification with bump hazard should record active hazards."""
+        self.ctrl._handle_hazard_event({
+            "bumpSensorsHazardState": [
+                {"sensorName": "Bump_FrontRight", "inHazard": True},
+                {"sensorName": "Bump_FrontLeft", "inHazard": False},
+            ],
+            "timeOfFlightSensorsHazardState": [],
+        })
+        self.assertEqual(len(self.ctrl.hazard.active_hazards), 1)
+        self.assertEqual(self.ctrl.hazard.active_hazards[0]["type"], "bump")
+        self.assertTrue(self.ctrl.hazard.hazard_halt_issued)
+
+    def test_handle_hazard_event_with_tof(self):
+        """HazardNotification with ToF hazard should record active hazards."""
+        self.ctrl._handle_hazard_event({
+            "bumpSensorsHazardState": [],
+            "timeOfFlightSensorsHazardState": [
+                {"sensorName": "TOF_FrontCenter", "inHazard": True, "distance": 80},
+            ],
+        })
+        self.assertEqual(len(self.ctrl.hazard.active_hazards), 1)
+        self.assertEqual(self.ctrl.hazard.active_hazards[0]["type"], "tof")
+        self.assertEqual(self.ctrl.hazard.active_hazards[0]["distance_mm"], 80)
+
+    def test_handle_hazard_cleared(self):
+        """HazardNotification with no active hazards should clear state."""
+        # First, set a hazard
+        self.ctrl._handle_hazard_event({
+            "bumpSensorsHazardState": [{"sensorName": "Bump_FR", "inHazard": True}],
+            "timeOfFlightSensorsHazardState": [],
+        })
+        self.assertTrue(self.ctrl.hazard.hazard_halt_issued)
+        # Now clear it
+        self.ctrl._handle_hazard_event({
+            "bumpSensorsHazardState": [{"sensorName": "Bump_FR", "inHazard": False}],
+            "timeOfFlightSensorsHazardState": [],
+        })
+        self.assertEqual(self.ctrl.hazard.active_hazards, [])
+        self.assertFalse(self.ctrl.hazard.hazard_halt_issued)
+
+    # --- Bump event handling ---
+
+    def test_handle_bump_event_pressed(self):
+        """Bump contact should be recorded and any_bump_active set."""
+        self.ctrl._handle_bump_event({
+            "sensorName": "Bump_FrontRight",
+            "isContacted": True,
+        })
+        self.assertTrue(self.ctrl.hazard.any_bump_active)
+        self.assertIn("Bump_FrontRight", self.ctrl.hazard.bump_states)
+        self.assertTrue(self.ctrl.hazard.bump_states["Bump_FrontRight"]["is_pressed"])
+
+    def test_handle_bump_event_released(self):
+        """Bump release should clear that sensor."""
+        # Press first
+        self.ctrl._handle_bump_event({"sensorName": "Bump_FrontLeft", "isContacted": True})
+        self.assertTrue(self.ctrl.hazard.any_bump_active)
+        # Release
+        self.ctrl._handle_bump_event({"sensorName": "Bump_FrontLeft", "isContacted": False})
+        self.assertFalse(self.ctrl.hazard.any_bump_active)
+
+    def test_multiple_bumps_any_active(self):
+        """any_bump_active should be True if ANY bump is still pressed."""
+        self.ctrl._handle_bump_event({"sensorName": "Bump_FR", "isContacted": True})
+        self.ctrl._handle_bump_event({"sensorName": "Bump_FL", "isContacted": True})
+        # Release one
+        self.ctrl._handle_bump_event({"sensorName": "Bump_FR", "isContacted": False})
+        self.assertTrue(self.ctrl.hazard.any_bump_active)  # FL still pressed
+
+    # --- check_forward_clear ---
+
+    def test_check_forward_clear_all_good(self):
+        """Forward clear when all forward sensors have valid, distant readings."""
+        now = time.time()
+        for sid in self._TOF_FORWARD_SENSORS:
+            with self.ctrl.hazard_lock:
+                r = self.ctrl.hazard.tof_readings[sid]
+                r.distance_mm = 500.0
+                r.status = 0
+                r.is_valid = True
+                r.last_updated = now
+        self.assertTrue(self.ctrl.check_forward_clear())
+
+    def test_check_forward_clear_close_obstacle(self):
+        """Forward NOT clear when a front sensor detects close obstacle."""
+        now = time.time()
+        for sid in self._TOF_FORWARD_SENSORS:
+            with self.ctrl.hazard_lock:
+                r = self.ctrl.hazard.tof_readings[sid]
+                r.distance_mm = 500.0
+                r.status = 0
+                r.is_valid = True
+                r.last_updated = now
+        # Place obstacle in front center
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.tof_readings["toffc"].distance_mm = 100.0
+        self.assertFalse(self.ctrl.check_forward_clear())
+
+    def test_check_forward_clear_stale_data(self):
+        """Forward NOT clear when sensor data is stale (fail closed)."""
+        # Leave last_updated at 0 (stale)
+        self.assertFalse(self.ctrl.check_forward_clear())
+
+    def test_check_forward_clear_invalid_sensor(self):
+        """Forward NOT clear when a sensor has invalid status."""
+        now = time.time()
+        for sid in self._TOF_FORWARD_SENSORS:
+            with self.ctrl.hazard_lock:
+                r = self.ctrl.hazard.tof_readings[sid]
+                r.distance_mm = 500.0
+                r.status = 0
+                r.is_valid = True
+                r.last_updated = now
+        # Invalidate one sensor
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.tof_readings["toffl"].is_valid = False
+        self.assertFalse(self.ctrl.check_forward_clear())
+
+    # --- check_reverse_clear ---
+
+    def test_check_reverse_clear_all_good(self):
+        """Reverse clear when rear sensors have valid, distant readings."""
+        now = time.time()
+        for sid in self._TOF_REVERSE_SENSORS:
+            with self.ctrl.hazard_lock:
+                r = self.ctrl.hazard.tof_readings[sid]
+                r.distance_mm = 400.0
+                r.status = 0
+                r.is_valid = True
+                r.last_updated = now
+        self.assertTrue(self.ctrl.check_reverse_clear())
+
+    def test_check_reverse_clear_obstacle_behind(self):
+        """Reverse NOT clear when rear sensor detects obstacle."""
+        now = time.time()
+        for sid in self._TOF_REVERSE_SENSORS:
+            with self.ctrl.hazard_lock:
+                r = self.ctrl.hazard.tof_readings[sid]
+                r.distance_mm = 400.0
+                r.status = 0
+                r.is_valid = True
+                r.last_updated = now
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.tof_readings["tofr"].distance_mm = 50.0
+        self.assertFalse(self.ctrl.check_reverse_clear())
+
+    # --- check_sensors_fresh ---
+
+    def test_check_sensors_fresh_all_recent(self):
+        """All sensors fresh when recently updated."""
+        now = time.time()
+        for sid in self._TOF_SENSORS:
+            with self.ctrl.hazard_lock:
+                self.ctrl.hazard.tof_readings[sid].last_updated = now
+        self.assertTrue(self.ctrl.check_sensors_fresh())
+
+    def test_check_sensors_fresh_one_stale(self):
+        """Not fresh if any sensor is stale."""
+        now = time.time()
+        for sid in self._TOF_SENSORS:
+            with self.ctrl.hazard_lock:
+                self.ctrl.hazard.tof_readings[sid].last_updated = now
+        # Make one stale
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.tof_readings["tofr"].last_updated = now - 10.0
+        self.assertFalse(self.ctrl.check_sensors_fresh())
+
+    def test_check_sensors_fresh_subset(self):
+        """Can check freshness of specific sensor subset."""
+        now = time.time()
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.tof_readings["toffc"].last_updated = now
+            self.ctrl.hazard.tof_readings["toffr"].last_updated = now
+        self.assertTrue(self.ctrl.check_sensors_fresh({"toffc", "toffr"}))
+        # But full set would fail
+        self.assertFalse(self.ctrl.check_sensors_fresh())
+
+    # --- get_hazard_snapshot ---
+
+    def test_get_hazard_snapshot_returns_dict(self):
+        """Snapshot should return a dict with expected keys."""
+        snapshot = self.ctrl.get_hazard_snapshot()
+        self.assertIsInstance(snapshot, dict)
+        self.assertIn("active_hazards", snapshot)
+        self.assertIn("tof_readings", snapshot)
+        self.assertIn("bump_states", snapshot)
+        self.assertIn("any_bump_active", snapshot)
+        self.assertEqual(len(snapshot["tof_readings"]), 8)
+
+    def test_get_hazard_snapshot_includes_friendly_names(self):
+        """Snapshot ToF readings should include friendly sensor names."""
+        snapshot = self.ctrl.get_hazard_snapshot()
+        self.assertEqual(snapshot["tof_readings"]["toffc"]["friendly_name"], "front_center")
+        self.assertEqual(snapshot["tof_readings"]["tofr"]["friendly_name"], "rear")
+
+    # --- WebSocket subscription methods ---
+
+    def test_ws_subscribe_hazard_sends_message(self):
+        """_ws_subscribe_hazard should send subscribe JSON via WebSocket."""
+        sent_messages = []
+        mock_ws = unittest.mock.MagicMock()
+        mock_ws.send = lambda msg: sent_messages.append(msg)
+        self.ctrl.ws = mock_ws
+
+        self.ctrl._ws_subscribe_hazard()
+
+        # Should have sent unsubscribe(s) + subscribe
+        subscribe_msgs = [m for m in sent_messages if "subscribe" in m.lower()]
+        self.assertTrue(len(subscribe_msgs) >= 1)
+        # Last message should be the subscribe
+        last = json.loads(subscribe_msgs[-1])
+        self.assertEqual(last["Operation"], "subscribe")
+        self.assertEqual(last["Type"], "HazardNotification")
+        self.assertEqual(last["DebounceMs"], 0)
+
+    def test_ws_subscribe_tof_sends_message(self):
+        """_ws_subscribe_tof should send subscribe JSON with 250ms debounce."""
+        sent_messages = []
+        mock_ws = unittest.mock.MagicMock()
+        mock_ws.send = lambda msg: sent_messages.append(msg)
+        self.ctrl.ws = mock_ws
+
+        self.ctrl._ws_subscribe_tof()
+
+        subscribe_msgs = [m for m in sent_messages if '"subscribe"' in m.lower()]
+        last = json.loads(subscribe_msgs[-1])
+        self.assertEqual(last["Type"], "TimeOfFlight")
+        self.assertEqual(last["DebounceMs"], 250)
+
+    def test_ws_subscribe_bump_sends_message(self):
+        """_ws_subscribe_bump should send subscribe JSON with 0 debounce."""
+        sent_messages = []
+        mock_ws = unittest.mock.MagicMock()
+        mock_ws.send = lambda msg: sent_messages.append(msg)
+        self.ctrl.ws = mock_ws
+
+        self.ctrl._ws_subscribe_bump()
+
+        subscribe_msgs = [m for m in sent_messages if '"subscribe"' in m.lower()]
+        last = json.loads(subscribe_msgs[-1])
+        self.assertEqual(last["Type"], "BumpSensor")
+        self.assertEqual(last["DebounceMs"], 0)
+
+    def test_ws_subscribe_uses_unique_names(self):
+        """Consecutive subscriptions should use different event names."""
+        mock_ws = unittest.mock.MagicMock()
+        self.ctrl.ws = mock_ws
+
+        self.ctrl._ws_subscribe_hazard()
+        name1 = self.ctrl._hazard_event_name
+
+        time.sleep(0.001)  # ensure time_ns differs
+        self.ctrl._ws_subscribe_hazard()
+        name2 = self.ctrl._hazard_event_name
+
+        self.assertNotEqual(name1, name2)
+
+
+class TestMovingState(unittest.TestCase):
+    """Unit tests for MOVING state and preemption logic (#50).
+
+    These tests mock HTTP calls — no live robot required.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            _ctrl_path = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration")
+            )
+            if _ctrl_path not in sys.path:
+                sys.path.insert(0, _ctrl_path)
+            from misty_controller import (
+                MistyController, State, PREEMPTION_PRIORITY,
+                BATTERY_MOVEMENT_CUTOFF, BATTERY_MOVEMENT_VOLTAGE_MIN,
+                BATTERY_VOLTAGE_DROP_HALT,
+            )
+            cls._MistyController = MistyController
+            cls._State = State
+            cls._PREEMPTION_PRIORITY = PREEMPTION_PRIORITY
+            cls._BATTERY_MOVEMENT_CUTOFF = BATTERY_MOVEMENT_CUTOFF
+            cls._BATTERY_MOVEMENT_VOLTAGE_MIN = BATTERY_MOVEMENT_VOLTAGE_MIN
+            cls._BATTERY_VOLTAGE_DROP_HALT = BATTERY_VOLTAGE_DROP_HALT
+        except Exception as exc:
+            cls._MistyController = None
+            print(f"[TestMovingState] Could not import misty_controller: {exc}")
+
+    def setUp(self):
+        if self._MistyController is None:
+            self.skipTest("misty_controller could not be imported")
+        self.ctrl = self._MistyController()
+        self._post_calls = []
+        self.ctrl.misty_post = lambda endpoint, body=None, timeout=5.0: (
+            self._post_calls.append((endpoint, body)) or {"status": "Success", "result": True}
+        )
+
+    # --- State enum ---
+
+    def test_moving_state_exists(self):
+        """MOVING should be a valid state."""
+        self.assertEqual(self._State.MOVING.value, "MOVING")
+
+    def test_preemption_priority_defined(self):
+        """Preemption priority list should be defined."""
+        self.assertIn("hazard_stop", self._PREEMPTION_PRIORITY)
+        self.assertIn("bump_contact", self._PREEMPTION_PRIORITY)
+        self.assertIn("wake_word", self._PREEMPTION_PRIORITY)
+        self.assertIn("move_complete", self._PREEMPTION_PRIORITY)
+
+    # --- start_moving ---
+
+    def test_start_moving_from_idle(self):
+        """start_moving should succeed from IDLE state."""
+        self.ctrl.set_state(self._State.IDLE)
+        result = self.ctrl.start_moving(reason="test")
+        self.assertTrue(result)
+        self.assertEqual(self.ctrl.get_state(), self._State.MOVING)
+
+    def test_start_moving_blocked_not_idle(self):
+        """start_moving should fail if not in IDLE state."""
+        self.ctrl.set_state(self._State.RECORDING)
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+        self.assertEqual(self.ctrl.get_state(), self._State.RECORDING)
+
+    def test_start_moving_blocked_active_hazard(self):
+        """start_moving should fail if hazards are active."""
+        self.ctrl.set_state(self._State.IDLE)
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.active_hazards = [{"type": "tof", "sensor": "front"}]
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
+    def test_start_moving_blocked_bump_active(self):
+        """start_moving should fail if any bump sensor is active."""
+        self.ctrl.set_state(self._State.IDLE)
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.any_bump_active = True
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+
+    def test_start_moving_blocked_battery_critical(self):
+        """start_moving should fail if battery is below movement cutoff (25%)."""
+        self.ctrl.set_state(self._State.IDLE)
+        with self.ctrl.battery_lock:
+            self.ctrl.battery.charge_percent = 0.20  # below 25% movement cutoff
+            self.ctrl.battery.last_updated = time.time()
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+
+    def test_start_moving_blocked_low_voltage(self):
+        """start_moving should fail if voltage is below movement minimum (#52)."""
+        self.ctrl.set_state(self._State.IDLE)
+        with self.ctrl.battery_lock:
+            self.ctrl.battery.charge_percent = 0.30  # above percentage cutoff
+            self.ctrl.battery.voltage = 7.2  # below 7.5V voltage minimum
+            self.ctrl.battery.last_updated = time.time()
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+
+    def test_start_moving_ok_with_good_battery(self):
+        """start_moving should succeed with good battery levels."""
+        self.ctrl.set_state(self._State.IDLE)
+        with self.ctrl.battery_lock:
+            self.ctrl.battery.charge_percent = 0.50
+            self.ctrl.battery.voltage = 8.0
+            self.ctrl.battery.last_updated = time.time()
+        result = self.ctrl.start_moving(reason="test")
+        self.assertTrue(result)
+
+    # --- stop_moving ---
+
+    def test_stop_moving_halts_and_returns_to_idle(self):
+        """stop_moving should halt motors and return to IDLE."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl.stop_moving(reason="move_complete")
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+        # Should have called /api/halt
+        halt_calls = [c for c in self._post_calls if c[0] == "/api/halt"]
+        self.assertEqual(len(halt_calls), 1)
+
+    def test_stop_moving_noop_if_not_moving(self):
+        """stop_moving should do nothing if not in MOVING state."""
+        self.ctrl.set_state(self._State.IDLE)
+        self.ctrl.stop_moving(reason="test")
+        # No halt call expected
+        halt_calls = [c for c in self._post_calls if c[0] == "/api/halt"]
+        self.assertEqual(len(halt_calls), 0)
+
+    # --- preempt_movement ---
+
+    def test_preempt_halts_and_returns_to_idle(self):
+        """preempt_movement should halt motors and return to IDLE."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl.preempt_movement("hazard_stop")
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+        halt_calls = [c for c in self._post_calls if c[0] == "/api/halt"]
+        self.assertEqual(len(halt_calls), 1)
+
+    def test_preempt_noop_if_not_moving(self):
+        """preempt_movement should do nothing if not in MOVING state."""
+        self.ctrl.set_state(self._State.IDLE)
+        self.ctrl.preempt_movement("hazard_stop")
+        halt_calls = [c for c in self._post_calls if c[0] == "/api/halt"]
+        self.assertEqual(len(halt_calls), 0)
+
+    # --- Hazard preemption integration ---
+
+    def test_hazard_event_preempts_movement(self):
+        """Active hazard during MOVING should preempt movement."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl._handle_hazard_event({
+            "bumpSensorsHazardState": [],
+            "timeOfFlightSensorsHazardState": [
+                {"sensorName": "TOF_FC", "inHazard": True, "distance": 50},
+            ],
+        })
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
+    def test_hazard_cleared_no_preempt(self):
+        """Hazard cleared event should NOT affect MOVING state."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl._handle_hazard_event({
+            "bumpSensorsHazardState": [],
+            "timeOfFlightSensorsHazardState": [
+                {"sensorName": "TOF_FC", "inHazard": False},
+            ],
+        })
+        self.assertEqual(self.ctrl.get_state(), self._State.MOVING)
+
+    # --- Bump preemption integration ---
+
+    def test_bump_event_preempts_movement(self):
+        """Bump contact during MOVING should preempt movement."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl._handle_bump_event({
+            "sensorName": "Bump_FrontRight",
+            "isContacted": True,
+        })
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
+    def test_bump_release_no_preempt(self):
+        """Bump release should NOT preempt movement."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl._handle_bump_event({
+            "sensorName": "Bump_FrontRight",
+            "isContacted": False,
+        })
+        self.assertEqual(self.ctrl.get_state(), self._State.MOVING)
+
+    # --- Battery preemption during movement (#52) ---
+
+    def test_battery_low_preempts_movement(self):
+        """Battery dropping below movement cutoff during MOVING should preempt."""
+        self.ctrl.set_state(self._State.MOVING)
+        from misty_controller import BatteryState
+        b = BatteryState(charge_percent=0.20, voltage=7.8, last_updated=time.time())
+        self.ctrl._evaluate_battery_thresholds(b)
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
+    def test_battery_voltage_low_preempts_movement(self):
+        """Voltage below minimum during MOVING should preempt."""
+        self.ctrl.set_state(self._State.MOVING)
+        from misty_controller import BatteryState
+        b = BatteryState(charge_percent=0.30, voltage=7.2, last_updated=time.time())
+        self.ctrl._evaluate_battery_thresholds(b)
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
+    def test_battery_voltage_drop_preempts_movement(self):
+        """Rapid voltage drop during MOVING should preempt."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl._last_battery_voltage = 8.0
+        from misty_controller import BatteryState
+        # Drop of 0.4V (> 0.3V threshold)
+        b = BatteryState(charge_percent=0.40, voltage=7.6, last_updated=time.time())
+        self.ctrl._evaluate_battery_thresholds(b)
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
+    def test_battery_ok_no_preempt_during_movement(self):
+        """Normal battery during MOVING should not preempt."""
+        self.ctrl.set_state(self._State.MOVING)
+        self.ctrl._last_battery_voltage = 8.0
+        from misty_controller import BatteryState
+        b = BatteryState(charge_percent=0.50, voltage=7.9, last_updated=time.time())
+        self.ctrl._evaluate_battery_thresholds(b)
+        self.assertEqual(self.ctrl.get_state(), self._State.MOVING)
+
+    # --- Wake word pause/resume (#53) ---
+
+    def test_start_moving_pauses_wake_word(self):
+        """start_moving should pause the wake word listener."""
+        self.ctrl.set_state(self._State.IDLE)
+        pause_called = []
+        mock_listener = unittest.mock.MagicMock()
+        mock_listener.pause = lambda: pause_called.append(True)
+        self.ctrl._wake_word_listener = mock_listener
+
+        self.ctrl.start_moving(reason="test")
+        self.assertTrue(pause_called)
+
+    def test_stop_moving_resumes_wake_word(self):
+        """stop_moving should resume the wake word listener after settle."""
+        self.ctrl.set_state(self._State.MOVING)
+        resume_called = []
+        mock_listener = unittest.mock.MagicMock()
+        mock_listener.resume = lambda: resume_called.append(True)
+        self.ctrl._wake_word_listener = mock_listener
+        # Override settle time for test speed
+        self.ctrl.MOVEMENT_SETTLE_MS = 10
+
+        self.ctrl.stop_moving(reason="test")
+        time.sleep(0.1)  # allow thread to complete
+        self.assertTrue(resume_called)
+
+
+class TestTeleopEndpoint(unittest.TestCase):
+    """Unit tests for the HTTP teleop endpoint (#51).
+
+    Tests the ControllerAPIHandler's /api/move endpoint logic.
+    These tests call the controller methods directly (not via HTTP),
+    verifying parameter validation and movement commands.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            _ctrl_path = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration")
+            )
+            if _ctrl_path not in sys.path:
+                sys.path.insert(0, _ctrl_path)
+            from misty_controller import MistyController, State
+            cls._MistyController = MistyController
+            cls._State = State
+        except Exception as exc:
+            cls._MistyController = None
+            print(f"[TestTeleopEndpoint] Could not import misty_controller: {exc}")
+
+    def setUp(self):
+        if self._MistyController is None:
+            self.skipTest("misty_controller could not be imported")
+        self.ctrl = self._MistyController()
+        self._post_calls = []
+        self.ctrl.misty_post = lambda endpoint, body=None, timeout=5.0: (
+            self._post_calls.append((endpoint, body)) or {"status": "Success", "result": True}
+        )
+
+    def test_halt_command_immediate(self):
+        """Halt command should issue halt regardless of state."""
+        self.ctrl.halt()
+        halt_calls = [c for c in self._post_calls if c[0] == "/api/halt"]
+        self.assertEqual(len(halt_calls), 1)
+
+    def test_forward_movement_via_drive_time(self):
+        """Forward command should use drive_time with positive velocity."""
+        self.ctrl.set_state(self._State.IDLE)
+        self.ctrl.start_moving(reason="teleop_forward")
+        self.assertEqual(self.ctrl.get_state(), self._State.MOVING)
+        # Execute forward drive
+        self.ctrl.drive_time(20, 0, 1000)
+        drive_calls = [c for c in self._post_calls if c[0] == "/api/drive/time"]
+        self.assertEqual(len(drive_calls), 1)
+        _, body = drive_calls[0]
+        self.assertEqual(body["LinearVelocity"], 20)
+        self.assertEqual(body["AngularVelocity"], 0)
+        self.assertEqual(body["TimeMs"], 1000)
+
+    def test_backward_movement_via_drive_time(self):
+        """Backward command should use drive_time with negative velocity."""
+        self.ctrl.set_state(self._State.IDLE)
+        self.ctrl.start_moving(reason="teleop_backward")
+        self.ctrl.drive_time(-15, 0, 800)
+        drive_calls = [c for c in self._post_calls if c[0] == "/api/drive/time"]
+        self.assertEqual(len(drive_calls), 1)
+        _, body = drive_calls[0]
+        self.assertEqual(body["LinearVelocity"], -15)
+
+    def test_rotate_movement_via_drive_time(self):
+        """Rotate command should use drive_time with angular only."""
+        self.ctrl.set_state(self._State.IDLE)
+        self.ctrl.start_moving(reason="teleop_rotate")
+        self.ctrl.drive_time(0, 20, 1500)
+        drive_calls = [c for c in self._post_calls if c[0] == "/api/drive/time"]
+        _, body = drive_calls[0]
+        self.assertEqual(body["LinearVelocity"], 0)
+        self.assertEqual(body["AngularVelocity"], 20)
+
+    def test_cannot_move_when_not_idle(self):
+        """Movement should be rejected when not in IDLE state."""
+        self.ctrl.set_state(self._State.RECORDING)
+        result = self.ctrl.start_moving(reason="teleop")
+        self.assertFalse(result)
+
+    def test_speed_clamped_to_max(self):
+        """Speed above max should be clamped by drive methods."""
+        self.ctrl.set_state(self._State.IDLE)
+        self.ctrl.start_moving(reason="test")
+        self.ctrl.drive_time(50, 0, 1000)  # 50 > max 30
+        drive_calls = [c for c in self._post_calls if c[0] == "/api/drive/time"]
+        _, body = drive_calls[0]
+        self.assertEqual(body["LinearVelocity"], self.ctrl.DRIVE_MAX_LINEAR_PCT)
+
+    def test_sensors_endpoint_returns_snapshot(self):
+        """get_hazard_snapshot should return usable data for /api/sensors."""
+        snapshot = self.ctrl.get_hazard_snapshot()
+        self.assertIn("tof_readings", snapshot)
+        self.assertIn("bump_states", snapshot)
+        self.assertIn("active_hazards", snapshot)
+        self.assertEqual(len(snapshot["tof_readings"]), 8)
+
+
+class TestSpeakMoveIntegration(unittest.TestCase):
+    """Unit tests for combined speak + move responses (#56).
+
+    Validates that movement responses from orchestration are correctly
+    detected, acknowledgment audio is played, and movement is executed.
+    Uses mocked HTTP and state machine.
+    """
+
+    _ctrl = None
+    _ctrl_mod = None
+    _State = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            _ctrl_path = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration")
+            )
+            if _ctrl_path not in sys.path:
+                sys.path.insert(0, _ctrl_path)
+            import misty_controller as _ctrl_mod
+            cls._ctrl_mod = _ctrl_mod
+            cls._State = _ctrl_mod.State
+        except Exception as e:
+            raise unittest.SkipTest(f"Cannot import misty_controller: {e}")
+
+    def setUp(self):
+        """Create controller with mocked HTTP and WebSocket."""
+        self._post_calls = []
+
+        def mock_post(path, body=None, timeout=None):
+            self._post_calls.append((path, body))
+            return {"status": "Success"}
+
+        self.ctrl = self._ctrl_mod.MistyController.__new__(self._ctrl_mod.MistyController)
+        self.ctrl.misty_ip = "10.0.0.99"
+        self.ctrl.state = self._State.IDLE
+        self.ctrl.state_lock = threading.Lock()
+        self.ctrl.battery = self._ctrl_mod.BatteryState()
+        self.ctrl.battery_lock = threading.Lock()
+        self.ctrl.battery.charge_percent = 0.50
+        self.ctrl.battery.voltage = 8.0
+        self.ctrl.battery.last_updated = time.time()
+        self.ctrl.hazard = self._ctrl_mod.HazardState()
+        self.ctrl.hazard_lock = threading.Lock()
+        self.ctrl.last_activity_time = time.time()
+        self.ctrl._wake_word_listener = None
+        self.ctrl.misty_post = mock_post
+        self.ctrl.DRIVE_MAX_DURATION_MS = 3000
+        self.ctrl.MOVEMENT_SETTLE_MS = 100  # fast for tests
+
+    # --- _do_orchestrate_and_respond movement detection ---
+
+    def test_movement_response_detected(self):
+        """When orchestrate returns type=movement, return dict with movement info."""
+        movement_result = {
+            "status": "ok",
+            "type": "movement",
+            "movement": {"command": "forward"},
+            "user_text": "come here",
+            "response_text": "On my way!",
+            "pipeline_ms": 150,
+        }
+        # Mock requests.post and requests.get
+        import unittest.mock as mock
+        mock_resp = mock.MagicMock()
+        mock_resp.json.return_value = movement_result
+        mock_resp.status_code = 200
+
+        with mock.patch("requests.post", return_value=mock_resp):
+            result = self.ctrl._do_orchestrate_and_respond(1, b"fake_audio", time.time())
+
+        self.assertIsInstance(result, dict)
+        self.assertTrue(result["had_speech"])
+        self.assertEqual(result["movement"]["command"], "forward")
+
+    def test_normal_response_returns_true(self):
+        """Normal conversational response should return True (not a dict)."""
+        normal_result = {
+            "status": "ok",
+            "transcribedText": "hello",
+            "inferenceResponse": "Hi there!",
+            "responseAudio": "/api/audio/resp.wav",
+            "latencyMs": 500,
+        }
+        import unittest.mock as mock
+        mock_post_resp = mock.MagicMock()
+        mock_post_resp.json.return_value = normal_result
+        mock_post_resp.status_code = 200
+
+        mock_get_resp = mock.MagicMock()
+        mock_get_resp.content = b"\x00" * 1000  # fake WAV data
+        mock_get_resp.raise_for_status = mock.MagicMock()
+
+        # Mock upload_and_play_audio to return short duration
+        self.ctrl.upload_and_play_audio = mock.MagicMock(return_value=0.1)
+        self.ctrl.set_led = mock.MagicMock()
+        self.ctrl.display_image = mock.MagicMock()
+        self.ctrl.move_head = mock.MagicMock()
+
+        with mock.patch("requests.post", return_value=mock_post_resp), \
+             mock.patch("requests.get", return_value=mock_get_resp), \
+             mock.patch("time.sleep"):
+            result = self.ctrl._do_orchestrate_and_respond(1, b"fake", time.time())
+
+        self.assertTrue(result)
+        self.assertNotIsInstance(result, dict)
+
+    def test_empty_stt_returns_false(self):
+        """Empty STT should return False."""
+        import unittest.mock as mock
+        mock_resp = mock.MagicMock()
+        mock_resp.json.return_value = {"status": "error", "error": "empty_stt"}
+        mock_resp.status_code = 400
+
+        with mock.patch("requests.post", return_value=mock_resp):
+            result = self.ctrl._do_orchestrate_and_respond(1, b"fake", time.time())
+
+        self.assertFalse(result)
+
+    # --- _execute_voice_movement ---
+
+    def test_voice_movement_forward(self):
+        """Voice forward command should call drive_time with positive linear."""
+        import unittest.mock as mock
+
+        self.ctrl.set_led = mock.MagicMock()
+        self.ctrl.display_image = mock.MagicMock()
+        self.ctrl.halt = mock.MagicMock()
+        self.ctrl.drive_time = mock.MagicMock()
+
+        movement = {"command": "forward", "distance_mm": 200, "speed_pct": 20}
+        self.ctrl._execute_voice_movement(1, movement)
+
+        # Should have called drive_time with positive linear velocity
+        self.ctrl.drive_time.assert_called_once()
+        args = self.ctrl.drive_time.call_args[0]
+        self.assertGreater(args[0], 0)  # positive linear
+        self.assertEqual(args[1], 0)     # no angular
+
+    def test_voice_movement_stop_halts_immediately(self):
+        """Voice stop command should halt immediately without state transition."""
+        import unittest.mock as mock
+        self.ctrl.halt = mock.MagicMock()
+        self.ctrl._execute_voice_movement(1, {"command": "stop"})
+        self.ctrl.halt.assert_called_once()
+
+    def test_voice_movement_blocked_by_hazard(self):
+        """Voice movement should be blocked when hazards are active."""
+        import unittest.mock as mock
+
+        self.ctrl.set_led = mock.MagicMock()
+        self.ctrl.display_image = mock.MagicMock()
+
+        # Set active hazard
+        with self.ctrl.hazard_lock:
+            self.ctrl.hazard.active_hazards = ["TOF_FrontCenter"]
+
+        self.ctrl._speak_movement_failure = mock.MagicMock()
+        self.ctrl._execute_voice_movement(1, {"command": "forward"})
+
+        # Should have called failure speech, not drive
+        self.ctrl._speak_movement_failure.assert_called_once()
+
+    def test_voice_movement_clamps_speed(self):
+        """Voice movement should clamp speed to DRIVE_MAX_LINEAR_PCT."""
+        import unittest.mock as mock
+
+        self.ctrl.set_led = mock.MagicMock()
+        self.ctrl.display_image = mock.MagicMock()
+        self.ctrl.halt = mock.MagicMock()
+        self.ctrl.drive_time = mock.MagicMock()
+
+        # Request 50% speed — should be clamped to DRIVE_MAX_LINEAR_PCT (30)
+        movement = {"command": "forward", "distance_mm": 200, "speed_pct": 50}
+        self.ctrl._execute_voice_movement(1, movement)
+
+        # The speed_pct clamped internally, but drive_time gets the clamped value
+        self.ctrl.drive_time.assert_called_once()
+        args = self.ctrl.drive_time.call_args[0]
+        self.assertLessEqual(args[0], self._ctrl_mod.MistyController.DRIVE_MAX_LINEAR_PCT)
+
+    def test_voice_movement_backward(self):
+        """Voice backward command should use negative linear velocity."""
+        import unittest.mock as mock
+
+        self.ctrl.set_led = mock.MagicMock()
+        self.ctrl.display_image = mock.MagicMock()
+        self.ctrl.halt = mock.MagicMock()
+        self.ctrl.drive_time = mock.MagicMock()
+
+        self.ctrl._execute_voice_movement(1, {"command": "backward", "distance_mm": 150})
+
+        self.ctrl.drive_time.assert_called_once()
+        args = self.ctrl.drive_time.call_args[0]
+        self.assertLess(args[0], 0)  # negative linear
+
+    def test_voice_movement_rotate(self):
+        """Voice rotate command should use angular velocity, zero linear."""
+        import unittest.mock as mock
+
+        self.ctrl.set_led = mock.MagicMock()
+        self.ctrl.display_image = mock.MagicMock()
+        self.ctrl.halt = mock.MagicMock()
+        self.ctrl.drive_time = mock.MagicMock()
+
+        self.ctrl._execute_voice_movement(1, {"command": "rotate_left", "angle_deg": 90})
+
+        self.ctrl.drive_time.assert_called_once()
+        args = self.ctrl.drive_time.call_args[0]
+        self.assertEqual(args[0], 0)     # no linear
+        self.assertGreater(args[1], 0)   # positive angular
+
+    # --- _wait_for_move_completion ---
+
+    def test_wait_for_move_returns_false_on_normal_completion(self):
+        """Should return False (not preempted) if state stays MOVING until timeout."""
+        self.ctrl.set_state(self._State.MOVING)
+        result = self.ctrl._wait_for_move_completion(0.3)
+        self.assertFalse(result)  # completed normally
+
+    def test_wait_for_move_returns_true_on_preemption(self):
+        """Should return True if state changes from MOVING (preempted)."""
+        self.ctrl.set_state(self._State.MOVING)
+
+        def preempt_after_delay():
+            time.sleep(0.1)
+            self.ctrl.set_state(self._State.IDLE)
+
+        threading.Thread(target=preempt_after_delay, daemon=True).start()
+        result = self.ctrl._wait_for_move_completion(2.0)
+        self.assertTrue(result)  # preempted
+
+    # --- State machine transition tests (Plan 3.3 from #60) ---
+
+    def test_move_rejected_during_recording(self):
+        """Move should be rejected when state is RECORDING (Plan 3.3)."""
+        self.ctrl.set_state(self._State.RECORDING)
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+        self.assertEqual(self.ctrl.get_state(), self._State.RECORDING)
+
+    def test_move_rejected_during_playing(self):
+        """Move should be rejected when state is PLAYING (Plan 3.3)."""
+        self.ctrl.set_state(self._State.PLAYING)
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+        self.assertEqual(self.ctrl.get_state(), self._State.PLAYING)
+
+    def test_move_rejected_during_processing(self):
+        """Move should be rejected when state is PROCESSING."""
+        self.ctrl.set_state(self._State.PROCESSING)
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+
+    def test_move_rejected_during_rearming(self):
+        """Move should be rejected when state is REARMING."""
+        self.ctrl.set_state(self._State.REARMING)
+        result = self.ctrl.start_moving(reason="test")
+        self.assertFalse(result)
+
+    def test_idle_to_moving_to_idle_clean_cycle(self):
+        """Full IDLE -> MOVING -> IDLE cycle (Plan 3.3)."""
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+        ok = self.ctrl.start_moving(reason="test")
+        self.assertTrue(ok)
+        self.assertEqual(self.ctrl.get_state(), self._State.MOVING)
+        self.ctrl.stop_moving(reason="complete")
+        self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
+
+    def test_sequential_move_cycles(self):
+        """Multiple IDLE -> MOVING -> IDLE cycles should all succeed."""
+        for i in range(3):
+            self.ctrl.set_state(self._State.IDLE)
+            ok = self.ctrl.start_moving(reason=f"cycle_{i}")
+            self.assertTrue(ok, f"Cycle {i} failed to start")
+            self.ctrl.stop_moving(reason="complete")
+            self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
 
 
 if __name__ == "__main__":

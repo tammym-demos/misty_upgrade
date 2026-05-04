@@ -65,6 +65,12 @@ BATTERY_RESUME = 0.25         # exit charging mode (must also be charging)
 BATTERY_TEMP_WARN_C = 45.0    # log warning
 BATTERY_TEMP_THROTTLE_C = 50.0  # add delay between turns
 
+# Movement-specific battery thresholds (#52)
+BATTERY_MOVEMENT_CUTOFF = 0.25     # deny movement below 25% (motors draw heavy current)
+BATTERY_MOVEMENT_VOLTAGE_MIN = 7.5  # deny movement below 7.5V (near abrupt shutdown ~7V)
+BATTERY_SLAM_CUTOFF = 0.35         # deny SLAM below 35% (memory-intensive)
+BATTERY_VOLTAGE_DROP_HALT = 0.3    # halt if voltage drops >0.3V between readings (load-induced sag)
+
 # Idle timeout
 IDLE_TIMEOUT_S = float(os.getenv("IDLE_TIMEOUT_S", "900"))  # 15 minutes
 
@@ -103,6 +109,66 @@ class BatteryState:
 
 
 # ============================================================================
+# HAZARD / SENSOR TELEMETRY (#49)
+# ============================================================================
+
+# ToF sensor positions on Misty (from docs)
+TOF_SENSORS = {
+    "toffc": "front_center",      # front center
+    "toffr": "front_right",       # front right
+    "toffl": "front_left",        # front left
+    "tofr": "rear",               # rear center
+    "tofdfc": "edge_front_center",  # downward front center (edge)
+    "tofdfr": "edge_front_right",   # downward front right (edge)
+    "tofdfl": "edge_front_left",    # downward front left (edge)
+    "tofdr": "edge_rear",           # downward rear (edge)
+}
+
+# Direction → required sensors for movement safety
+TOF_FORWARD_SENSORS = {"toffc", "toffr", "toffl", "tofdfc", "tofdfr", "tofdfl"}
+TOF_REVERSE_SENSORS = {"tofr", "tofdr"}
+TOF_EDGE_SENSORS = {"tofdfc", "tofdfr", "tofdfl", "tofdr"}
+
+# Telemetry watchdog — per-sensor freshness during movement
+TELEMETRY_STALE_TIMEOUT_S = 1.0  # sensor data older than this = stale (halt if moving)
+
+
+@dataclass
+class ToFReading:
+    """Single Time-of-Flight sensor reading."""
+    sensor_id: str = ""           # e.g., "toffc"
+    distance_mm: float = 0.0     # millimeters (0 = invalid/no return)
+    status: int = 0              # 0=valid, 100-class=warn, 200-class=error
+    is_valid: bool = False       # True only if status indicates reliable reading
+    last_updated: float = 0.0   # time.time()
+
+
+@dataclass
+class HazardState:
+    """Aggregated hazard/sensor state for safety decision-making."""
+    # Active hazards from HazardNotification events
+    active_hazards: list = None       # list of hazard dicts from last event
+    last_hazard_time: float = 0.0     # when last HazardNotification arrived
+    hazard_halt_issued: bool = False  # True if we auto-halted due to hazard
+
+    # Per-sensor ToF readings (keyed by sensor_id, e.g., "toffc")
+    tof_readings: dict = None         # {sensor_id: ToFReading}
+
+    # Bump sensor states (keyed by sensor position)
+    bump_states: dict = None          # {sensor_name: {"is_pressed": bool, "last_updated": float}}
+    last_bump_time: float = 0.0       # when last BumpSensor event arrived
+    any_bump_active: bool = False     # True if any bump sensor is currently pressed
+
+    def __post_init__(self):
+        if self.active_hazards is None:
+            self.active_hazards = []
+        if self.tof_readings is None:
+            self.tof_readings = {sid: ToFReading(sensor_id=sid) for sid in TOF_SENSORS}
+        if self.bump_states is None:
+            self.bump_states = {}
+
+
+# ============================================================================
 # STATE MACHINE
 # ============================================================================
 
@@ -113,10 +179,24 @@ class State(Enum):
     PROCESSING = "PROCESSING"
     PLAYING = "PLAYING"
     LISTENING = "LISTENING"  # follow-up listening after response
+    MOVING = "MOVING"        # robot is in motion (#50)
     REARMING = "REARMING"
     REBOOTING = "REBOOTING"  # proactive reboot in progress (#22)
     CHARGING = "CHARGING"
     ERROR = "ERROR"
+
+
+# Movement preemption priority (highest priority first) — determines what can
+# interrupt an active movement command. (#50)
+PREEMPTION_PRIORITY = [
+    "hazard_stop",       # firmware-level HazardNotification (auto-halts motors)
+    "battery_critical",  # battery < BATTERY_LOW_CRITICAL
+    "emergency_halt",    # explicit halt() call (e.g., from teleop kill switch)
+    "bump_contact",      # physical bump sensor contact
+    "telemetry_stale",   # safety sensors went dark (fail closed)
+    "wake_word",         # user wants to talk — stop and listen
+    "move_complete",     # normal movement completion
+]
 
 
 class MistyController:
@@ -151,6 +231,10 @@ class MistyController:
         # Proactive reboot — counts successful conversation cycles (wake→response→rearm)
         self._conversation_cycles = 0
         self._recording_cycles = 0  # total recordings since last reboot
+
+        # Hazard / sensor telemetry (#49)
+        self.hazard = HazardState()
+        self.hazard_lock = threading.Lock()
 
     # --- State transitions ---
 
@@ -319,6 +403,229 @@ class MistyController:
             "TimeMs": time_ms,
             "Reverse": reverse,
         })
+
+    # --- Movement Lifecycle (#50) ---
+
+    # Settle time after motors stop before resuming audio (#53)
+    MOVEMENT_SETTLE_MS = 500  # ms to wait after halt before resuming wake word
+
+    def _safe_halt(self, reason: str = "unknown"):
+        """Stop all motors safely. Called before any transition FROM MOVING state.
+
+        This is the single choke point for movement termination — ensures motors
+        are always stopped regardless of why movement ended.
+        """
+        logger.warning(f"Safe halt: reason={reason}")
+        self.halt()
+
+    def _pause_wake_word_for_movement(self):
+        """Pause wake word listener during movement (motor noise interference, #53)."""
+        if self._wake_word_listener:
+            self._wake_word_listener.pause()
+            logger.info("Wake word paused for movement")
+
+    def _resume_wake_word_after_movement(self):
+        """Resume wake word listener after movement + settle time (#53)."""
+        time.sleep(self.MOVEMENT_SETTLE_MS / 1000.0)
+        if self._wake_word_listener:
+            self._wake_word_listener.resume()
+            logger.info("Wake word resumed after movement")
+
+    def start_moving(self, reason: str = "command") -> bool:
+        """Transition to MOVING state if safe to do so.
+
+        Pre-checks:
+        - Must be in IDLE state
+        - No active hazards
+        - No active bump contacts
+        - Battery above movement cutoff (25% or 7.5V) (#52)
+
+        Returns True if transition succeeded, False if blocked.
+        """
+        # Pre-flight safety checks
+        with self.hazard_lock:
+            if self.hazard.active_hazards:
+                logger.warning(f"Cannot start moving: active hazards ({len(self.hazard.active_hazards)})")
+                return False
+            if self.hazard.any_bump_active:
+                logger.warning("Cannot start moving: bump sensor active")
+                return False
+
+        with self.battery_lock:
+            if self.battery.last_updated > 0:
+                if self.battery.charge_percent < BATTERY_MOVEMENT_CUTOFF:
+                    logger.warning(f"Cannot start moving: battery too low for movement "
+                                   f"({self.battery.charge_percent*100:.0f}% < {BATTERY_MOVEMENT_CUTOFF*100:.0f}%)")
+                    return False
+                if self.battery.voltage > 0 and self.battery.voltage < BATTERY_MOVEMENT_VOLTAGE_MIN:
+                    logger.warning(f"Cannot start moving: voltage too low "
+                                   f"({self.battery.voltage:.1f}V < {BATTERY_MOVEMENT_VOLTAGE_MIN}V)")
+                    return False
+
+        # Atomic state transition
+        if not self.try_set_state(State.IDLE, State.MOVING):
+            current = self.get_state()
+            logger.warning(f"Cannot start moving: not IDLE (state={current.value})")
+            return False
+
+        # Pause wake word — motor noise interferes with detection (#53)
+        self._pause_wake_word_for_movement()
+
+        logger.info(f"MOVING: started (reason={reason})")
+        return True
+
+    def stop_moving(self, reason: str = "complete"):
+        """Transition from MOVING back to IDLE, halting motors first.
+
+        Args:
+            reason: Why movement is stopping (for logging/telemetry).
+                    One of PREEMPTION_PRIORITY values or custom string.
+        """
+        if self.get_state() != State.MOVING:
+            return
+
+        self._safe_halt(reason)
+        self.set_state(State.IDLE)
+        self.last_activity_time = time.time()
+        logger.info(f"Movement stopped: reason={reason}")
+
+        # Resume wake word after settle time (non-blocking, #53)
+        threading.Thread(
+            target=self._resume_wake_word_after_movement,
+            name="resume-wake-post-move",
+            daemon=True,
+        ).start()
+
+    def preempt_movement(self, reason: str):
+        """Force-stop movement due to higher-priority event.
+
+        Unlike stop_moving(), this can be called from any thread (e.g., WS event
+        handler) and will interrupt in-progress movement immediately.
+        """
+        with self.state_lock:
+            if self.state != State.MOVING:
+                return
+            self.state = State.IDLE
+        logger.warning(f"Movement PREEMPTED: {reason}")
+        self._safe_halt(reason)
+        self.last_activity_time = time.time()
+
+        # Resume wake word after settle time (non-blocking, #53)
+        threading.Thread(
+            target=self._resume_wake_word_after_movement,
+            name="resume-wake-preempt",
+            daemon=True,
+        ).start()
+
+    def _execute_voice_movement(self, turn: int, movement: dict):
+        """Execute a voice-triggered movement command (#56).
+
+        Called after the acknowledgment audio has already been played.
+        Transitions IDLE → MOVING, executes the command, then returns.
+        On hazard preemption, generates verbal feedback ("something's in my way!").
+
+        Args:
+            turn: Current conversation turn number (for logging).
+            movement: Movement command dict from orchestration service
+                      (keys: "command", optionally "distance_mm", "speed_pct", "angle_deg").
+        """
+        command = movement.get("command", "")
+        distance_mm = movement.get("distance_mm", 200)
+        speed_pct = movement.get("speed_pct", 20)
+        angle_deg = movement.get("angle_deg", 90)
+
+        # Clamp to safe bounds (same as teleop endpoint)
+        distance_mm = max(50, min(500, distance_mm))
+        speed_pct = max(5, min(int(self.DRIVE_MAX_LINEAR_PCT), speed_pct))
+        angle_deg = max(10, min(180, angle_deg))
+
+        if command == "stop":
+            self.halt()
+            logger.info(f"[Turn {turn}] Voice halt executed")
+            return
+
+        # Transition to IDLE first (we're in PLAYING after the ack audio)
+        self.set_state(State.IDLE)
+        time.sleep(0.3)  # brief settle
+
+        # Enter MOVING state (pre-flight checks: hazards, battery, etc.)
+        if not self.start_moving(reason=f"voice_{command}"):
+            logger.warning(f"[Turn {turn}] Cannot execute voice movement — blocked by safety checks")
+            self._speak_movement_failure(turn, "I can't move right now. Something's blocking me.")
+            return
+
+        # Visual feedback — orange LED + adventurous face
+        self.set_led(255, 165, 0)  # orange = moving
+        self.display_image("e_Joy2.jpg")
+
+        try:
+            if command in ("forward", "backward"):
+                velocity_mms = (speed_pct / 100.0) * 450.0
+                duration_ms = int((distance_mm / velocity_mms) * 1000)
+                duration_ms = max(100, min(self.DRIVE_MAX_DURATION_MS, duration_ms))
+                linear = speed_pct if command == "forward" else -speed_pct
+                self.drive_time(linear, 0, duration_ms)
+
+                # Wait for completion, checking for preemption
+                wait_s = duration_ms / 1000.0 + 0.5
+                preempted = self._wait_for_move_completion(wait_s)
+                if preempted:
+                    self._speak_movement_failure(turn, "Oops, something's in my way!")
+                    return
+
+            elif command in ("rotate_left", "rotate_right"):
+                angular_rate = (speed_pct / 100.0) * 150.0
+                duration_ms = int((angle_deg / angular_rate) * 1000)
+                duration_ms = max(100, min(self.DRIVE_MAX_DURATION_MS, duration_ms))
+                angular = speed_pct if command == "rotate_left" else -speed_pct
+                self.drive_time(0, angular, duration_ms)
+
+                wait_s = duration_ms / 1000.0 + 0.5
+                preempted = self._wait_for_move_completion(wait_s)
+                if preempted:
+                    self._speak_movement_failure(turn, "Oops, something's in my way!")
+                    return
+            else:
+                logger.warning(f"[Turn {turn}] Unknown voice movement command: {command}")
+                return
+
+            logger.info(f"[Turn {turn}] Voice movement complete: {command}")
+
+        except Exception as e:
+            logger.error(f"[Turn {turn}] Voice movement error: {e}", exc_info=True)
+        finally:
+            if self.get_state() == State.MOVING:
+                self.stop_moving(reason="voice_move_complete")
+
+    def _wait_for_move_completion(self, timeout_s: float) -> bool:
+        """Wait for movement to finish, checking for preemption.
+
+        Returns True if movement was preempted (state changed from MOVING),
+        False if movement completed normally.
+        """
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if self.get_state() != State.MOVING:
+                return True  # preempted
+            time.sleep(0.1)
+        return False  # completed normally
+
+    def _speak_movement_failure(self, turn: int, text: str):
+        """Generate and play a verbal notification about movement failure (#56)."""
+        try:
+            response = requests.post(
+                f"{ORCHESTRATION_URL}/api/tts",
+                json={"text": text},
+                timeout=10.0,
+            )
+            if response.status_code == 200 and len(response.content) > 100:
+                self.set_state(State.PLAYING)
+                self.set_led(255, 255, 0)  # yellow = warning
+                self.display_image("e_Sadness.jpg")
+                play_duration = self.upload_and_play_audio(response.content, RESPONSE_FILENAME)
+                time.sleep(play_duration + 1.0)
+        except Exception as e:
+            logger.warning(f"[Turn {turn}] Movement failure speech failed: {e}")
 
     def start_keyphrase(self, force_restart=False):
         if force_restart:
@@ -527,10 +834,36 @@ class MistyController:
         """Check battery levels and trigger state changes as needed."""
         # Critical: auto-enter charging mode (atomic transition)
         if b.charge_percent < BATTERY_LOW_CRITICAL:
+            # If moving, preempt first
+            if self.get_state() == State.MOVING:
+                self.preempt_movement("battery_critical")
             if self.try_set_state(State.IDLE, State.CHARGING):
                 logger.warning(f"Battery critically low ({b.charge_percent*100:.0f}%) — entering charging mode")
                 self._apply_charging_mode()
             return
+
+        # Movement-specific: halt if battery drops below movement threshold (#52)
+        if self.get_state() == State.MOVING:
+            if b.charge_percent < BATTERY_MOVEMENT_CUTOFF:
+                logger.warning(f"Battery below movement cutoff during MOVING "
+                               f"({b.charge_percent*100:.0f}% < {BATTERY_MOVEMENT_CUTOFF*100:.0f}%)")
+                self.preempt_movement("battery_critical")
+                return
+            if b.voltage > 0 and b.voltage < BATTERY_MOVEMENT_VOLTAGE_MIN:
+                logger.warning(f"Voltage below movement minimum during MOVING "
+                               f"({b.voltage:.1f}V < {BATTERY_MOVEMENT_VOLTAGE_MIN}V)")
+                self.preempt_movement("battery_critical")
+                return
+
+        # Voltage drop detection: halt movement if voltage sags rapidly (#52)
+        if self.get_state() == State.MOVING and b.voltage > 0:
+            last_voltage = getattr(self, '_last_battery_voltage', 0.0)
+            if last_voltage > 0 and (last_voltage - b.voltage) > BATTERY_VOLTAGE_DROP_HALT:
+                logger.warning(f"Rapid voltage drop detected during movement: "
+                               f"{last_voltage:.2f}V → {b.voltage:.2f}V (drop={last_voltage - b.voltage:.2f}V)")
+                self.preempt_movement("battery_critical")
+        if b.voltage > 0:
+            self._last_battery_voltage = b.voltage
 
         # Exit charging mode when sufficiently charged (charge level alone, no is_charging requirement)
         if self.get_state() == State.CHARGING and b.charge_percent >= BATTERY_RESUME:
@@ -550,6 +883,185 @@ class MistyController:
         """Restore green LED after low-battery warning flash (runs on timer thread)."""
         if self.get_state() == State.IDLE:
             self.set_led(0, 255, 0)
+
+    # --- Hazard / Sensor Telemetry Event Handlers (#49) ---
+
+    def _handle_hazard_event(self, data: dict):
+        """Handle HazardNotification — firmware-level safety alert.
+
+        The firmware auto-stops motors on hazard, but we need to update our state
+        and log the event for safety decisions.
+        """
+        now = time.time()
+        # Extract hazard details from event data
+        # HazardNotification contains arrays of sensors that triggered
+        bump_hazards = data.get("bumpSensorsHazardState", [])
+        tof_hazards = data.get("timeOfFlightSensorsHazardState", [])
+
+        hazards = []
+        for sensor in bump_hazards:
+            if sensor.get("inHazard", False):
+                hazards.append({"type": "bump", "sensor": sensor.get("sensorName", "unknown")})
+        for sensor in tof_hazards:
+            if sensor.get("inHazard", False):
+                hazards.append({
+                    "type": "tof",
+                    "sensor": sensor.get("sensorName", "unknown"),
+                    "distance_mm": sensor.get("distance", 0),
+                })
+
+        with self.hazard_lock:
+            self.hazard.active_hazards = hazards
+            self.hazard.last_hazard_time = now
+            if hazards:
+                self.hazard.hazard_halt_issued = True
+
+        if hazards:
+            logger.warning(f"HAZARD: {len(hazards)} active — {hazards}")
+            # Preempt movement if in MOVING state (firmware already halted motors,
+            # but we need to update our state machine)
+            if self.get_state() == State.MOVING:
+                self.preempt_movement("hazard_stop")
+        else:
+            # Hazard cleared
+            with self.hazard_lock:
+                self.hazard.hazard_halt_issued = False
+            logger.info("Hazard cleared — all sensors nominal")
+
+    def _handle_tof_event(self, data: dict):
+        """Handle TimeOfFlight — raw distance reading from a single sensor.
+
+        Updates per-sensor state. Only logs significant changes (DEBUG level for routine).
+        """
+        sensor_id = data.get("sensorId", "").lower()
+        if sensor_id not in TOF_SENSORS:
+            return
+
+        distance_mm = data.get("distanceInMeters", 0) * 1000  # API returns meters
+        status = data.get("status", 0)
+        # Status 0 = valid ranging, 2 = ranging complete. Status >= 100 = reduced confidence.
+        is_valid = status in (0, 2)
+
+        now = time.time()
+        with self.hazard_lock:
+            reading = self.hazard.tof_readings[sensor_id]
+            old_valid = reading.is_valid
+            old_distance = reading.distance_mm
+
+            reading.distance_mm = distance_mm
+            reading.status = status
+            reading.is_valid = is_valid
+            reading.last_updated = now
+
+        # Log only transitions: sensor going invalid, or close obstacles
+        if is_valid and not old_valid:
+            logger.debug(f"ToF {sensor_id} recovered (status={status}, dist={distance_mm:.0f}mm)")
+        elif not is_valid and old_valid:
+            logger.info(f"ToF {sensor_id} degraded (status={status})")
+        elif is_valid and distance_mm < 200 and (old_distance >= 200 or not old_valid):
+            logger.info(f"ToF {sensor_id} close obstacle: {distance_mm:.0f}mm")
+
+    def _handle_bump_event(self, data: dict):
+        """Handle BumpSensor — physical contact detection.
+
+        On bump contact: log and set state. Firmware auto-halts on bump.
+        """
+        sensor_name = data.get("sensorName", "unknown")
+        is_pressed = data.get("isContacted", False)
+        now = time.time()
+
+        with self.hazard_lock:
+            self.hazard.bump_states[sensor_name] = {
+                "is_pressed": is_pressed,
+                "last_updated": now,
+            }
+            self.hazard.last_bump_time = now
+            self.hazard.any_bump_active = any(
+                s.get("is_pressed", False)
+                for s in self.hazard.bump_states.values()
+            )
+
+        if is_pressed:
+            logger.warning(f"BUMP: {sensor_name} contacted")
+            # Preempt movement if in MOVING state
+            if self.get_state() == State.MOVING:
+                self.preempt_movement("bump_contact")
+        else:
+            logger.info(f"Bump released: {sensor_name}")
+
+    def get_hazard_snapshot(self) -> dict:
+        """Thread-safe snapshot of current hazard/sensor state for decision-making."""
+        with self.hazard_lock:
+            return {
+                "active_hazards": list(self.hazard.active_hazards),
+                "last_hazard_time": self.hazard.last_hazard_time,
+                "hazard_halt_issued": self.hazard.hazard_halt_issued,
+                "any_bump_active": self.hazard.any_bump_active,
+                "last_bump_time": self.hazard.last_bump_time,
+                "tof_readings": {
+                    sid: {
+                        "distance_mm": r.distance_mm,
+                        "status": r.status,
+                        "is_valid": r.is_valid,
+                        "last_updated": r.last_updated,
+                        "friendly_name": TOF_SENSORS[sid],
+                    }
+                    for sid, r in self.hazard.tof_readings.items()
+                },
+                "bump_states": dict(self.hazard.bump_states),
+            }
+
+    def check_forward_clear(self, min_distance_mm: float = 200.0) -> bool:
+        """Check if forward path is clear based on ToF readings.
+
+        Returns True if all valid forward sensors report distance > min_distance_mm.
+        Returns False if any forward sensor reports close obstacle or is stale/invalid.
+        """
+        now = time.time()
+        with self.hazard_lock:
+            for sid in TOF_FORWARD_SENSORS:
+                reading = self.hazard.tof_readings[sid]
+                # Stale data = not clear (fail closed)
+                if now - reading.last_updated > TELEMETRY_STALE_TIMEOUT_S:
+                    return False
+                # Invalid reading = not clear (fail closed)
+                if not reading.is_valid:
+                    return False
+                # Only check horizontal sensors (not edge/downward) for distance
+                if sid in ("toffc", "toffr", "toffl"):
+                    if reading.distance_mm < min_distance_mm:
+                        return False
+            return True
+
+    def check_reverse_clear(self, min_distance_mm: float = 200.0) -> bool:
+        """Check if reverse path is clear based on rear ToF readings."""
+        now = time.time()
+        with self.hazard_lock:
+            for sid in TOF_REVERSE_SENSORS:
+                reading = self.hazard.tof_readings[sid]
+                if now - reading.last_updated > TELEMETRY_STALE_TIMEOUT_S:
+                    return False
+                if not reading.is_valid:
+                    return False
+                if sid == "tofr":
+                    if reading.distance_mm < min_distance_mm:
+                        return False
+            return True
+
+    def check_sensors_fresh(self, sensor_ids: set = None) -> bool:
+        """Check if specified sensors have fresh data (within TELEMETRY_STALE_TIMEOUT_S).
+
+        Args:
+            sensor_ids: Set of sensor IDs to check. If None, checks all sensors.
+        """
+        now = time.time()
+        check_ids = sensor_ids or set(TOF_SENSORS.keys())
+        with self.hazard_lock:
+            for sid in check_ids:
+                reading = self.hazard.tof_readings.get(sid)
+                if not reading or now - reading.last_updated > TELEMETRY_STALE_TIMEOUT_S:
+                    return False
+            return True
 
     # --- Keyphrase watchdog ---
 
@@ -766,11 +1278,89 @@ class MistyController:
             self.ws.send(msg)
             logger.info(f"Subscribed to BatteryCharge events (name={self._battery_event_name})")
 
+    # --- Hazard / Safety Telemetry Subscriptions (#49) ---
+
+    def _ws_subscribe_hazard(self):
+        """Subscribe to HazardNotification — firmware-level safety alerts."""
+        if self.ws:
+            prev = getattr(self, '_hazard_event_name', None)
+            self._hazard_event_name = f"Hazard_{time.time_ns()}"
+
+            for old_name in ["Hazard", prev or '']:
+                if old_name:
+                    unsub = json.dumps({"Operation": "unsubscribe", "EventName": old_name})
+                    self.ws.send(unsub)
+            time.sleep(0.2)
+
+            msg = json.dumps({
+                "Operation": "subscribe",
+                "Type": "HazardNotification",
+                "DebounceMs": 0,  # safety-critical: every event matters
+                "EventName": self._hazard_event_name,
+                "ReturnProperty": None,
+                "EventConditions": [],
+            })
+            self.ws.send(msg)
+            logger.info(f"Subscribed to HazardNotification (name={self._hazard_event_name})")
+
+    def _ws_subscribe_tof(self):
+        """Subscribe to TimeOfFlight — raw distance readings from 8 sensors."""
+        if self.ws:
+            prev = getattr(self, '_tof_event_name', None)
+            self._tof_event_name = f"ToF_{time.time_ns()}"
+
+            for old_name in ["ToF", prev or '']:
+                if old_name:
+                    unsub = json.dumps({"Operation": "unsubscribe", "EventName": old_name})
+                    self.ws.send(unsub)
+            time.sleep(0.2)
+
+            msg = json.dumps({
+                "Operation": "subscribe",
+                "Type": "TimeOfFlight",
+                "DebounceMs": 250,  # 4 Hz per sensor — advisory, not primary safety
+                "EventName": self._tof_event_name,
+                "ReturnProperty": None,
+                "EventConditions": [],
+            })
+            self.ws.send(msg)
+            logger.info(f"Subscribed to TimeOfFlight (name={self._tof_event_name})")
+
+    def _ws_subscribe_bump(self):
+        """Subscribe to BumpSensor — physical contact detection."""
+        if self.ws:
+            prev = getattr(self, '_bump_event_name', None)
+            self._bump_event_name = f"Bump_{time.time_ns()}"
+
+            for old_name in ["Bump", prev or '']:
+                if old_name:
+                    unsub = json.dumps({"Operation": "unsubscribe", "EventName": old_name})
+                    self.ws.send(unsub)
+            time.sleep(0.2)
+
+            msg = json.dumps({
+                "Operation": "subscribe",
+                "Type": "BumpSensor",
+                "DebounceMs": 0,  # safety-critical: immediate notification
+                "EventName": self._bump_event_name,
+                "ReturnProperty": None,
+                "EventConditions": [],
+            })
+            self.ws.send(msg)
+            logger.info(f"Subscribed to BumpSensor (name={self._bump_event_name})")
+
+    def _ws_subscribe_safety_telemetry(self):
+        """Subscribe to all safety-related sensor events."""
+        self._ws_subscribe_hazard()
+        self._ws_subscribe_tof()
+        self._ws_subscribe_bump()
+
     def _on_ws_open(self, ws):
         logger.info("WebSocket connected")
         self.reconnect_attempts = 0
-        # Always subscribe to battery events
+        # Always subscribe to battery and safety telemetry events
         self._ws_subscribe_battery()
+        self._ws_subscribe_safety_telemetry()
 
         # In laptop wake word mode, skip keyphrase entirely — the laptop mic
         # handles wake word detection. Starting Misty's keyphrase would:
@@ -833,17 +1423,33 @@ class MistyController:
         event_name = data.get("eventName") or data.get("EventName", "")
         msg_content = data.get("message", "")
 
-        # Log ALL WebSocket messages for debugging keyphrase issues (#22)
+        # Ignore registration status messages
+        if isinstance(msg_content, str) and "Registration Status" in msg_content:
+            logger.debug(f"WS registration: {msg_content}")
+            return
+
+        # Route high-frequency telemetry events FIRST (no per-message INFO log)
+        if event_name == getattr(self, '_tof_event_name', ''):
+            if isinstance(msg_content, dict):
+                self._handle_tof_event(msg_content)
+            return
+
+        if event_name == getattr(self, '_hazard_event_name', ''):
+            if isinstance(msg_content, dict):
+                self._handle_hazard_event(msg_content)
+            return
+
+        if event_name == getattr(self, '_bump_event_name', ''):
+            if isinstance(msg_content, dict):
+                self._handle_bump_event(msg_content)
+            return
+
+        # Log non-telemetry WebSocket messages for debugging (#22)
         if event_name:
             msg_preview = str(msg_content)[:200] if msg_content else "(empty)"
             logger.info(f"WS event: {event_name} | msg_type={type(msg_content).__name__} | msg={msg_preview}")
         else:
             logger.info(f"WS raw: {str(message)[:300]}")
-
-        # Ignore registration status messages
-        if isinstance(msg_content, str) and "Registration Status" in msg_content:
-            logger.debug(f"WS registration: {msg_content}")
-            return
 
         if event_name == getattr(self, '_battery_event_name', 'BatteryMonitor') or event_name == "BatteryMonitor":
             if isinstance(msg_content, dict):
@@ -864,6 +1470,16 @@ class MistyController:
 
             if self.get_state() == State.IDLE and time.time() >= self.ready_time:
                 logger.info("[Wake] Wake word detected!")
+                self.turn_id += 1
+                threading.Thread(
+                    target=self._handle_conversation_turn,
+                    name=f"turn-{self.turn_id}",
+                    daemon=True,
+                ).start()
+            elif self.get_state() == State.MOVING:
+                # Wake word during movement — stop moving, then start conversation
+                logger.info("[Wake] Wake word during movement — preempting to converse")
+                self.preempt_movement("wake_word")
                 self.turn_id += 1
                 threading.Thread(
                     target=self._handle_conversation_turn,
@@ -983,7 +1599,16 @@ class MistyController:
             time.sleep(2.0)
 
         try:
-            had_speech = self._do_conversation_exchange(turn, turn_start)
+            exchange_result = self._do_conversation_exchange(turn, turn_start)
+
+            # Determine if speech was detected and if movement was requested
+            if isinstance(exchange_result, dict):
+                # Movement response (#56) — speech was detected, movement command returned
+                had_speech = exchange_result.get("had_speech", True)
+                movement = exchange_result.get("movement")
+            else:
+                had_speech = exchange_result
+                movement = None
 
             # Only count cycles with actual speech for proactive reboot tracking.
             # Empty STT (user too far from Misty's mic) shouldn't trigger a reboot.
@@ -992,6 +1617,13 @@ class MistyController:
                 logger.info(f"[Turn {turn}] Conversation cycle {self._conversation_cycles}/{PROACTIVE_REBOOT_AFTER_CYCLES}")
             else:
                 logger.info(f"[Turn {turn}] No speech — not counting toward reboot cycles")
+
+            # Execute voice movement if requested (#56) — after ack audio has played
+            if movement:
+                logger.info(f"[Turn {turn}] Executing voice movement: {movement.get('command')}")
+                self._execute_voice_movement(turn, movement)
+                # After movement, skip follow-up listening — re-arm and wait for next wake word
+                return
 
             # Follow-up listening loop — listen for continued conversation
             # without requiring the wake word again
@@ -1010,6 +1642,13 @@ class MistyController:
                             f"({remaining:.0f}s remaining in window)")
 
                 had_speech = self._listen_for_followup(turn)
+                if isinstance(had_speech, dict):
+                    # Follow-up was a movement command (#56) — execute and end conversation
+                    movement = had_speech.get("movement")
+                    if movement:
+                        logger.info(f"[Turn {turn}] Follow-up movement: {movement.get('command')}")
+                        self._execute_voice_movement(turn, movement)
+                    break
                 if not had_speech:
                     logger.info(f"[Turn {turn}] No follow-up speech — ending conversation")
                     break
@@ -1141,8 +1780,11 @@ class MistyController:
     def _do_orchestrate_and_respond(self, turn: int, audio_bytes: bytes, turn_start: float):
         """Send audio to orchestration service and play response on Misty.
         
-        Returns True if speech was detected and a response was played,
-        False if no speech was detected (empty STT).
+        Returns:
+            dict — if orchestration returned a movement command.
+                   Keys: "movement" (command dict), "had_speech" (True).
+            True  — if speech was detected and a conversational response was played.
+            False — if no speech was detected (empty STT).
         """
         # Processing state already set by caller — just send to orchestration
 
@@ -1167,6 +1809,36 @@ class MistyController:
         if result.get("status") != "ok":
             raise RuntimeError(f"Orchestration error: {result.get('error', 'unknown')}")
 
+        # --- Movement response (#56) ---
+        if result.get("type") == "movement":
+            movement = result.get("movement", {})
+            ack_text = result.get("response_text", "")
+            pipeline_ms = result.get("pipeline_ms", 0)
+            user_text = result.get("user_text", "")
+            logger.info(f"[Turn {turn}] MOVEMENT: '{user_text}' -> {movement.get('command')} "
+                         f"ack='{ack_text}' ({pipeline_ms}ms)")
+
+            # Download and play acknowledgment audio (speak first, then move)
+            audio_file = result.get("audio_file")
+            if audio_file:
+                audio_url = f"{ORCHESTRATION_URL}/api/audio/{audio_file}"
+                try:
+                    audio_resp = requests.get(audio_url, timeout=10.0)
+                    audio_resp.raise_for_status()
+                    response_wav = audio_resp.content
+                    logger.info(f"[Turn {turn}] Downloaded movement ack audio: {len(response_wav)} bytes")
+
+                    self.set_state(State.PLAYING)
+                    self.set_led(148, 0, 211)  # purple = speaking
+                    self.display_image("e_EcstacyHilarious.jpg")
+                    play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
+                    time.sleep(play_duration + 1.0)
+                except Exception as e:
+                    logger.warning(f"[Turn {turn}] Movement ack audio failed: {e}")
+
+            return {"movement": movement, "had_speech": True}
+
+        # --- Normal conversational response ---
         transcribed = result.get("transcribedText", "")
         llm_response = result.get("inferenceResponse", "")
         audio_uri = result.get("responseAudio", "")
@@ -1282,6 +1954,27 @@ class MistyController:
             if response.status_code != 200 or result.get("status") != "ok":
                 logger.warning(f"[Turn {turn}] Follow-up: orchestration error: {result.get('error', 'unknown')}")
                 return False
+
+            # Movement response in follow-up (#56)
+            if result.get("type") == "movement":
+                movement = result.get("movement", {})
+                ack_text = result.get("response_text", "")
+                logger.info(f"[Turn {turn}] Follow-up movement: {movement.get('command')} ack='{ack_text}'")
+
+                audio_file = result.get("audio_file")
+                if audio_file:
+                    try:
+                        audio_url = f"{ORCHESTRATION_URL}/api/audio/{audio_file}"
+                        audio_resp = requests.get(audio_url, timeout=10.0)
+                        audio_resp.raise_for_status()
+                        self.set_state(State.PLAYING)
+                        self.set_led(148, 0, 211)
+                        play_duration = self.upload_and_play_audio(audio_resp.content, RESPONSE_FILENAME)
+                        time.sleep(play_duration + 1.0)
+                    except Exception as e:
+                        logger.warning(f"[Turn {turn}] Follow-up movement ack audio failed: {e}")
+
+                return {"movement": movement, "had_speech": True}
 
             # Speech detected — download and play the response
             transcribed = result.get("transcribedText", "")
@@ -1652,6 +2345,113 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
                 "turn_id": ctrl.turn_id,
                 "message": "Conversation turn started — Misty is recording",
             })
+
+        elif self.path == "/api/move":
+            # Teleop movement endpoint (#51) — strict parameter validation
+            ctrl = self.controller
+            try:
+                content_len = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(content_len)) if content_len > 0 else {}
+            except (json.JSONDecodeError, ValueError):
+                self._send_json(400, {"error": "invalid_json", "message": "Request body must be valid JSON"})
+                return
+
+            command = body.get("command")
+            valid_commands = ("forward", "backward", "rotate_left", "rotate_right", "halt")
+            if command not in valid_commands:
+                self._send_json(400, {
+                    "error": "invalid_command",
+                    "message": f"command must be one of: {valid_commands}",
+                    "received": command,
+                })
+                return
+
+            # Handle halt immediately (no state transition needed)
+            if command == "halt":
+                ctrl.halt()
+                self._send_json(200, {"status": "ok", "command": "halt", "message": "Emergency halt issued"})
+                return
+
+            # Validate parameters
+            distance_mm = body.get("distance_mm", 200)
+            speed_pct = body.get("speed_pct", 20)
+            angle_deg = body.get("angle_deg", 90)
+
+            # Strict bounds
+            if not isinstance(distance_mm, (int, float)) or distance_mm < 50 or distance_mm > 500:
+                self._send_json(400, {
+                    "error": "invalid_distance",
+                    "message": "distance_mm must be 50-500",
+                    "received": distance_mm,
+                })
+                return
+            if not isinstance(speed_pct, (int, float)) or speed_pct < 5 or speed_pct > 30:
+                self._send_json(400, {
+                    "error": "invalid_speed",
+                    "message": "speed_pct must be 5-30",
+                    "received": speed_pct,
+                })
+                return
+            if command in ("rotate_left", "rotate_right"):
+                if not isinstance(angle_deg, (int, float)) or angle_deg < 10 or angle_deg > 180:
+                    self._send_json(400, {
+                        "error": "invalid_angle",
+                        "message": "angle_deg must be 10-180",
+                        "received": angle_deg,
+                    })
+                    return
+
+            # Attempt to enter MOVING state
+            if not ctrl.start_moving(reason=f"teleop_{command}"):
+                state = ctrl.get_state()
+                self._send_json(409, {
+                    "error": "cannot_move",
+                    "state": state.name,
+                    "message": "Cannot start moving — check state, hazards, or battery",
+                })
+                return
+
+            # Execute movement command in background thread
+            def _execute_teleop():
+                try:
+                    if command in ("forward", "backward"):
+                        # Calculate duration from distance and speed
+                        # At speed_pct=30, max velocity ~135mm/s (30% of 450mm/s)
+                        velocity_mms = (speed_pct / 100.0) * 450.0
+                        duration_ms = int((distance_mm / velocity_mms) * 1000)
+                        duration_ms = max(100, min(ctrl.DRIVE_MAX_DURATION_MS, duration_ms))
+                        linear = speed_pct if command == "forward" else -speed_pct
+                        ctrl.drive_time(linear, 0, duration_ms)
+                        time.sleep(duration_ms / 1000.0 + 0.2)  # wait for completion + buffer
+                    elif command in ("rotate_left", "rotate_right"):
+                        # Rotate in place — angular velocity only
+                        # Approximate: at 20% angular, ~30 deg/s → duration = angle/30 * 1000ms
+                        angular_rate = (speed_pct / 100.0) * 150.0  # approx deg/s
+                        duration_ms = int((angle_deg / angular_rate) * 1000)
+                        duration_ms = max(100, min(ctrl.DRIVE_MAX_DURATION_MS, duration_ms))
+                        angular = speed_pct if command == "rotate_left" else -speed_pct
+                        ctrl.drive_time(0, angular, duration_ms)
+                        time.sleep(duration_ms / 1000.0 + 0.2)
+                except Exception as e:
+                    logger.error(f"Teleop execution error: {e}")
+                finally:
+                    if ctrl.get_state() == State.MOVING:
+                        ctrl.stop_moving(reason="move_complete")
+
+            threading.Thread(target=_execute_teleop, name="teleop-exec", daemon=True).start()
+
+            self._send_json(200, {
+                "status": "ok",
+                "command": command,
+                "message": f"Movement started: {command}",
+            })
+
+        elif self.path == "/api/sensors":
+            # Sensor telemetry snapshot (#49)
+            ctrl = self.controller
+            snapshot = ctrl.get_hazard_snapshot()
+            self._send_json(200, {"status": "ok", **snapshot})
+
         else:
             self._send_json(404, {"error": "not_found"})
 
