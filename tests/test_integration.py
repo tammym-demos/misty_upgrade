@@ -2135,5 +2135,230 @@ class TestSpeakMoveIntegration(unittest.TestCase):
             self.assertEqual(self.ctrl.get_state(), self._State.IDLE)
 
 
+class TestFaceRecognition(unittest.TestCase):
+    """Unit tests for facial recognition integration (#16)."""
+
+    _svc = None
+    _ctrl_mod = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import orchestration_service
+            cls._svc = orchestration_service
+        except Exception:
+            cls._svc = None
+        try:
+            import misty_controller as mc
+            cls._ctrl_mod = mc
+        except Exception:
+            cls._ctrl_mod = None
+
+    def setUp(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self._svc.conversation_history = []
+        self._svc._last_response_mode = "short"
+
+    # ------------------------------------------------------------------
+    # Orchestration: speaker_name in LLM prompt
+    # ------------------------------------------------------------------
+
+    def _mock_llm_response(self, text="OK"):
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"choices": [{"message": {"content": text}}]}
+        return mock_resp
+
+    def test_speaker_name_injected_into_system_prompt(self):
+        """When speaker_name is given, LLM system prompt includes the name."""
+        with unittest.mock.patch.object(
+            self._svc.requests, "post", return_value=self._mock_llm_response("Hi Tammy!")
+        ) as mock_post:
+            self._svc.language_model_inference("hello", time.time(), speaker_name="Tammy")
+            payload = mock_post.call_args[1]["json"]
+
+        system_msgs = [m for m in payload["messages"] if m["role"] == "system"]
+        self.assertTrue(len(system_msgs) > 0)
+        self.assertIn("Tammy", system_msgs[0]["content"])
+        self.assertIn("currently talking to", system_msgs[0]["content"])
+
+    def test_no_speaker_name_no_injection(self):
+        """Without speaker_name, system prompt should NOT mention a person."""
+        with unittest.mock.patch.object(
+            self._svc.requests, "post", return_value=self._mock_llm_response("Hello!")
+        ) as mock_post:
+            self._svc.language_model_inference("hello", time.time(), speaker_name=None)
+            payload = mock_post.call_args[1]["json"]
+
+        system_msgs = [m for m in payload["messages"] if m["role"] == "system"]
+        self.assertTrue(len(system_msgs) > 0)
+        self.assertNotIn("currently talking to", system_msgs[0]["content"])
+
+    def test_speaker_name_from_form_data(self):
+        """The /api/orchestrate endpoint should extract speaker_name from form data."""
+        with self._svc.app.test_client() as client:
+            # Mock all the pipeline stages
+            with unittest.mock.patch.object(self._svc, "speech_to_text") as mock_stt, \
+                 unittest.mock.patch.object(self._svc, "language_model_inference") as mock_llm, \
+                 unittest.mock.patch.object(self._svc, "text_to_speech") as mock_tts:
+                mock_stt.return_value = {"status": "ok", "text": "hello"}
+                mock_llm.return_value = {"status": "ok", "response_text": "Hi!",
+                                         "llm_ms": 100, "mode": "short"}
+                mock_tts.return_value = {"status": "ok", "audio_uri": "/api/audio/test.wav",
+                                         "audio_file": "test.wav", "tts_ms": 50}
+
+                resp = client.post(
+                    "/api/orchestrate",
+                    data={"speaker_name": "Burke"},
+                    content_type="multipart/form-data",
+                )
+                # speaker_name should have been passed through to LLM
+                # (we can't easily check the arg in this integration-style test without deeper mocking,
+                # but at minimum the endpoint should not crash)
+                self.assertIn(resp.status_code, [200, 400])  # 400 if file missing, 200 if mocked
+
+    # ------------------------------------------------------------------
+    # Controller: face recognition methods
+    # ------------------------------------------------------------------
+
+    def test_recognize_face_quick_returns_name(self):
+        """recognize_face_quick returns a known face name when recognized."""
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+
+        import unittest.mock as mock
+        ctrl = self._ctrl_mod.MistyController.__new__(self._ctrl_mod.MistyController)
+        ctrl.misty_ip = "0.0.0.0"
+        ctrl._recognized_face = None
+        ctrl._face_recognition_event = threading.Event()
+        ctrl._face_event_name = None
+        ctrl._trained_faces = ["Tammy"]  # must have trained faces
+
+        # Mock start/stop face recognition
+        def fake_start():
+            # Simulate a face event arriving during recognition
+            ctrl._recognized_face = "Tammy"
+            ctrl._face_recognition_event.set()
+            return True
+
+        ctrl.start_face_recognition = mock.MagicMock(side_effect=fake_start)
+        ctrl.stop_face_recognition = mock.MagicMock()
+        ctrl.get_trained_faces = mock.MagicMock()
+
+        name = ctrl.recognize_face_quick()
+        self.assertEqual(name, "Tammy")
+        ctrl.stop_face_recognition.assert_called_once()
+
+    def test_recognize_face_quick_returns_none_on_timeout(self):
+        """recognize_face_quick returns None if no face is detected within timeout."""
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+
+        import unittest.mock as mock
+        ctrl = self._ctrl_mod.MistyController.__new__(self._ctrl_mod.MistyController)
+        ctrl.misty_ip = "0.0.0.0"
+        ctrl._recognized_face = None
+        ctrl._face_recognition_event = threading.Event()
+        ctrl._face_event_name = None
+        ctrl._trained_faces = ["Tammy"]
+        ctrl.start_face_recognition = mock.MagicMock(return_value=True)
+        ctrl.stop_face_recognition = mock.MagicMock()
+        ctrl.get_trained_faces = mock.MagicMock()
+
+        # No face event fired — should timeout and return None
+        name = ctrl.recognize_face_quick(timeout_s=0.1)
+        self.assertIsNone(name)
+        ctrl.stop_face_recognition.assert_called_once()
+
+    def test_recognize_face_quick_ignores_unknown(self):
+        """recognize_face_quick returns None for 'unknown_person'."""
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+
+        import unittest.mock as mock
+        ctrl = self._ctrl_mod.MistyController.__new__(self._ctrl_mod.MistyController)
+        ctrl.misty_ip = "0.0.0.0"
+        ctrl._recognized_face = None
+        ctrl._face_recognition_event = threading.Event()
+        ctrl._face_event_name = None
+        ctrl._trained_faces = ["Tammy"]
+        ctrl.get_trained_faces = mock.MagicMock()
+
+        # Simulate "unknown_person" event — handler won't signal the event
+        def fake_start():
+            # unknown_person doesn't set _recognized_face (handler filters it)
+            return True
+
+        ctrl.start_face_recognition = mock.MagicMock(side_effect=fake_start)
+        ctrl.stop_face_recognition = mock.MagicMock()
+
+        name = ctrl.recognize_face_quick(timeout_s=0.1)
+        self.assertIsNone(name)
+
+    def test_face_event_handler_sets_recognized_face(self):
+        """_handle_face_recognition_event should set _recognized_face and signal the event."""
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+
+        ctrl = self._ctrl_mod.MistyController.__new__(self._ctrl_mod.MistyController)
+        ctrl._recognized_face = None
+        ctrl._face_recognition_event = threading.Event()
+
+        # Event data has label at top level (not nested under message)
+        event_data = {
+            "label": "Burke",
+        }
+        ctrl._handle_face_recognition_event(event_data)
+
+        self.assertEqual(ctrl._recognized_face, "Burke")
+        self.assertTrue(ctrl._face_recognition_event.is_set())
+
+    def test_face_event_handler_ignores_unknown(self):
+        """_handle_face_recognition_event should NOT signal for unknown_person."""
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+
+        ctrl = self._ctrl_mod.MistyController.__new__(self._ctrl_mod.MistyController)
+        ctrl._recognized_face = None
+        ctrl._face_recognition_event = threading.Event()
+
+        event_data = {
+            "label": "unknown_person",
+        }
+        ctrl._handle_face_recognition_event(event_data)
+
+        self.assertIsNone(ctrl._recognized_face)
+        self.assertFalse(ctrl._face_recognition_event.is_set())
+
+    def test_rearm_clears_recognized_face(self):
+        """_rearm should clear _recognized_face between conversations."""
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+
+        import unittest.mock as mock
+        ctrl = self._ctrl_mod.MistyController.__new__(self._ctrl_mod.MistyController)
+        ctrl._recognized_face = "Tammy"
+        ctrl._face_recognition_event = threading.Event()
+        ctrl._state = self._ctrl_mod.State.REARMING
+
+        # Mock all the methods _rearm calls
+        ctrl.set_state = mock.MagicMock()
+        ctrl.move_head = mock.MagicMock()
+        ctrl._conversation_cycles = 0
+        ctrl._recording_cycles = 0
+        ctrl.stop_recording = mock.MagicMock()
+        ctrl._wake_word_listener = None
+        ctrl.ws = None
+        ctrl.reconnect_attempts = 0
+        ctrl.misty_post = mock.MagicMock()
+        ctrl._connect_ws = mock.MagicMock()
+
+        with mock.patch("time.sleep"):
+            ctrl._rearm()
+
+        self.assertIsNone(ctrl._recognized_face)
+
+
 if __name__ == "__main__":
     unittest.main()

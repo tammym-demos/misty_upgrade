@@ -54,6 +54,10 @@ HEALTH_CHECK_INTERVAL_S = 10.0  # reduced from 30s for watchdog responsiveness
 # Laptop wake word listener (issue #44) — use laptop mic instead of Misty's keyphrase engine
 USE_LAPTOP_WAKE_WORD = os.getenv("USE_LAPTOP_WAKE_WORD", "").lower() in ("1", "true", "yes")
 
+# Face recognition (#16) — use Misty's camera to identify people
+USE_FACE_RECOGNITION = os.getenv("USE_FACE_RECOGNITION", "").lower() in ("1", "true", "yes")
+FACE_RECOGNITION_TIMEOUT_S = float(os.getenv("FACE_RECOGNITION_TIMEOUT_S", "3.0"))
+
 # Keyphrase watchdog — detects silent failures and auto-recovers
 WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", "90"))  # 90s after rearm with no wake event
 WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", "60"))  # 60s after recovery attempt
@@ -235,6 +239,12 @@ class MistyController:
         # Hazard / sensor telemetry (#49)
         self.hazard = HazardState()
         self.hazard_lock = threading.Lock()
+
+        # Face recognition (#16) — identify who's talking to Misty
+        self._recognized_face: str | None = None  # last recognized face name
+        self._face_recognition_event = threading.Event()  # signaled when face recognized
+        self._face_event_name: str | None = None  # WebSocket event name for face recognition
+        self._trained_faces: list[str] = []  # cached list of trained face IDs
 
     # --- State transitions ---
 
@@ -758,6 +768,118 @@ class MistyController:
             return False
         except Exception:
             return False
+
+    # --- Face recognition (#16) ---
+
+    def get_trained_faces(self) -> list[str]:
+        """Get list of trained face IDs from Misty."""
+        result = self.misty_get("/api/faces")
+        if result and result.get("status") == "Success":
+            faces = result.get("result", [])
+            self._trained_faces = faces
+            return faces
+        return []
+
+    def start_face_training(self, face_id: str) -> bool:
+        """Start training Misty to recognize a face.
+
+        Stand in front of Misty and slowly turn your head left/right.
+        Training takes ~15 seconds. The face_id is the label for this person.
+        """
+        if not face_id or len(face_id) > 50:
+            logger.error(f"Invalid face_id: {face_id}")
+            return False
+        result = self.misty_post("/api/faces/training/start", {"FaceId": face_id})
+        if result and result.get("status") == "Success":
+            logger.info(f"Face training started for '{face_id}'")
+            return True
+        logger.error(f"Face training start failed for '{face_id}'")
+        return False
+
+    def cancel_face_training(self) -> bool:
+        """Cancel an in-progress face training session."""
+        result = self.misty_post("/api/faces/training/cancel")
+        return result is not None
+
+    def start_face_recognition(self) -> bool:
+        """Start face recognition on Misty's camera.
+
+        Returns True if recognition was started successfully.
+        Face events arrive via WebSocket (FaceRecognition).
+        """
+        result = self.misty_post("/api/faces/recognition/start")
+        if result and result.get("status") == "Success":
+            logger.debug("Face recognition started")
+            return True
+        logger.warning("Face recognition start failed")
+        return False
+
+    def stop_face_recognition(self) -> bool:
+        """Stop face recognition."""
+        result = self.misty_post("/api/faces/recognition/stop")
+        return result is not None
+
+    def recognize_face_quick(self, timeout_s: float = None) -> str | None:
+        """Run face recognition briefly and return the recognized name or None.
+
+        Starts face recognition, waits for a FaceRecognition WebSocket event
+        with a known (non-"unknown_person") label, then stops recognition.
+        Returns the face ID string or None if no known face was detected in time.
+        """
+        if timeout_s is None:
+            timeout_s = FACE_RECOGNITION_TIMEOUT_S
+
+        # Need trained faces for this to be useful
+        if not self._trained_faces:
+            self.get_trained_faces()
+        if not self._trained_faces:
+            logger.debug("No trained faces — skipping recognition")
+            return None
+
+        self._recognized_face = None
+        self._face_recognition_event.clear()
+
+        if not self.start_face_recognition():
+            return None
+
+        try:
+            # Wait for a face event (or timeout)
+            got_event = self._face_recognition_event.wait(timeout=timeout_s)
+            if got_event and self._recognized_face:
+                logger.info(f"Face recognized: {self._recognized_face}")
+                return self._recognized_face
+            else:
+                logger.debug(f"No face recognized in {timeout_s}s")
+                return None
+        finally:
+            self.stop_face_recognition()
+
+    def _handle_face_recognition_event(self, data: dict):
+        """Handle a FaceRecognition WebSocket event."""
+        label = data.get("label", data.get("Label", ""))
+        # Misty reports "unknown_person" for unrecognized faces
+        if label and label != "unknown_person":
+            self._recognized_face = label
+            self._face_recognition_event.set()
+            logger.info(f"FaceRecognition event: {label}")
+        else:
+            logger.debug(f"FaceRecognition event: unrecognized ({label})")
+
+    def _ws_subscribe_face_recognition(self):
+        """Subscribe to FaceRecognition WebSocket events."""
+        if self.ws:
+            prev = getattr(self, '_face_event_name', None)
+            self._face_event_name = f"FaceRec_{time.time_ns()}"
+            msg = json.dumps({
+                "Operation": "subscribe",
+                "Type": "FaceRecognition",
+                "DebounceMs": 0,
+                "EventName": self._face_event_name,
+                "ReturnProperty": None,
+                "EventConditions": [],
+            })
+            self.ws.send(msg)
+            logger.info(f"Subscribed to FaceRecognition (name={self._face_event_name})")
 
     # --- Battery management ---
 
@@ -1362,6 +1484,16 @@ class MistyController:
         self._ws_subscribe_battery()
         self._ws_subscribe_safety_telemetry()
 
+        # Subscribe to face recognition events if enabled (#16)
+        if USE_FACE_RECOGNITION:
+            self._ws_subscribe_face_recognition()
+            # Cache trained faces list on connect
+            self.get_trained_faces()
+            if self._trained_faces:
+                logger.info(f"Trained faces: {self._trained_faces}")
+            else:
+                logger.info("No trained faces found — face recognition won't identify anyone")
+
         # In laptop wake word mode, skip keyphrase entirely — the laptop mic
         # handles wake word detection. Starting Misty's keyphrase would:
         # 1. Hold the Snapdragon 410 mic, requiring a 2s delay before recording
@@ -1442,6 +1574,11 @@ class MistyController:
         if event_name == getattr(self, '_bump_event_name', ''):
             if isinstance(msg_content, dict):
                 self._handle_bump_event(msg_content)
+            return
+
+        if event_name == getattr(self, '_face_event_name', ''):
+            if isinstance(msg_content, dict):
+                self._handle_face_recognition_event(msg_content)
             return
 
         # Log non-telemetry WebSocket messages for debugging (#22)
@@ -1675,6 +1812,16 @@ class MistyController:
         self.display_image("e_Admiration.jpg")  # wide-eyed, attentive
         self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # look up slightly — eye contact
 
+        # Start face recognition concurrently with recording (#16)
+        face_result = [None]  # mutable container for thread result
+        if USE_FACE_RECOGNITION and self._trained_faces:
+            def _face_check():
+                face_result[0] = self.recognize_face_quick()
+            face_thread = threading.Thread(target=_face_check, daemon=True)
+            face_thread.start()
+        else:
+            face_thread = None
+
         # Stop keyphrase before recording — shared mic on Snapdragon 410.
         # In Misty-keyphrase mode, keyphrase auto-stops on detection.
         # In laptop wake word mode, keyphrase is NOT running (we don't start it),
@@ -1774,12 +1921,27 @@ class MistyController:
         if len(audio_bytes) < FOLLOWUP_SILENCE_THRESHOLD:
             raise RuntimeError(f"Recording too small ({len(audio_bytes)} bytes) — likely empty")
 
-        # 4-6. Orchestrate and play response
-        return self._do_orchestrate_and_respond(turn, audio_bytes, turn_start)
+        # Collect face recognition result (#16) — was running concurrently with recording
+        speaker_name = None
+        if face_thread is not None:
+            face_thread.join(timeout=1.0)  # don't block long — recording is done
+            speaker_name = face_result[0]
+            if speaker_name:
+                logger.info(f"[Turn {turn}] Recognized face: {speaker_name}")
+                self._recognized_face = speaker_name  # persist for follow-up turns
 
-    def _do_orchestrate_and_respond(self, turn: int, audio_bytes: bytes, turn_start: float):
+        # 4-6. Orchestrate and play response
+        return self._do_orchestrate_and_respond(turn, audio_bytes, turn_start, speaker_name=self._recognized_face)
+
+    def _do_orchestrate_and_respond(self, turn: int, audio_bytes: bytes, turn_start: float, speaker_name: str | None = None):
         """Send audio to orchestration service and play response on Misty.
         
+        Args:
+            turn: Turn ID for logging.
+            audio_bytes: WAV audio bytes to transcribe.
+            turn_start: Timestamp of when the turn started.
+            speaker_name: Optional recognized face name (#16).
+
         Returns:
             dict — if orchestration returned a movement command.
                    Keys: "movement" (command dict), "had_speech" (True).
@@ -1788,10 +1950,14 @@ class MistyController:
         """
         # Processing state already set by caller — just send to orchestration
 
-        # Send to orchestration service
+        # Send to orchestration service (include speaker_name from face recognition if available)
+        form_data = {}
+        if speaker_name:
+            form_data["speaker_name"] = speaker_name
         response = requests.post(
             f"{ORCHESTRATION_URL}/api/orchestrate",
             files={"file": (RECORDING_FILENAME, audio_bytes, "audio/wav")},
+            data=form_data,
             timeout=30.0,
         )
         result = response.json()
@@ -1939,9 +2105,13 @@ class MistyController:
         # Send through the full pipeline — orchestration returns empty_stt error
         # if no speech was detected, which we treat as silence
         try:
+            form_data = {}
+            if self._recognized_face:
+                form_data["speaker_name"] = self._recognized_face
             response = requests.post(
                 f"{ORCHESTRATION_URL}/api/orchestrate",
                 files={"file": (RECORDING_FILENAME, audio_bytes, "audio/wav")},
+                data=form_data,
                 timeout=30.0,
             )
             result = response.json()
@@ -2013,6 +2183,7 @@ class MistyController:
     def _rearm(self):
         self.set_state(State.REARMING)
         self.move_head(pitch=0, roll=0, yaw=0, velocity=40)  # center head
+        self._recognized_face = None  # clear face context between conversations (#16)
 
         # Check if proactive reboot is needed (#22)
         # Trigger on conversation cycles OR total recording cycles — whichever hits first.

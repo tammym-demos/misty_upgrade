@@ -255,7 +255,8 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 - **Conversation history**: Maintained in-memory, capped at the last 8 messages (4 turns). System prompt is prepended on every call but not stored in history. Context budget: MAX_CONTEXT_CHARS=5000. See #19 for smarter history approaches.
 - **System prompt**: Misty has a sassy personality with farm life context (lives with Tammy, Burke, dogs Percy and Granny). Instructs her to reply in 2-3 sentences. LLM (Phi-3.5-mini) often exceeds this — `max_tokens=50` and post-LLM truncation (35 words / 3 sentences) enforce the limit. Temperature is 0.7 for more focused brevity.
 - **Adaptive response modes**: The orchestration service classifies user intent into modes: `short` (default, 50 tokens / 35 words), `summary` (stories/recipes/explanations, 80 tokens / 50 words), and `continuation` (follow-ups to summaries). Intent classification uses regex pattern matching on transcribed text.
-- **Configuration**: The orchestration service reads from `.env` (copy `.env.example`). The Misty controller reads `MISTY_IP`, `ORCHESTRATION_URL`, and `USE_LAPTOP_WAKE_WORD` from environment.
+- **Configuration**: The orchestration service reads from `.env` (copy `.env.example`). The Misty controller reads `MISTY_IP`, `ORCHESTRATION_URL`, `USE_LAPTOP_WAKE_WORD`, `USE_FACE_RECOGNITION`, and `FACE_RECOGNITION_TIMEOUT_S` from environment.
+- **Face recognition (#16)**: Opt-in via `USE_FACE_RECOGNITION=true`. Uses Misty's built-in camera + face training/recognition REST API. During each conversation turn, `recognize_face_quick()` runs concurrently with audio recording to identify the speaker. The recognized name is passed as `speaker_name` form field to `/api/orchestrate`, which injects it into the LLM system prompt ("You are currently talking to {name}"). Persists across follow-up turns within a conversation; cleared on re-arm. Requires pre-trained faces on Misty via `POST /api/faces/training/start {"FaceId": "Name"}`.
 - **Error responses**: The orchestration service returns structured JSON errors with a `status` field (`"ok"` or `"error"`) and an `error` code (e.g., `"timeout"`, `"stt_failure"`, `"model_load_failure"`).
 - **Python version**: Use Python 3.13. Note that Python 3.14 may also be installed — always use `python -m pip` to target the correct version.
 - **Official docs**: https://docs.mistyrobotics.com/ — REST API reference at `/misty-ii/reference/rest/`
@@ -274,3 +275,4 @@ Foundry Local uses OpenAI-compatible endpoints but with some quirks:
 | #20 | Recording increased from 4s to 6s (PR #42) — VAD-controlled dynamic recording via laptop mic | Mitigated |
 | #19 | Conversation history capped at 8 messages (4 turns) to manage latency | Mitigated |
 | #23 | Unicode arrow in log messages crashes on Windows cp1252 console | Fixed |
+| #16 | Facial recognition — speaker name injected into LLM context for personalized responses | Implemented (opt-in via USE_FACE_RECOGNITION) |
