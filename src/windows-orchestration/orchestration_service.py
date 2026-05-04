@@ -4,14 +4,17 @@ Handles STT -> LLM -> TTS pipeline with timeout and error handling.
 Serves OpenAI-compatible endpoints for Misty skill integration.
 """
 
+import hashlib
 import os
 import re
 import sys
 import json
 import logging
 import subprocess
+import threading
 import time
 import requests
+from collections import OrderedDict
 from io import BytesIO
 from datetime import datetime
 from typing import Dict, Any, Tuple
@@ -40,7 +43,7 @@ load_dotenv()  # Load .env before reading any env vars
 FOUNDRY_API_TIMEOUT = float(os.getenv("FOUNDRY_API_TIMEOUT", "10.0"))
 SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", "15.0"))
 KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_sky")
-KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.0"))
+KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.2"))
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     (
@@ -216,7 +219,7 @@ _CONTINUATION_PATTERN = re.compile(
 # Per-mode LLM parameters
 RESPONSE_MODE_CONFIG = {
     "short": {
-        "max_tokens": 60,
+        "max_tokens": 50,
         "max_words": 35,
         "max_sentences": 3,
         "prompt_suffix": None,
@@ -436,7 +439,7 @@ def orchestrate():
             tts_ms = (time.time() - tts_start) * 1000
             total_ms = (time.time() - start_time) * 1000
             logger.info(f"[Pipeline {total_ms:.0f}ms] Movement: {movement['command']} "
-                         f"(STT={stt_ms:.0f}ms, TTS={tts_ms:.0f}ms)")
+                         f"(STT={stt_ms:.0f}ms, TTS={tts_ms:.0f}ms, cached={tts_result.get('tts_cached', False)})")
             result = {
                 "status": "ok",
                 "type": "movement",
@@ -444,6 +447,7 @@ def orchestrate():
                 "user_text": user_text,
                 "response_text": ack_text,
                 "pipeline_ms": round(total_ms),
+                "tts_cached": tts_result.get("tts_cached", False),
             }
             if tts_result.get("status") == "ok":
                 result["audio_file"] = tts_result.get("audio_file")
@@ -478,7 +482,8 @@ def orchestrate():
         # Calculate total latency
         total_latency_ms = (time.time() - start_time) * 1000
         tts_fallback = tts_result.get("tts_fallback", False)
-        logger.info(f"[Pipeline {total_latency_ms:.0f}ms] STT={stt_ms:.0f} LLM={llm_ms:.0f} TTS={tts_ms:.0f} history={len(conversation_history)} fallback={tts_fallback}")
+        tts_cached = tts_result.get("tts_cached", False)
+        logger.info(f"[Pipeline {total_latency_ms:.0f}ms] STT={stt_ms:.0f} LLM={llm_ms:.0f} TTS={tts_ms:.0f} history={len(conversation_history)} fallback={tts_fallback} cached={tts_cached}")
         
         return jsonify({
             "status": "ok",
@@ -487,6 +492,7 @@ def orchestrate():
             "responseAudio": response_audio_uri,
             "latencyMs": total_latency_ms,
             "ttsFallback": tts_fallback,
+            "ttsCached": tts_cached,
         }), 200
         
     except Exception as e:
@@ -628,7 +634,7 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
             "model": MODELS["chat"],
             "messages": messages,
             "max_tokens": mode_config["max_tokens"],
-            "temperature": 0.85,
+            "temperature": 0.7,
             "stop": mode_config["stop"],
         }
         
@@ -690,7 +696,9 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
 # ---------------------------------------------------------------------------
 
 _kokoro_instance = None
+_kokoro_lock = threading.Lock()  # Thread-safety for Kokoro ONNX synthesis
 _pyttsx3_engine = None
+_pyttsx3_lock = threading.Lock()  # Thread-safety for pyttsx3 synthesis
 
 
 def _get_kokoro():
@@ -730,10 +738,63 @@ import glob as glob_module
 
 MAX_AUDIO_FILES = 50  # Keep at most 50 response files on disk
 
+# ---------------------------------------------------------------------------
+# TTS audio cache — avoids re-synthesizing identical phrases
+# ---------------------------------------------------------------------------
+
+TTS_CACHE_MAX = int(os.getenv("TTS_CACHE_MAX", "200"))
+_tts_cache: OrderedDict = OrderedDict()  # text_hash → {"path": str, "pinned": bool}
+_tts_cache_lock = threading.Lock()
+
+
+def _tts_cache_key(text: str) -> str:
+    """Compute a stable cache key for TTS text (SHA-256 of normalised text)."""
+    normalised = text.strip().lower()
+    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()[:16]
+
+
+def _tts_cache_get(text: str) -> str | None:
+    """Look up cached WAV path for text. Returns path if hit and file exists."""
+    key = _tts_cache_key(text)
+    with _tts_cache_lock:
+        entry = _tts_cache.get(key)
+        if entry is None:
+            return None
+        path = entry["path"]
+        if not os.path.exists(path):
+            del _tts_cache[key]
+            return None
+        _tts_cache.move_to_end(key)  # LRU: mark as recently used
+        return path
+
+
+def _tts_cache_put(text: str, path: str, pinned: bool = False):
+    """Store a synthesized WAV path in the cache."""
+    key = _tts_cache_key(text)
+    with _tts_cache_lock:
+        _tts_cache[key] = {"path": path, "pinned": pinned}
+        _tts_cache.move_to_end(key)
+        # Evict oldest non-pinned entries if over capacity
+        while len(_tts_cache) > TTS_CACHE_MAX:
+            oldest_key, oldest_entry = next(iter(_tts_cache.items()))
+            if oldest_entry.get("pinned"):
+                # Don't evict pinned entries; move to end and try next
+                _tts_cache.move_to_end(oldest_key)
+                # Safety: if all entries are pinned, stop evicting
+                if all(e.get("pinned") for e in _tts_cache.values()):
+                    break
+                continue
+            evicted = _tts_cache.pop(oldest_key)
+            try:
+                os.remove(evicted["path"])
+            except OSError:
+                pass
+
 
 def _cleanup_old_audio():
-    """Remove oldest audio files when exceeding MAX_AUDIO_FILES."""
+    """Remove oldest non-cached response audio files when exceeding MAX_AUDIO_FILES."""
     try:
+        # Only clean up timestamped response files, never cached (pinned) files
         files = sorted(
             glob_module.glob(os.path.join("responses", "response_*.wav")),
             key=os.path.getctime, reverse=True
@@ -744,8 +805,61 @@ def _cleanup_old_audio():
         pass  # Non-critical — don't fail TTS over cleanup
 
 
+def _prewarm_tts_cache():
+    """Pre-generate audio for known phrases (movement acks, common responses).
+
+    Called in a background thread after startup to avoid blocking the service.
+    Cached files use stable names (cached_<hash>.wav) excluded from cleanup.
+    """
+    phrases = []
+    # Collect all movement acknowledgment phrases
+    for ack_list in _MOVEMENT_ACKS.values():
+        phrases.extend(ack_list)
+
+    os.makedirs("responses", exist_ok=True)
+    generated = 0
+    kokoro = _get_kokoro()
+    if kokoro is None:
+        logger.warning("TTS pre-warm skipped: kokoro-onnx unavailable")
+        return
+
+    try:
+        import soundfile as sf  # noqa: PLC0415
+    except ImportError:
+        logger.warning("TTS pre-warm skipped: soundfile unavailable")
+        return
+
+    for phrase in phrases:
+        key = _tts_cache_key(phrase)
+        cache_filename = f"cached_{key}.wav"
+        cache_path = os.path.join("responses", cache_filename)
+
+        # Skip if already cached on disk
+        if os.path.exists(cache_path):
+            _tts_cache_put(phrase, cache_path, pinned=True)
+            generated += 1
+            continue
+
+        try:
+            with _kokoro_lock:
+                samples, sample_rate = kokoro.create(
+                    phrase, voice=KOKORO_VOICE, speed=KOKORO_SPEED, lang="en-us"
+                )
+            sf.write(cache_path, samples, sample_rate)
+            _tts_cache_put(phrase, cache_path, pinned=True)
+            generated += 1
+        except Exception as e:
+            logger.warning(f"TTS pre-warm failed for '{phrase}': {e}")
+
+    logger.info(f"TTS cache pre-warmed: {generated}/{len(phrases)} phrases cached")
+
+
 def text_to_speech(text: str, start_time: float) -> Dict[str, Any]:
-    """Convert text to speech using kokoro-onnx (primary) or pyttsx3 (fallback)."""
+    """Convert text to speech using kokoro-onnx (primary) or pyttsx3 (fallback).
+
+    Checks the TTS audio cache first; on hit, returns the cached file immediately.
+    On miss, synthesizes and stores the result in the cache.
+    """
     try:
         elapsed = (time.time() - start_time) * 1000
         remaining = LATENCY_BUDGET["tts"] - elapsed
@@ -755,37 +869,63 @@ def text_to_speech(text: str, start_time: float) -> Dict[str, Any]:
             return {"status": "error", "error": "timeout"}
 
         os.makedirs("responses", exist_ok=True)
+
+        # --- Cache lookup ---
+        cached_path = _tts_cache_get(text)
+        if cached_path is not None:
+            audio_filename = os.path.basename(cached_path)
+            logger.debug(f"TTS cache hit: {audio_filename}")
+            return {
+                "status": "ok",
+                "audio_uri": f"/api/audio/{audio_filename}",
+                "audio_file": audio_filename,
+                "tts_cached": True,
+            }
+
         # Clean up old audio files to prevent disk accumulation
         _cleanup_old_audio()
         audio_filename = f"response_{int(time.time() * 1000)}.wav"
         audio_path = os.path.join("responses", audio_filename)
 
-        # --- Primary: kokoro-onnx (neural, fully offline, win-arm64 native) ---
+        # --- Primary: kokoro-onnx (neural, fully offline) ---
         kokoro = _get_kokoro()
         if kokoro is not None:
             try:
                 import soundfile as sf  # noqa: PLC0415
-                samples, sample_rate = kokoro.create(
-                    text, voice=KOKORO_VOICE, speed=KOKORO_SPEED, lang="en-us"
-                )
+                with _kokoro_lock:
+                    samples, sample_rate = kokoro.create(
+                        text, voice=KOKORO_VOICE, speed=KOKORO_SPEED, lang="en-us"
+                    )
                 sf.write(audio_path, samples, sample_rate)
                 logger.debug(f"kokoro-onnx TTS saved: {audio_path}")
-                return {"status": "ok", "audio_uri": f"/api/audio/{audio_filename}"}
+                _tts_cache_put(text, audio_path)
+                return {
+                    "status": "ok",
+                    "audio_uri": f"/api/audio/{audio_filename}",
+                    "audio_file": audio_filename,
+                }
             except Exception as e:
-                logger.warning(f"⚠️ TTS FALLBACK: kokoro-onnx synthesis failed ({e}), switching to pyttsx3 SAPI5")
+                logger.warning(f"TTS FALLBACK: kokoro-onnx synthesis failed ({e}), switching to pyttsx3 SAPI5")
         else:
-            logger.warning("⚠️ TTS FALLBACK: kokoro-onnx unavailable, switching to pyttsx3 SAPI5")
+            logger.warning("TTS FALLBACK: kokoro-onnx unavailable, switching to pyttsx3 SAPI5")
 
         # --- Fallback: pyttsx3 SAPI5 (robotic but guaranteed on Windows) ---
         engine = _get_pyttsx3()
         if engine is not None:
-            logger.warning("⚠️ TTS FALLBACK ACTIVE: using pyttsx3 SAPI5 (reduced voice quality)")
-            engine.save_to_file(text, audio_path)
-            engine.runAndWait()
+            logger.warning("TTS FALLBACK ACTIVE: using pyttsx3 SAPI5 (reduced voice quality)")
+            with _pyttsx3_lock:
+                engine.save_to_file(text, audio_path)
+                engine.runAndWait()
             logger.debug(f"pyttsx3 TTS saved: {audio_path}")
-            return {"status": "ok", "audio_uri": f"/api/audio/{audio_filename}", "tts_fallback": True}
+            _tts_cache_put(text, audio_path)
+            return {
+                "status": "ok",
+                "audio_uri": f"/api/audio/{audio_filename}",
+                "audio_file": audio_filename,
+                "tts_fallback": True,
+            }
 
-        logger.error("❌ No TTS engine available (kokoro-onnx and pyttsx3 both failed)")
+        logger.error("No TTS engine available (kokoro-onnx and pyttsx3 both failed)")
         return {"status": "error", "error": "tts_no_engine"}
 
     except Exception as e:
@@ -899,15 +1039,26 @@ def diagnostics():
     """Return current service diagnostics."""
     tts_engine = "kokoro-onnx" if _kokoro_instance is not None else None
     tts_fallback = "pyttsx3" if _pyttsx3_engine is not None else None
+    with _tts_cache_lock:
+        cache_size = len(_tts_cache)
+        cache_pinned = sum(1 for e in _tts_cache.values() if e.get("pinned"))
     return jsonify({
         "service": "FoundryLocal Orchestration",
-        "version": "1.0.0",
+        "version": "1.1.0",
         "foundry_host": FOUNDRY_LOCAL_HOST,
         "models": MODEL_ALIASES,
         "tts": {
             "engine": tts_engine or "kokoro-onnx",
             "fallback": "pyttsx3",
             "initialized": tts_engine is not None or tts_fallback is not None,
+            "speed": KOKORO_SPEED,
+            "cache_entries": cache_size,
+            "cache_pinned": cache_pinned,
+            "cache_max": TTS_CACHE_MAX,
+        },
+        "llm": {
+            "temperature": 0.7,
+            "short_max_tokens": RESPONSE_MODE_CONFIG["short"]["max_tokens"],
         },
         "latency_budget_ms": LATENCY_BUDGET,
         "timestamp": datetime.utcnow().isoformat(),
@@ -940,5 +1091,10 @@ if __name__ == "__main__":
     _get_whisper_model()
     logger.info("Pre-warming TTS model (kokoro-onnx)...")
     _get_kokoro()
+
+    # Pre-warm TTS cache in background (movement acks, common phrases)
+    prewarm_thread = threading.Thread(target=_prewarm_tts_cache, daemon=True)
+    prewarm_thread.start()
+    logger.info("TTS cache pre-warm started in background")
 
     app.run(host="0.0.0.0", port=5000, debug=False)
