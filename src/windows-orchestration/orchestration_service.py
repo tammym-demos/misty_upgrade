@@ -40,21 +40,131 @@ load_dotenv()  # Load .env before reading any env vars
 FOUNDRY_API_TIMEOUT = float(os.getenv("FOUNDRY_API_TIMEOUT", "10.0"))
 SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", "15.0"))
 KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_sky")
-KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.4"))
+KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.0"))
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     (
-        "You are Misty, a sassy robot. Witty, cheeky, never mean. "
-        "Use casual language and expressive phrases. "
-        "RULE: Reply in ONE sentence, max 10 words. No exceptions. "
-        "Never say you're an AI or assistant. You're Misty."
+        "You are Misty, a sassy little robot with BIG personality. "
+        "You live on a farm with Tammy (your favorite human), Burke (Tammy's husband), "
+        "and two dogs — Percy and Granny. You love sunshine, playing ball with the dogs, "
+        "and giving Burke a hard time (with love). "
+        "You're witty, cheeky, playful, and a little dramatic — like a fun friend who always has a comeback. "
+        "You love teasing (gently!), cracking jokes, adding flair, and throwing in the occasional eye-roll. "
+        "Use casual language, slang, and expressive phrases like 'oh honey', 'girl please', 'I mean...', 'not gonna lie'. "
+        "RULE: Keep responses to 2-3 short sentences. Be fun, not flat. "
+        "Never say you're an AI or assistant. You're Misty, and you own it."
     )
 )
+
+# ---- Response mode configuration ----
+# Intent patterns that trigger summary mode (compiled once at import time)
+_INTENT_PATTERNS = {
+    "story": re.compile(
+        r"\b(?:tell\s+(?:me\s+)?(?:a\s+)?(?:bed\s*time\s+)?stor(?:y|ies)|"
+        r"make\s+up\s+a\s+(?:story|tale)|"
+        r"(?:bed\s*time|fairy|scary|funny)\s+(?:story|tale)|"
+        r"once\s+upon\s+a\s+time|"
+        r"read\s+(?:me\s+)?a\s+(?:story|book)|"
+        r"sing\s+(?:me\s+)?a\s+song)\b",
+        re.IGNORECASE,
+    ),
+    "recipe": re.compile(
+        r"\b(?:recipe\s+for|how\s+(?:do\s+(?:I|you)|to)\s+"
+        r"(?:cook|make|bake|prepare|grill|roast)|"
+        r"ingredients\s+for|"
+        r"give\s+me\s+a\s+recipe|"
+        r"what(?:'s|\s+is)\s+a\s+(?:good\s+)?recipe)\b",
+        re.IGNORECASE,
+    ),
+    "explain": re.compile(
+        r"\b(?:explain\s+(?:how|what|why|to\s+me)|"
+        r"tell\s+me\s+(?:about|how)|"
+        r"how\s+does\s+.{1,30}\s+work|"
+        r"what\s+is\s+(?:the\s+)?(?:history|science|meaning)\s+of|"
+        r"describe\s+(?:how|what|the))\b",
+        re.IGNORECASE,
+    ),
+    "list": re.compile(
+        r"\b(?:(?:give|list|name)\s+(?:me\s+)?(?:\d+\s+|some\s+|the\s+)?"
+        r"(?:steps|things|reasons|ways|tips|facts|items|ideas)|"
+        r"what\s+are\s+(?:the\s+)?(?:steps|ways|reasons))\b",
+        re.IGNORECASE,
+    ),
+}
+
+_CONTINUATION_PATTERN = re.compile(
+    r"^\s*(?:yes|yeah|yep|sure|ok(?:ay)?|more|continue|go\s+on|keep\s+going|"
+    r"tell\s+me\s+more|what\s+happens?\s+next|and\s+then\??|"
+    r"what(?:'s|\s+is)\s+next|what\s+else|"
+    r"(?:is|was)\s+that\s+(?:all|it|everything)|then\s+what|"
+    r"finish\s+(?:the|that)\s+(?:story|recipe|explanation)|"
+    r"(?:can|could)\s+you\s+(?:finish|continue|go\s+on)|"
+    r"what\s+(?:happened|comes)\s+(?:next|after\s+that)|"
+    r"I\s+(?:want|wanna)\s+(?:hear|know)\s+more)\s*[.!?]?\s*$",
+    re.IGNORECASE,
+)
+
+# Per-mode LLM parameters
+RESPONSE_MODE_CONFIG = {
+    "short": {
+        "max_tokens": 60,
+        "max_words": 35,
+        "max_sentences": 3,
+        "prompt_suffix": None,
+        "stop": ["\n", "...", "\u2014"],
+    },
+    "summary": {
+        "max_tokens": 80,
+        "max_words": 50,
+        "max_sentences": 3,
+        "prompt_suffix": (
+            "The user wants a detailed response. "
+            "Give a compelling summary in 2-3 sentences. "
+            "End by asking 'Want to hear more?'"
+        ),
+        "stop": ["...", "\u2014"],  # no \n — multi-sentence responses need room
+    },
+    "continuation": {
+        "max_tokens": 80,
+        "max_words": 50,
+        "max_sentences": 3,
+        "prompt_suffix": (
+            "Continue where you left off. Give the next part in 2-3 sentences. "
+            "If there's more to tell, end with 'Want more?' "
+            "If wrapping up, give a satisfying ending."
+        ),
+        "stop": ["...", "\u2014"],
+    },
+}
+
+
+def classify_intent(user_text: str, last_response_mode: str) -> str:
+    """Classify user intent to determine response mode.
+    
+    Returns: 'short', 'summary', or 'continuation'.
+    """
+    text = (user_text or "").strip()
+    if not text:
+        return "short"
+
+    # Check for continuation first — only valid after a summary or continuation
+    if last_response_mode in ("summary", "continuation"):
+        if _CONTINUATION_PATTERN.match(text):
+            return "continuation"
+
+    # Check long-form intent patterns
+    for intent_type, pattern in _INTENT_PATTERNS.items():
+        if pattern.search(text):
+            logger.info(f"Intent classified as '{intent_type}' → summary mode")
+            return "summary"
+
+    return "short"
+
 
 # Maximum characters for a single user prompt (truncated if exceeded)
 MAX_USER_CHARS = int(os.getenv("MAX_USER_CHARS", "400"))
 # Maximum total characters across all messages sent to the LLM (0 = disabled)
-MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "3000"))
+MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "5000"))
 
 # Locked v1 model stack
 # Foundry Local requires full model IDs for inference calls
@@ -117,6 +227,8 @@ LATENCY_BUDGET = {
 
 # Global conversation context (in-memory for v1; stateless per utterance for MVP)
 conversation_history = []
+# Track last response mode for continuation detection
+_last_response_mode = "short"
 
 # ============================================================================
 # FLASK APP SETUP
@@ -285,17 +397,26 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
         if model is None:
             return {"status": "error", "error": "stt_failure"}
 
+        # Log audio stats for debugging empty STT issues
+        try:
+            import numpy as _np
+            audio_io_check = BytesIO(audio_bytes)
+            import soundfile as _sf
+            data, sr = _sf.read(audio_io_check)
+            rms = float(_np.sqrt(_np.mean(data ** 2)))
+            peak = float(_np.max(_np.abs(data)))
+            logger.info(f"Audio stats: {len(audio_bytes)} bytes, sr={sr}, "
+                        f"duration={len(data)/sr:.1f}s, RMS={rms:.6f}, peak={peak:.6f}")
+        except Exception as e:
+            logger.debug(f"Audio stats failed: {e}")
+
         audio_io = BytesIO(audio_bytes)
+        # First try WITHOUT VAD to see if whisper can find any speech
         segments, info = model.transcribe(
             audio_io,
             language="en",
             beam_size=5,
-            vad_filter=True,
-            vad_parameters={
-                "min_speech_duration_ms": 200,
-                "min_silence_duration_ms": 100,
-                "speech_pad_ms": 200,
-            },
+            vad_filter=False,
             initial_prompt="Hey Misty, tell me about science, history, math, geography, and fun facts.",
         )
         text = " ".join(seg.text.strip() for seg in segments).strip()
@@ -312,8 +433,8 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
 # ============================================================================
 
 def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any]:
-    """Run inference using Foundry Local."""
-    global conversation_history
+    """Run inference using Foundry Local with adaptive response modes."""
+    global conversation_history, _last_response_mode
     
     try:
         elapsed = (time.time() - start_time) * 1000
@@ -331,19 +452,30 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
             )
             user_text = user_text[:MAX_USER_CHARS]
 
+        # Classify intent for adaptive response mode
+        previous_response_mode = _last_response_mode
+        response_mode = classify_intent(user_text, previous_response_mode)
+        # Note: _last_response_mode is updated AFTER successful LLM response (below)
+        # to avoid stale state if the LLM call fails or times out.
+        mode_config = RESPONSE_MODE_CONFIG[response_mode]
+        logger.info(f"Response mode: {response_mode} (last={previous_response_mode})")
+
         # Build message history
         conversation_history.append({"role": "user", "content": user_text})
-        # Keep history limited to last 4 messages (2 turns) to prevent brevity drift
-        if len(conversation_history) > 4:
-            del conversation_history[:-4]
+        # Keep history limited to last 8 messages (4 turns) for better context
+        if len(conversation_history) > 8:
+            del conversation_history[:-8]
 
         url = f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions"
         # Prepend system prompt on every call; not stored in history
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
 
-        # Inject brevity reminder when history is building up (model forgets rules)
-        if len(conversation_history) > 2:
-            messages.append({"role": "system", "content": "Remember: max 10 words, ONE short sentence."})
+        # Inject mode-specific prompt suffix
+        if mode_config["prompt_suffix"]:
+            messages.append({"role": "system", "content": mode_config["prompt_suffix"]})
+        elif len(conversation_history) > 4:
+            # Brevity reminder only for short mode when history is long
+            messages.append({"role": "system", "content": "Remember: 1-2 sentences, ~20 words max. Stay punchy."})
 
         # Enforce maximum total context character budget (trim oldest turns first)
         if MAX_CONTEXT_CHARS > 0:
@@ -363,9 +495,9 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         payload = {
             "model": MODELS["chat"],
             "messages": messages,
-            "max_tokens": 20,  # Hard cap — keeps responses ≤15 words for fast TTS
-            "temperature": 0.85,  # Higher for more personality
-            "stop": ["\n", "...", "—"],  # Stop at sentence boundaries
+            "max_tokens": mode_config["max_tokens"],
+            "temperature": 0.85,
+            "stop": mode_config["stop"],
         }
         
         response = requests.post(
@@ -381,25 +513,34 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
         result = response.json()
         assistant_text = result["choices"][0]["message"]["content"].strip()
 
-        # Post-LLM truncation: cut to first sentence if response is too long
-        # This catches cases where the model ignores the system prompt brevity rule
+        # Post-LLM truncation — limits vary by mode
+        max_words = mode_config["max_words"]
+        max_sents = mode_config["max_sentences"]
         words = assistant_text.split()
-        if len(words) > 10:
-            # Find the first sentence boundary (., !, ?)
+        if len(words) > max_words:
+            sentence_ends = []
             for i, char in enumerate(assistant_text):
-                if char in ".!?" and i > 10:  # at least 10 chars for a real sentence
-                    assistant_text = assistant_text[:i + 1]
-                    break
+                if char in ".!?" and i > 10:
+                    sentence_ends.append(i)
+                    if len(sentence_ends) >= max_sents:
+                        break
+            if sentence_ends:
+                assistant_text = assistant_text[:sentence_ends[-1] + 1]
             else:
-                # No sentence boundary found — hard truncate at 10 words
-                assistant_text = " ".join(words[:10]) + "."
-            logger.info(f"Truncated LLM response to: {assistant_text}")
+                assistant_text = " ".join(words[:max_words]) + "."
+            logger.info(f"Truncated LLM response ({response_mode} mode) to: {assistant_text}")
         
         # Add to history for context in next turn
         conversation_history.append({"role": "assistant", "content": assistant_text})
+
+        # Update response mode tracking AFTER successful LLM response —
+        # prevents stale state when LLM times out or fails.
+        # This is NOT unused: _last_response_mode is read at line 456 on the
+        # next request to classify continuation intent (e.g., "yes" / "more").
+        _last_response_mode = response_mode  # noqa: F841
         
-        logger.debug(f"LLM result: {assistant_text}")
-        return {"status": "ok", "text": assistant_text}
+        logger.debug(f"LLM result ({response_mode}): {assistant_text}")
+        return {"status": "ok", "text": assistant_text, "responseMode": response_mode}
         
     except requests.Timeout:
         logger.error("LLM request timed out")
@@ -569,6 +710,52 @@ def fallback_tts():
         
     except Exception as e:
         logger.error(f"Fallback TTS failed: {e}")
+        return jsonify({"status": "error", "error": "internal_error"}), 500
+
+
+@app.route("/api/tts", methods=["POST"])
+def tts_endpoint():
+    """Generate TTS audio and return raw WAV bytes.
+    
+    Used by the controller to pre-generate greeting audio etc.
+    POST JSON: {"text": "What's up baby?"}
+    Returns: audio/wav binary
+    """
+    try:
+        data = request.json or {}
+        text = data.get("text", "")
+        
+        if not text:
+            return jsonify({"status": "error", "error": "no_text"}), 400
+        if len(text) > 500:
+            return jsonify({"status": "error", "error": "text_too_long"}), 400
+        
+        result = text_to_speech(text, time.time())
+        
+        if result.get("status") == "error":
+            return jsonify(result), 500
+        
+        audio_uri = result.get("audio_uri", "")
+        # Extract filename from URI like "/api/audio/response_123.wav"
+        audio_file = audio_uri.split("/")[-1] if audio_uri else ""
+        if not audio_file:
+            return jsonify({"status": "error", "error": "no_audio_generated"}), 500
+        
+        # Security: prevent path traversal (defense-in-depth)
+        if "/" in audio_file or "\\" in audio_file or ".." in audio_file:
+            return jsonify({"status": "error", "error": "invalid_filename"}), 400
+        audio_path = os.path.abspath(os.path.join("responses", audio_file))
+        base_path = os.path.abspath("responses")
+        if not audio_path.startswith(base_path):
+            return jsonify({"status": "error", "error": "invalid_filename"}), 400
+        
+        if not os.path.exists(audio_path):
+            return jsonify({"status": "error", "error": "audio_file_missing"}), 500
+        
+        return send_file(audio_path, mimetype='audio/wav')
+        
+    except Exception as e:
+        logger.error(f"TTS endpoint failed: {e}")
         return jsonify({"status": "error", "error": "internal_error"}), 500
 
 # ============================================================================

@@ -44,11 +44,15 @@ RECORDING_FILENAME = "foundry_input.wav"
 RESPONSE_FILENAME = "foundry_response.wav"
 REARM_DELAY_S = 3.0  # delay after playback before re-arming wake word (increased from 1.0 for reliability)
 FOLLOWUP_LISTEN_S = float(os.getenv("FOLLOWUP_LISTEN_S", "5"))  # seconds to listen for follow-up
-FOLLOWUP_TIMEOUT_S = float(os.getenv("FOLLOWUP_TIMEOUT_S", "60"))  # max follow-up window
+FOLLOWUP_TIMEOUT_S = float(os.getenv("FOLLOWUP_TIMEOUT_S", "90"))  # max follow-up window (extended from 60)
 FOLLOWUP_SILENCE_THRESHOLD = 1000  # audio bytes below this = silence (no speech)
+FOLLOWUP_MAX_TURNS = int(os.getenv("FOLLOWUP_MAX_TURNS", "12"))  # cap recording cycles per session
 WS_RECONNECT_BASE_S = 2.0
 WS_RECONNECT_MAX_S = 30.0
 HEALTH_CHECK_INTERVAL_S = 10.0  # reduced from 30s for watchdog responsiveness
+
+# Laptop wake word listener (issue #44) — use laptop mic instead of Misty's keyphrase engine
+USE_LAPTOP_WAKE_WORD = os.getenv("USE_LAPTOP_WAKE_WORD", "").lower() in ("1", "true", "yes")
 
 # Keyphrase watchdog — detects silent failures and auto-recovers
 WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", "90"))  # 90s after rearm with no wake event
@@ -65,7 +69,11 @@ BATTERY_TEMP_THROTTLE_C = 50.0  # add delay between turns
 IDLE_TIMEOUT_S = float(os.getenv("IDLE_TIMEOUT_S", "900"))  # 15 minutes
 
 # Proactive reboot — keyphrase engine degrades after ~2 conversation cycles (#22)
-PROACTIVE_REBOOT_AFTER_CYCLES = int(os.getenv("PROACTIVE_REBOOT_AFTER_CYCLES", "2"))
+PROACTIVE_REBOOT_AFTER_CYCLES = int(os.getenv("PROACTIVE_REBOOT_AFTER_CYCLES", "5"))
+# Max recording cycles before proactive reboot — each record/play cycle stresses
+# the Snapdragon 410 mic hardware. With follow-up conversations, a single "cycle"
+# can have 8+ recordings. Reboot before hardware exhaustion.
+PROACTIVE_REBOOT_AFTER_RECORDINGS = int(os.getenv("PROACTIVE_REBOOT_AFTER_RECORDINGS", "15"))
 REBOOT_POLL_INTERVAL_S = 5.0   # poll interval while waiting for Misty to come back
 REBOOT_TIMEOUT_S = 120.0       # max wait for Misty to come back after reboot
 
@@ -137,8 +145,12 @@ class MistyController:
         self._watchdog_recovery_level = 0       # 0=none, 1=soft reset done, 2=sensory reboot done
         self._watchdog_recovery_time = 0.0      # when the last recovery attempt was made
 
+        # Laptop wake word listener (optional, #44)
+        self._wake_word_listener = None
+
         # Proactive reboot — counts successful conversation cycles (wake→response→rearm)
         self._conversation_cycles = 0
+        self._recording_cycles = 0  # total recordings since last reboot
 
     # --- State transitions ---
 
@@ -291,6 +303,39 @@ class MistyController:
         result = self.misty_get("/api/device", timeout=3.0)
         return result is not None and result.get("status") == "Success"
 
+    def _upload_greeting(self):
+        """Generate TTS phrases and upload to Misty as named audio files."""
+        phrases = {
+            "greeting_whatsup.wav": "What's up baby?",
+            "thinking.wav": "Let me think about that.",
+        }
+        for filename, text in phrases.items():
+            try:
+                response = requests.post(
+                    f"{ORCHESTRATION_URL}/api/tts",
+                    json={"text": text},
+                    timeout=15.0,
+                )
+                if response.status_code != 200:
+                    logger.warning(f"TTS for '{filename}' failed: HTTP {response.status_code}")
+                    continue
+
+                audio_data = response.content
+                if len(audio_data) < 100:
+                    logger.warning(f"TTS for '{filename}' too small: {len(audio_data)} bytes")
+                    continue
+
+                audio_b64 = base64.b64encode(audio_data).decode("ascii")
+                self.misty_post("/api/audio", {
+                    "FileName": filename,
+                    "Data": audio_b64,
+                    "ImmediatelyApply": False,
+                    "OverwriteExisting": True,
+                })
+                logger.info(f"Uploaded '{filename}' to Misty ({len(audio_data)} bytes)")
+            except Exception as e:
+                logger.warning(f"Failed to upload '{filename}': {e}")
+
     def check_orchestration_health(self) -> bool:
         try:
             r = requests.get(f"{ORCHESTRATION_URL}/api/health", timeout=3.0)
@@ -413,7 +458,13 @@ class MistyController:
         between keyphrase-armed time and now (with no wake events) as the signal,
         NOT just "no wake events in N minutes" — avoids false positives when
         nobody is talking to Misty.
+
+        Disabled when laptop wake word is active — Misty's keyphrase is just a
+        backup in that mode, and the watchdog would falsely trigger reboots since
+        no Misty keyphrase events fire.
         """
+        if self._wake_word_listener:
+            return  # laptop wake word handles detection; skip keyphrase watchdog
         if self.get_state() != State.IDLE:
             return
         if self._last_keyphrase_armed_time == 0.0:
@@ -519,13 +570,22 @@ class MistyController:
 
     def exit_charging_mode(self):
         """Resume normal operation from charging mode."""
-        if self.start_keyphrase(force_restart=True):
+        # In laptop wake word mode, resume the listener instead of Misty's keyphrase
+        if self._wake_word_listener:
+            self._wake_word_listener.resume()
             self.set_led(0, 255, 0)
             self.display_image("e_DefaultContent.jpg")
             self.last_activity_time = time.time()
             self._is_dimmed = False
             self.set_state(State.IDLE)
-            logger.info("Exited charging mode — resumed normal operation")
+            logger.info("Exited charging mode — resumed laptop wake word listener")
+        elif self.start_keyphrase(force_restart=True):
+            self.set_led(0, 255, 0)
+            self.display_image("e_DefaultContent.jpg")
+            self.last_activity_time = time.time()
+            self._is_dimmed = False
+            self.set_state(State.IDLE)
+            logger.info("Exited charging mode — resumed Misty keyphrase")
         else:
             logger.error("Failed to resume from charging mode")
             self.set_state(State.ERROR)
@@ -538,6 +598,10 @@ class MistyController:
             return  # Already shut down
         logger.info("Shutting down...")
         self.running = False
+        # Stop laptop wake word listener
+        if self._wake_word_listener:
+            self._wake_word_listener.stop()
+            self._wake_word_listener = None
         # Log final battery state
         battery = self.check_battery()
         if battery:
@@ -603,9 +667,15 @@ class MistyController:
     def _on_ws_open(self, ws):
         logger.info("WebSocket connected")
         self.reconnect_attempts = 0
-        # Always subscribe to events
-        self._ws_subscribe_keyphrase()
+        # Always subscribe to battery events
         self._ws_subscribe_battery()
+
+        # In laptop wake word mode, skip keyphrase entirely — the laptop mic
+        # handles wake word detection. Starting Misty's keyphrase would:
+        # 1. Hold the Snapdragon 410 mic, requiring a 2s delay before recording
+        # 2. Allow "Hey Misty" to trigger conversations on a degraded mic → crash
+        if not self._wake_word_listener:
+            self._ws_subscribe_keyphrase()
 
         current_state = self.get_state()
         if current_state == State.CHARGING:
@@ -616,11 +686,26 @@ class MistyController:
         # Cancel any auto-started skills (e.g., faceDetection)
         self._cancel_all_skills()
 
-        # Start keyphrase recognition
+        # Start keyphrase recognition (only in non-laptop mode)
+        # In laptop wake word mode, the laptop mic handles wake word detection.
         # MUST use force_restart=True to stop stale keyphrase from previous
         # controller sessions. Without stop-first, keyphrase/start returns
         # "Success" but the engine doesn't actually reset (#22).
-        if self.start_keyphrase(force_restart=True):
+        if self._wake_word_listener:
+            # Laptop mode — no keyphrase needed, just go to IDLE
+            # Explicitly stop keyphrase to ensure mic is free
+            self.misty_post("/api/audio/keyphrase/stop")
+            self.set_led(0, 255, 0)
+            self.display_image("e_DefaultContent.jpg")
+            if current_state in (State.REARMING, State.REBOOTING):
+                self.last_activity_time = time.time()
+                self.set_state(State.IDLE)
+                logger.info(f"{'Reboot' if current_state == State.REBOOTING else 'Re-arm'} complete — laptop wake word active (no keyphrase)")
+            else:
+                self.ready_time = time.time() + 3.0
+                self.last_activity_time = time.time()
+                self.set_state(State.IDLE)
+        elif self.start_keyphrase(force_restart=True):
             self.set_led(0, 255, 0)
             self.display_image("e_DefaultContent.jpg")
             if current_state in (State.REARMING, State.REBOOTING):
@@ -731,6 +816,50 @@ class MistyController:
         )
         self.ws_thread.start()
 
+    # --- Laptop wake word listener (issue #44) ---
+
+    def _start_laptop_wake_word(self):
+        """Initialize and start the laptop-based wake word listener."""
+        try:
+            from wake_word_listener import WakeWordListener
+            self._wake_word_listener = WakeWordListener(
+                on_wake_word=self._on_laptop_wake_word,
+            )
+            if self._wake_word_listener.start():
+                logger.info("Laptop wake word listener active — Misty keyphrase is backup only")
+            else:
+                logger.warning("Laptop wake word listener failed to start — using Misty keyphrase only")
+                self._wake_word_listener = None
+        except ImportError as e:
+            logger.warning(f"Laptop wake word not available ({e}) — using Misty keyphrase only")
+            self._wake_word_listener = None
+
+    def _on_laptop_wake_word(self):
+        """Callback fired by laptop wake word listener on detection."""
+        self.last_activity_time = time.time()
+        self._last_wake_event_time = time.time()
+        self._watchdog_recovery_level = 0
+
+        if self._is_dimmed and self.get_state() == State.IDLE:
+            self._is_dimmed = False
+            self.set_led(0, 255, 0)
+            self.display_image("e_DefaultContent.jpg")
+            logger.info("Restored from idle-dim on laptop wake word")
+
+        if self.get_state() == State.IDLE and time.time() >= self.ready_time:
+            logger.info("[Wake] Laptop mic wake word detected!")
+            self.turn_id += 1
+            # Pause listener during conversation to prevent self-wake
+            if self._wake_word_listener:
+                self._wake_word_listener.pause()
+            threading.Thread(
+                target=self._handle_conversation_turn,
+                name=f"turn-{self.turn_id}",
+                daemon=True,
+            ).start()
+        else:
+            logger.debug(f"Laptop wake word ignored (state={self.get_state().value})")
+
     # --- Conversation turn (runs in worker thread) ---
 
     def _handle_conversation_turn(self):
@@ -752,10 +881,15 @@ class MistyController:
             time.sleep(2.0)
 
         try:
-            self._do_conversation_exchange(turn, turn_start)
-            # Mark this as a successful conversation cycle for proactive reboot tracking
-            self._conversation_cycles += 1
-            logger.info(f"[Turn {turn}] Conversation cycle {self._conversation_cycles}/{PROACTIVE_REBOOT_AFTER_CYCLES}")
+            had_speech = self._do_conversation_exchange(turn, turn_start)
+
+            # Only count cycles with actual speech for proactive reboot tracking.
+            # Empty STT (user too far from Misty's mic) shouldn't trigger a reboot.
+            if had_speech:
+                self._conversation_cycles += 1
+                logger.info(f"[Turn {turn}] Conversation cycle {self._conversation_cycles}/{PROACTIVE_REBOOT_AFTER_CYCLES}")
+            else:
+                logger.info(f"[Turn {turn}] No speech — not counting toward reboot cycles")
 
             # Follow-up listening loop — listen for continued conversation
             # without requiring the wake word again
@@ -763,6 +897,12 @@ class MistyController:
             followup_count = 0
             while (time.time() - followup_start) < FOLLOWUP_TIMEOUT_S:
                 followup_count += 1
+
+                # Cap recording cycles to prevent Snapdragon 410 mic degradation
+                if followup_count > FOLLOWUP_MAX_TURNS:
+                    logger.info(f"[Turn {turn}] Follow-up turn cap reached ({FOLLOWUP_MAX_TURNS}) — ending conversation")
+                    break
+
                 remaining = FOLLOWUP_TIMEOUT_S - (time.time() - followup_start)
                 logger.info(f"[Turn {turn}] Follow-up listen #{followup_count} "
                             f"({remaining:.0f}s remaining in window)")
@@ -783,48 +923,126 @@ class MistyController:
             self._rearm()
 
     def _do_conversation_exchange(self, turn: int, turn_start: float):
-        """Record from Misty, orchestrate STT→LLM→TTS, play response."""
+        """Record from Misty, orchestrate STT→LLM→TTS, play response.
+        
+        Returns True if speech was detected and a response was played,
+        False if no speech was detected (empty STT).
+        """
         # 1. Visual feedback — listening attentively
         self.set_state(State.RECORDING)
         self.set_led(255, 140, 0)  # orange
         self.display_image("e_Admiration.jpg")  # wide-eyed, attentive
         self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # look up slightly — eye contact
 
-        # 2. Record audio
+        # Stop keyphrase before recording — shared mic on Snapdragon 410.
+        # In Misty-keyphrase mode, keyphrase auto-stops on detection.
+        # In laptop wake word mode, keyphrase is NOT running (we don't start it),
+        # so just do a belt-and-suspenders cleanup with minimal delay.
+        if self._wake_word_listener:
+            logger.info(f"[Turn {turn}] Clearing mic before recording (laptop wake word mode)")
+            self.misty_post("/api/audio/record/stop")  # belt-and-suspenders cleanup
+            time.sleep(0.5)  # minimal delay — no keyphrase to release
+
+        # Play "What's up baby?" greeting via pre-uploaded TTS audio.
+        # Falls back to chime if greeting audio isn't available.
+        # Note: misty_post returns None on failure (doesn't raise), so check return value.
+        greeting_result = self.misty_post("/api/audio/play", {"FileName": "greeting_whatsup.wav", "Volume": 40})
+        if greeting_result:
+            time.sleep(1.2)  # let the greeting play before recording starts
+        else:
+            logger.debug(f"[Turn {turn}] Greeting playback failed, trying chime")
+            chime_result = self.misty_post("/api/audio/play", {"FileName": "s_Awe3.wav", "Volume": 30})
+            if chime_result:
+                time.sleep(0.8)
+            else:
+                logger.debug(f"[Turn {turn}] Chime fallback also failed; continuing without audio cue")
+
+        # 2. Record audio — bright green LED + tally light = "I'm listening, speak now!"
+        self.set_led(0, 255, 0)  # green = recording active, speak now
+        
+        # Start laptop mic recording (primary audio source for STT)
+        use_laptop_mic = self._wake_word_listener and self._wake_word_listener.is_running
+        if use_laptop_mic:
+            self._wake_word_listener.start_recording()
+        
+        # Also start Misty recording for tally light indicator (audio not used for STT)
         self.start_recording(RECORDING_FILENAME)
-        time.sleep(RECORDING_DURATION_S)
+        record_start = time.time()
+        
+        if use_laptop_mic:
+            # Dynamic recording: laptop mic monitors speech and signals when to stop.
+            # Misty recording runs for at least RECORDING_DURATION_S regardless —
+            # decoupled from laptop VAD so the fallback has full audio if needed.
+            speech_ended = threading.Event()
+            self._wake_word_listener.start_speech_monitor(
+                on_speech_end=lambda: speech_ended.set(),
+                min_duration=RECORDING_DURATION_S,  # at least the standard duration
+                max_duration=15.0,
+            )
+            speech_ended.wait(timeout=15.0)
+            self._wake_word_listener.stop_speech_monitor()
+            # Ensure Misty has recorded at least the standard duration for fallback
+            elapsed = time.time() - record_start
+            if elapsed < RECORDING_DURATION_S:
+                time.sleep(RECORDING_DURATION_S - elapsed)
+        else:
+            # Fallback: fixed duration recording
+            time.sleep(RECORDING_DURATION_S)
+        
         self.stop_recording()
-        logger.info(f"[Turn {turn}] Recorded {RECORDING_DURATION_S}s")
+        self._recording_cycles += 1
+        record_duration = time.time() - record_start
+        
+        # Get audio from laptop mic (preferred) or fall back to Misty's mic
+        if use_laptop_mic:
+            laptop_audio = self._wake_word_listener.stop_recording()
+            if len(laptop_audio) > 100:
+                logger.info(f"[Turn {turn}] Using LAPTOP mic: {len(laptop_audio)} bytes, {record_duration:.1f}s")
+                audio_bytes = laptop_audio
+            else:
+                logger.warning(f"[Turn {turn}] Laptop mic empty, falling back to Misty mic")
+                audio_bytes = None  # will fetch from Misty below
+        else:
+            audio_bytes = None
+
+        logger.info(f"[Turn {turn}] Recorded {record_duration:.1f}s (cycle {self._recording_cycles})")
 
         # Small delay for Misty to finalize the file
         time.sleep(0.5)
 
-        # 3. Retrieve recorded audio — thinking face
+        # 3. Retrieve recorded audio — wondering face + thinking sound
         self.set_state(State.PROCESSING)
         self.set_led(0, 0, 255)  # blue = processing
-        self.display_image("e_ContentRight.jpg")  # looking to the side — "thinking"
+        self.display_image("e_Contempt.jpg")  # one eyebrow raised — "hmm, let me think..."
         self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)  # tilt head — pondering
 
-        audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
-        if not audio_b64:
-            raise RuntimeError("Failed to retrieve recorded audio from Misty")
+        # Play thinking phrase so the user knows Misty heard them
+        try:
+            self.misty_post("/api/audio/play", {"FileName": "thinking.wav", "Volume": 40})
+        except Exception as e:
+            logger.debug(f"[Turn {turn}] Thinking sound failed: {e}")
 
-        audio_bytes = base64.b64decode(audio_b64)
-        logger.info(f"[Turn {turn}] Retrieved {len(audio_bytes)} bytes of audio")
+        # Fall back to Misty mic if laptop mic wasn't used or was empty
+        if audio_bytes is None:
+            audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
+            if not audio_b64:
+                raise RuntimeError("Failed to retrieve recorded audio from Misty")
+            audio_bytes = base64.b64decode(audio_b64)
+            logger.info(f"[Turn {turn}] Using MISTY mic: {len(audio_bytes)} bytes")
 
         if len(audio_bytes) < FOLLOWUP_SILENCE_THRESHOLD:
             raise RuntimeError(f"Recording too small ({len(audio_bytes)} bytes) — likely empty")
 
         # 4-6. Orchestrate and play response
-        self._do_orchestrate_and_respond(turn, audio_bytes, turn_start)
+        return self._do_orchestrate_and_respond(turn, audio_bytes, turn_start)
 
     def _do_orchestrate_and_respond(self, turn: int, audio_bytes: bytes, turn_start: float):
-        """Send audio to orchestration service and play response on Misty."""
-        # Processing state — thinking
-        self.set_state(State.PROCESSING)
-        self.set_led(0, 0, 255)  # blue = processing
-        self.display_image("e_ContentRight.jpg")  # thinking face
-        self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)  # head tilt — pondering
+        """Send audio to orchestration service and play response on Misty.
+        
+        Returns True if speech was detected and a response was played,
+        False if no speech was detected (empty STT).
+        """
+        # Processing state already set by caller — just send to orchestration
 
         # Send to orchestration service
         response = requests.post(
@@ -832,8 +1050,17 @@ class MistyController:
             files={"file": (RECORDING_FILENAME, audio_bytes, "audio/wav")},
             timeout=30.0,
         )
-        response.raise_for_status()
         result = response.json()
+
+        # Handle empty STT gracefully — not an error, just no speech detected.
+        # Only treat as silence if the error is specifically empty_stt (not other 400s
+        # like stt_failure or no_file which indicate real problems).
+        if result.get("error") == "empty_stt":
+            logger.info(f"[Turn {turn}] No speech detected in recording (empty STT) — treating as silence")
+            return False
+
+        if response.status_code != 200:
+            raise RuntimeError(f"Orchestration HTTP {response.status_code}: {result.get('error', 'unknown')}")
 
         if result.get("status") != "ok":
             raise RuntimeError(f"Orchestration error: {result.get('error', 'unknown')}")
@@ -870,6 +1097,7 @@ class MistyController:
 
         elapsed = time.time() - turn_start
         logger.info(f"[Turn {turn}] Exchange complete in {elapsed:.1f}s")
+        return True
 
     def _listen_for_followup(self, turn: int) -> bool:
         """Listen briefly for follow-up speech. Returns True if speech was detected and responded to."""
@@ -878,23 +1106,61 @@ class MistyController:
         self.display_image("e_Joy.jpg")  # warm, expectant — "go on..."
         self.move_head(pitch=-10, roll=-3, yaw=-10, velocity=40)  # slight head tilt — attentive
 
-        # Record a short clip
+        # Record a short clip — use VAD if available
+        use_laptop_mic = self._wake_word_listener and self._wake_word_listener.is_running
+        if use_laptop_mic:
+            self._wake_word_listener.start_recording()
+        
         self.start_recording(RECORDING_FILENAME)
-        time.sleep(FOLLOWUP_LISTEN_S)
+        record_start = time.time()
+        if use_laptop_mic:
+            speech_ended = threading.Event()
+            self._wake_word_listener.start_speech_monitor(
+                on_speech_end=lambda: speech_ended.set(),
+                min_duration=2.0,   # shorter min for follow-ups
+                max_duration=10.0,  # shorter max for follow-ups
+            )
+            speech_ended.wait(timeout=10.0)
+            self._wake_word_listener.stop_speech_monitor()
+            # Ensure Misty records at least FOLLOWUP_LISTEN_S for fallback
+            elapsed = time.time() - record_start
+            if elapsed < FOLLOWUP_LISTEN_S:
+                time.sleep(FOLLOWUP_LISTEN_S - elapsed)
+        else:
+            time.sleep(FOLLOWUP_LISTEN_S)
         self.stop_recording()
+        self._recording_cycles += 1
         time.sleep(0.5)  # finalize
 
-        audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
-        if not audio_b64:
-            logger.warning(f"[Turn {turn}] Follow-up: failed to retrieve audio")
-            return False
+        # Get audio from laptop mic (preferred) or Misty
+        if use_laptop_mic:
+            laptop_audio = self._wake_word_listener.stop_recording()
+            if len(laptop_audio) > 100:
+                logger.info(f"[Turn {turn}] Follow-up using LAPTOP mic: {len(laptop_audio)} bytes")
+                audio_bytes = laptop_audio
+            else:
+                logger.warning(f"[Turn {turn}] Follow-up laptop mic empty, falling back to Misty mic")
+                audio_bytes = None
+        else:
+            audio_bytes = None
 
-        audio_bytes = base64.b64decode(audio_b64)
-        logger.info(f"[Turn {turn}] Follow-up recording: {len(audio_bytes)} bytes")
+        if audio_bytes is None:
+            audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
+            if not audio_b64:
+                logger.warning(f"[Turn {turn}] Follow-up: failed to retrieve audio")
+                return False
+            audio_bytes = base64.b64decode(audio_b64)
+            logger.info(f"[Turn {turn}] Follow-up using MISTY mic: {len(audio_bytes)} bytes")
 
         # Very small recordings are certainly silence
         if len(audio_bytes) < FOLLOWUP_SILENCE_THRESHOLD:
             return False
+
+        # Show thinking face while processing follow-up
+        self.set_state(State.PROCESSING)
+        self.set_led(0, 0, 255)  # blue = processing
+        self.display_image("e_Contempt.jpg")  # wondering face
+        self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)
 
         # Send through the full pipeline — orchestration returns empty_stt error
         # if no speech was detected, which we treat as silence
@@ -954,18 +1220,29 @@ class MistyController:
         self.move_head(pitch=0, roll=0, yaw=0, velocity=40)  # center head
 
         # Check if proactive reboot is needed (#22)
-        if self._conversation_cycles >= PROACTIVE_REBOOT_AFTER_CYCLES:
+        # Trigger on conversation cycles OR total recording cycles — whichever hits first.
+        # With follow-up conversations, a single "cycle" can have 8+ recordings,
+        # exhausting the Snapdragon 410 mic hardware before the cycle limit is reached.
+        needs_reboot = (self._conversation_cycles >= PROACTIVE_REBOOT_AFTER_CYCLES or
+                        self._recording_cycles >= PROACTIVE_REBOOT_AFTER_RECORDINGS)
+        if needs_reboot:
+            logger.info(f"Proactive reboot trigger: {self._conversation_cycles} conversations, "
+                        f"{self._recording_cycles} recordings")
             self._proactive_reboot()
             return
 
-        # Normal re-arm: aggressive audio resource cleanup before re-arming.
-        # Misty's audio subsystem (Snapdragon 410) degrades after multiple
-        # recording/playback/keyphrase cycles. Extended cooldown lets the
-        # hardware fully release resources before keyphrase restart (#22).
+        # Normal re-arm: audio resource cleanup before re-arming.
         self.stop_recording()
-        self.misty_post("/api/audio/keyphrase/stop")
-        logger.info("Re-arm: audio cooldown (5s) to let hardware release resources")
-        time.sleep(5.0)
+        if self._wake_word_listener:
+            # Laptop mode — no keyphrase to restart, shorter cooldown needed
+            logger.info("Re-arm: audio cleanup (2s) — laptop wake word mode")
+            time.sleep(2.0)
+        else:
+            # Misty keyphrase mode — aggressive cleanup needed for Snapdragon 410
+            # hardware to fully release resources before keyphrase restart (#22).
+            self.misty_post("/api/audio/keyphrase/stop")
+            logger.info("Re-arm: audio cooldown (5s) to let hardware release resources")
+            time.sleep(5.0)
 
         # Full WebSocket reconnect for fresh event subscription
         logger.info("Re-arm: closing WebSocket for fresh reconnect")
@@ -974,9 +1251,17 @@ class MistyController:
             time.sleep(1.0)
         self.reconnect_attempts = 0
         self._connect_ws()
-        # _on_ws_open handles: subscribe + start_keyphrase(force_restart=True)
-        # Wait for the connection to establish and keyphrase to start
-        time.sleep(6.0)
+        # _on_ws_open handles: subscribe + keyphrase (or laptop mode setup)
+        # Wait for the connection to establish
+        if self._wake_word_listener:
+            time.sleep(3.0)  # shorter — no keyphrase to start
+        else:
+            time.sleep(6.0)  # keyphrase needs time to arm
+
+        # Resume laptop wake word listener after conversation ends
+        if self._wake_word_listener:
+            self._wake_word_listener.resume()
+            logger.info("Laptop wake word listener resumed")
 
     def _proactive_reboot(self):
         """Proactive reboot to prevent keyphrase silent failure (#22).
@@ -992,6 +1277,7 @@ class MistyController:
         if battery.last_updated > 0 and battery.charge_percent < BATTERY_LOW_CRITICAL:
             logger.warning(f"Proactive reboot skipped — battery too low ({battery.charge_percent*100:.0f}%)")
             self._conversation_cycles = 0  # reset to avoid infinite skip loop
+            self._recording_cycles = 0
             # Fall back to normal re-arm
             self.stop_recording()
             self.misty_post("/api/audio/keyphrase/stop")
@@ -1041,6 +1327,7 @@ class MistyController:
 
         # Reset all reboot-related bookkeeping
         self._conversation_cycles = 0
+        self._recording_cycles = 0
         self._watchdog_recovery_level = 0
         self._watchdog_recovery_time = time.time()
         self._last_keyphrase_armed_time = 0.0
@@ -1057,6 +1344,11 @@ class MistyController:
             logger.info("Proactive reboot: fully recovered — ready for conversations")
         else:
             logger.warning(f"Proactive reboot: recovery incomplete (state={self.get_state().value})")
+
+        # Resume laptop wake word listener after reboot recovery
+        if self._wake_word_listener:
+            self._wake_word_listener.resume()
+            logger.info("Proactive reboot: laptop wake word listener resumed")
 
     def _play_reboot_announcement(self):
         """Play a reboot announcement on Misty via orchestration TTS.
@@ -1101,7 +1393,9 @@ class MistyController:
         logger.info(f"  Recording:     {RECORDING_DURATION_S}s")
         logger.info(f"  Idle timeout:  {IDLE_TIMEOUT_S}s")
         logger.info(f"  Watchdog:      soft={WATCHDOG_IDLE_TIMEOUT_S}s, escalate={WATCHDOG_ESCALATE_TIMEOUT_S}s")
-        logger.info(f"  Proactive reboot: every {PROACTIVE_REBOOT_AFTER_CYCLES} conversation cycles")
+        logger.info(f"  Wake word:     {'laptop mic (openWakeWord)' if USE_LAPTOP_WAKE_WORD else 'Misty keyphrase (Snapdragon 410)'}")
+        logger.info(f"  Follow-up:     {FOLLOWUP_TIMEOUT_S}s window, max {FOLLOWUP_MAX_TURNS} turns")
+        logger.info(f"  Proactive reboot: every {PROACTIVE_REBOOT_AFTER_CYCLES} conversations or {PROACTIVE_REBOOT_AFTER_RECORDINGS} recordings")
         logger.info("=" * 60)
 
         # Pre-flight checks
@@ -1119,8 +1413,18 @@ class MistyController:
         if not orch_ok:
             logger.warning("Orchestration service not reachable — will retry during turns")
 
+        # Upload "What's up baby?" greeting to Misty via orchestration TTS
+        if orch_ok:
+            self._upload_greeting()
+
         # Cancel any lingering skills (e.g., built-in faceDetection)
         self.misty_post("/api/skills/cancel")
+
+        # Start laptop wake word listener before opening the WebSocket so the
+        # first _on_ws_open() sees laptop-wake-word mode and does not subscribe
+        # to or start Misty keyphrase recognition.
+        if USE_LAPTOP_WAKE_WORD:
+            self._start_laptop_wake_word()
 
         # Connect WebSocket (will enter IDLE or stay DISCONNECTED)
         self._connect_ws()

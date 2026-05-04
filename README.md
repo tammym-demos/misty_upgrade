@@ -17,13 +17,16 @@ This project integrates a **Misty II** social robot with **Microsoft Foundry Loc
 ┌──────────────────────────────┐         ┌──────────────────────────────────┐
 │        Misty II Robot        │         │     Windows Companion Device     │
 │                              │  Wi-Fi  │                                  │
-│  "Hey, Misty!" (wake word)   │◄───────►│  Misty Controller (Python)      │
-│  Microphone / Speakers       │  REST + │    ├─ WebSocket event listener   │
-│  LED / Display               │  WS     │    ├─ REST API commands          │
+│  Speakers / LED / Display    │◄───────►│  Misty Controller (Python)      │
+│  Tally light (recording      │  REST + │    ├─ WebSocket event listener   │
+│    indicator only)           │  WS     │    ├─ REST API commands          │
 │                              │         │    └─ State machine (IDLE →      │
 │  Controlled entirely via     │         │        RECORDING → PROCESSING →  │
 │  REST API + WebSocket from   │         │        PLAYING → LISTENING →     │
 │  companion device            │         │        REARMING)                 │
+│                              │         │  Laptop Microphone (primary)     │
+│                              │         │    ├─ Wake word (openWakeWord)   │
+│                              │         │    └─ Speech recording (STT)     │
 │                              │         │  Orchestration Service (Flask)   │
 │                              │         │    ├─ STT  (faster-whisper)      │
 │                              │         │    ├─ LLM  (Phi-3.5-mini)  ───► Foundry Local
@@ -33,7 +36,9 @@ This project integrates a **Misty II** social robot with **Microsoft Foundry Loc
 └──────────────────────────────┘         └──────────────────────────────────┘
 ```
 
-**Pipeline flow:** Wake word (WebSocket event) → Record via REST → Download audio → `POST /api/orchestrate` → STT → LLM → TTS → Upload audio to Misty → Playback → Re-arm wake word
+**Pipeline flow (laptop wake word mode):** Wake word (laptop mic + openWakeWord) → Record via laptop mic (Misty tally light only) → `POST /api/orchestrate` → STT → LLM → TTS → Upload audio to Misty → Playback → Re-arm wake word
+
+> **Note:** Laptop wake word mode is opt-in via `USE_LAPTOP_WAKE_WORD=true`. Without it, the default path uses Misty's built-in "Hey Misty" keyphrase (subject to degradation — see #22).
 
 > **Note:** We use the REST API + WebSocket approach (code runs on the laptop) instead of Misty's on-robot JavaScript SDK. The skill runtime proved unreliable — see [Implementation Guide](docs/IMPLEMENTATION_GUIDE.md) for details.
 
@@ -51,7 +56,8 @@ Misty II's onboard Snapdragon 820 + 410 (2 GB RAM) cannot run modern inference w
 │   │
 │   └── windows-orchestration/          # Python services on companion device
 │       ├── orchestration_service.py    #   STT → LLM → TTS pipeline (~500 LOC)
-│       ├── misty_controller.py         #   REST+WebSocket controller for Misty (~800 LOC)
+│       ├── misty_controller.py         #   REST+WebSocket controller for Misty (~1300 LOC)
+│       ├── wake_word_listener.py       #   Laptop mic wake word + recording (~450 LOC)
 │       ├── requirements.txt            #   Dependencies (Flask, requests, websocket-client, faster-whisper)
 │       └── .env.example                #   Configuration template
 │
@@ -111,7 +117,7 @@ The orchestration service is configured via environment variables (copy `.env.ex
 | `FOUNDRY_API_TIMEOUT` | `5.0` | Per-request timeout (seconds) for Foundry API calls |
 | `SERVICE_TIMEOUT` | `6.0` | Overall orchestration pipeline timeout (seconds) |
 | `KOKORO_VOICE` | `af_heart` | Kokoro TTS voice ID |
-| `SYSTEM_PROMPT` | *(see below)* | System prompt for the LLM; if unset, uses the built-in Misty persona prompt |
+| `SYSTEM_PROMPT` | *(see below)* | System prompt for the LLM; if unset, uses the built-in Misty persona prompt (sassy robot on a farm with Tammy, Burke, and dogs Percy & Granny) |
 | `MAX_USER_CHARS` | `400` | Maximum characters for a single transcribed user utterance. Longer inputs are truncated before LLM inference to reduce token count and latency. |
 | `MAX_CONTEXT_CHARS` | `3000` | Maximum total characters across all messages (system prompt + history) sent to the LLM. Oldest turns are removed first; the system prompt and latest user message are always preserved. Set to `0` to disable. |
 
@@ -143,15 +149,26 @@ Invoke-RestMethod -Uri http://localhost:5000/api/health
 python misty_controller.py
 ```
 
-The Misty controller connects to Misty via WebSocket and REST API — no skill deployment needed. Misty's LED turns green when ready. Say **"Hey, Misty!"** followed by your question. After Misty responds, she'll keep listening (cyan LED) for up to 60 seconds — just keep talking without saying the wake word again. Silence ends the conversation and re-arms the wake word.
+The Misty controller connects to Misty via WebSocket and REST API — no skill deployment needed. Misty's LED turns green when ready. Say **"Hey, Misty!"** followed by your question. Misty says "What's up baby?" and her LED turns green — that's your cue to speak. After processing ("Let me think about that..."), she responds and keeps listening (cyan LED) for up to 90 seconds — just keep talking without saying the wake word again. Silence ends the conversation and re-arms the wake word.
+
+### Personality
+
+Misty is a sassy little robot with big personality. She lives on a farm with Tammy, Burke (Tammy's husband), and two dogs — Percy and Granny. She loves sunshine and playing ball with the dogs. Her responses are witty, cheeky, and playful — like a fun friend who always has a comeback.
+
+### Audio Architecture
+
+- **Wake word**: When `USE_LAPTOP_WAKE_WORD=true`, detected via laptop microphone using openWakeWord (not Misty's onboard mic). Otherwise, uses Misty's built-in "Hey Misty" keyphrase (default)
+- **Speech recording**: In laptop mode, captured from the laptop mic via sounddevice (16kHz, 16-bit mono)
+- **Misty's mic**: Not used for the primary STT path in laptop mode, but Misty's recorded audio is used as a fallback for STT if laptop capture is empty; it also drives Misty's recording/tally-light behavior during capture
+- **TTS phrases**: "What's up baby?" (greeting) and "Let me think about that." (thinking) are generated via Kokoro TTS at startup and uploaded to Misty
 
 ### Expressive Behavior
 
 During conversations, Misty uses head movement and face animations to signal her state:
-- **Listening**: Looks up for eye contact, wide-eyed attentive face
-- **Processing**: Tilts head to the side, thoughtful expression
-- **Speaking**: Faces forward, animated expression
-- **Follow-up**: Slight head tilt, warm expectant face
+- **Listening**: Green LED, tally light on — "speak now"
+- **Processing**: Blue LED, tilts head to the side, says "Let me think about that"
+- **Speaking**: Purple LED, faces forward, animated expression
+- **Follow-up**: Cyan LED, slight head tilt, warm expectant face
 - Head recenters when re-arming for the next wake word
 
 ### On-Robot Skills — Cleaned Up
@@ -164,9 +181,9 @@ Skill metadata was backed up to `misty-skills-backup/` before deletion.
 
 Misty's sensory services (Snapdragon 410) can silently stop firing wake word events — a known firmware bug with no programmatic detection. The controller includes an automatic watchdog that detects this and self-recovers:
 
-1. **Soft reset** (2 min): 🟡 Yellow LED flash → cancel skills → restart keyphrase
-2. **Sensory reboot** (+1 min): 🔴 Red LED → reboot sensory services only
-3. **Full reboot** (+1 min): 🔴 Red LED → full system reboot
+1. **Soft reset** (90s): 🟡 Yellow LED flash → cancel skills → restart keyphrase
+2. **Second soft reset** (+60s): 🟡 Darker yellow → repeat
+3. **Full reboot** (+60s): 🔴 Red LED → full system reboot (Core+Sensory)
 
 The watchdog only activates in IDLE state. Configure timeouts via `WATCHDOG_IDLE_TIMEOUT_S` and `WATCHDOG_ESCALATE_TIMEOUT_S` environment variables.
 
@@ -205,13 +222,14 @@ See [IMPLEMENTATION_SUMMARY.md](docs/IMPLEMENTATION_SUMMARY.md) for the full bui
 
 | Issue | Summary |
 |-------|---------|
-| [#28](https://github.com/tammym-demos/misty_upgrade/issues/28) | Keyphrase re-arm: proactive sensory reboot after each conversation (~20s reset) |
-| [#27](https://github.com/tammym-demos/misty_upgrade/issues/27) | STT accuracy: beam_size=5 + VAD applied, whisper-tiny still garbles follow-ups |
-| [#22](https://github.com/tammym-demos/misty_upgrade/issues/22) | Keyphrase silently fails after conversation — mitigated by #28 sensory reboot |
-| [#21](https://github.com/tammym-demos/misty_upgrade/issues/21) | End-to-end latency ~23s (target <6s) — TTS is 82% of pipeline |
-| [#24](https://github.com/tammym-demos/misty_upgrade/issues/24) | LLM ignores brevity instructions, generates verbose responses |
-| [#20](https://github.com/tammym-demos/misty_upgrade/issues/20) | Fixed 4s recording — needs voice activity detection |
-| [#19](https://github.com/tammym-demos/misty_upgrade/issues/19) | Conversation history needs smarter management for latency |
+| [#44](https://github.com/tammym-demos/misty_upgrade/issues/44) | Laptop mic for wake word + STT recording — implemented, Misty mic for tally light only |
+| [#28](https://github.com/tammym-demos/misty_upgrade/issues/28) | Keyphrase re-arm: sensory reboot abandoned (breaks mic) — soft re-arm only |
+| [#27](https://github.com/tammym-demos/misty_upgrade/issues/27) | STT accuracy: beam_size=5, whisper-tiny still garbles some follow-ups |
+| [#22](https://github.com/tammym-demos/misty_upgrade/issues/22) | Keyphrase silently fails — mitigated by laptop wake word + proactive reboot |
+| [#21](https://github.com/tammym-demos/misty_upgrade/issues/21) | End-to-end latency ~6-7s (target <3s) — TTS is dominant |
+| [#24](https://github.com/tammym-demos/misty_upgrade/issues/24) | LLM ignores brevity — max_tokens=60, post-LLM truncation to 35 words |
+| [#20](https://github.com/tammym-demos/misty_upgrade/issues/20) | VAD-controlled dynamic recording via laptop mic (6s minimum) |
+| [#19](https://github.com/tammym-demos/misty_upgrade/issues/19) | Conversation history capped at 8 messages (4 turns) |
 
 ---
 
