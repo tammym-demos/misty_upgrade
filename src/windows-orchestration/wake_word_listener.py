@@ -388,13 +388,13 @@ class WakeWordListener:
         
         # Buffer frames for laptop mic recording (independent of wake word state)
         if self._recording:
-            if self._recorded_bytes_total < MAX_RECORDING_BYTES:
+            if self._recorded_bytes_total + len(indata) > MAX_RECORDING_BYTES:
+                logger.warning("Recording buffer full — stopping capture")
+                self._recording = False
+            else:
                 frame_bytes = bytes(indata)
                 self._recorded_frames.append(frame_bytes)
                 self._recorded_bytes_total += len(frame_bytes)
-            elif self._recording:
-                logger.warning("Recording buffer full — stopping capture")
-                self._recording = False
 
         if self._paused and not self._speech_monitor_active and not self._recording:
             return  # drop audio during conversation (unless speech monitoring or recording)
