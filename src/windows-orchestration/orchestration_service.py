@@ -397,7 +397,7 @@ def health_check():
 def orchestrate():
     """
     Main orchestration endpoint.
-    Input: WAV file (multipart/form-data)
+    Input: WAV file (multipart/form-data), optional speaker_name form field
     Output: JSON with response audio URI or error
     """
     start_time = time.time()
@@ -410,6 +410,9 @@ def orchestrate():
         
         audio_file = request.files['file']
         audio_bytes = audio_file.read()
+
+        # Optional: speaker name from face recognition (#16)
+        speaker_name = request.form.get("speaker_name", "").strip() or None
 
         # Security: limit upload size (10MB max for WAV audio)
         if len(audio_bytes) > 10 * 1024 * 1024:
@@ -455,7 +458,7 @@ def orchestrate():
         
         # Step 2: Language Model Inference
         llm_start = time.time()
-        llm_result = language_model_inference(user_text, llm_start)
+        llm_result = language_model_inference(user_text, llm_start, speaker_name=speaker_name)
         llm_ms = (time.time() - llm_start) * 1000
         if llm_result.get("status") == "error":
             return jsonify(llm_result), 500
@@ -570,8 +573,14 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
 # STEP 2: LANGUAGE MODEL INFERENCE
 # ============================================================================
 
-def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any]:
-    """Run inference using Foundry Local with adaptive response modes."""
+def language_model_inference(user_text: str, start_time: float, speaker_name: str | None = None) -> Dict[str, Any]:
+    """Run inference using Foundry Local with adaptive response modes.
+
+    Args:
+        user_text: Transcribed user speech.
+        start_time: Pipeline start timestamp.
+        speaker_name: Optional recognized face name (#16). Injected into prompt context.
+    """
     global conversation_history, _last_response_mode
     
     try:
@@ -606,7 +615,16 @@ def language_model_inference(user_text: str, start_time: float) -> Dict[str, Any
 
         url = f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions"
         # Prepend system prompt on every call; not stored in history
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
+        system_prompt = SYSTEM_PROMPT
+        # Inject face recognition context (#16) — tell Misty who she's talking to
+        if speaker_name:
+            system_prompt += (
+                f" You are currently talking to {speaker_name}."
+                f" Use their name naturally — greet them, tease them, be personal."
+                f" Don't announce that you recognized them every time."
+            )
+            logger.info(f"Speaker identified: {speaker_name}")
+        messages = [{"role": "system", "content": system_prompt}] + conversation_history
 
         # Inject mode-specific prompt suffix
         if mode_config["prompt_suffix"]:
