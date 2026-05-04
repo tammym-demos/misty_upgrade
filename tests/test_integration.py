@@ -430,13 +430,13 @@ class TestPromptLimiting(unittest.TestCase):
         sentence_count = text.count(".") + text.count("!") + text.count("?")
         self.assertLessEqual(sentence_count, 3, f"Expected at most 3 sentences in: {text}")
 
-    def test_max_tokens_is_60(self):
-        """The LLM payload must use max_tokens=60 for short mode."""
+    def test_max_tokens_is_50(self):
+        """The LLM payload must use max_tokens=50 for short mode (#21 optimisation)."""
         _, payload = self._call_llm_and_capture_payload("test question")
         self.assertEqual(
             payload["max_tokens"],
-            60,
-            f"Expected max_tokens=60 for short mode, got {payload['max_tokens']}",
+            50,
+            f"Expected max_tokens=50 for short mode, got {payload['max_tokens']}",
         )
 
     # ------------------------------------------------------------------
@@ -551,7 +551,7 @@ class TestPromptLimiting(unittest.TestCase):
         # Second call: different topic
         result, payload = self._call_llm_and_capture_payload("What's 2 plus 2?")
         self.assertEqual(result["responseMode"], "short")
-        self.assertEqual(payload["max_tokens"], 60)
+        self.assertEqual(payload["max_tokens"], 50)
 
     def test_brevity_reminder_suppressed_in_summary_mode(self):
         """Brevity reminder should not appear in summary/continuation modes."""
@@ -568,6 +568,249 @@ class TestPromptLimiting(unittest.TestCase):
         system_text = " ".join(m["content"] for m in system_msgs)
         self.assertNotIn("Stay punchy", system_text,
                           "Brevity reminder should be suppressed in summary mode")
+
+
+class TestTTSCache(unittest.TestCase):
+    """Unit tests for TTS audio caching (#21).
+
+    Tests the in-memory LRU cache that avoids re-synthesizing identical phrases.
+    """
+
+    _svc = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import orchestration_service
+            cls._svc = orchestration_service
+        except Exception as exc:
+            cls._svc = None
+            print(f"[TestTTSCache] Could not import orchestration_service: {exc}")
+
+    def setUp(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        # Clear cache before each test
+        with self._svc._tts_cache_lock:
+            self._svc._tts_cache.clear()
+
+    def test_cache_key_is_case_insensitive(self):
+        """Cache key normalises text to lowercase for stable matching."""
+        key1 = self._svc._tts_cache_key("On my way!")
+        key2 = self._svc._tts_cache_key("on my way!")
+        key3 = self._svc._tts_cache_key("ON MY WAY!")
+        self.assertEqual(key1, key2)
+        self.assertEqual(key2, key3)
+
+    def test_cache_key_strips_whitespace(self):
+        """Leading/trailing whitespace doesn't affect the cache key."""
+        key1 = self._svc._tts_cache_key("Hello!")
+        key2 = self._svc._tts_cache_key("  Hello!  ")
+        self.assertEqual(key1, key2)
+
+    def test_cache_put_and_get(self):
+        """put then get returns the stored path."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            f.write(b"fake wav")
+            path = f.name
+        try:
+            self._svc._tts_cache_put("hello", path)
+            result = self._svc._tts_cache_get("hello")
+            self.assertEqual(result, path)
+        finally:
+            os.unlink(path)
+
+    def test_cache_miss_returns_none(self):
+        """get on empty cache returns None."""
+        result = self._svc._tts_cache_get("nonexistent phrase")
+        self.assertIsNone(result)
+
+    def test_cache_returns_none_if_file_deleted(self):
+        """If the cached file is deleted from disk, cache returns None and evicts."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            f.write(b"fake wav")
+            path = f.name
+        self._svc._tts_cache_put("ephemeral", path)
+        os.unlink(path)  # simulate cleanup
+        result = self._svc._tts_cache_get("ephemeral")
+        self.assertIsNone(result)
+
+    def test_cache_eviction_respects_max_size(self):
+        """Non-pinned entries are evicted when cache exceeds TTS_CACHE_MAX."""
+        import tempfile
+        original_max = self._svc.TTS_CACHE_MAX
+        try:
+            self._svc.TTS_CACHE_MAX = 3
+            paths = []
+            for i in range(5):
+                f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                f.write(b"fake")
+                f.close()
+                paths.append(f.name)
+                self._svc._tts_cache_put(f"phrase {i}", f.name)
+            with self._svc._tts_cache_lock:
+                self.assertLessEqual(len(self._svc._tts_cache), 3)
+        finally:
+            self._svc.TTS_CACHE_MAX = original_max
+            for p in paths:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+    def test_pinned_entries_survive_eviction(self):
+        """Pinned cache entries are not evicted when cache is full."""
+        import tempfile
+        original_max = self._svc.TTS_CACHE_MAX
+        try:
+            self._svc.TTS_CACHE_MAX = 3
+            # Add 2 pinned entries
+            pinned_paths = []
+            for i in range(2):
+                f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                f.write(b"pinned")
+                f.close()
+                pinned_paths.append(f.name)
+                self._svc._tts_cache_put(f"pinned {i}", f.name, pinned=True)
+            # Add 3 non-pinned (should evict some non-pinned)
+            extra_paths = []
+            for i in range(3):
+                f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                f.write(b"extra")
+                f.close()
+                extra_paths.append(f.name)
+                self._svc._tts_cache_put(f"extra {i}", f.name, pinned=False)
+            # Both pinned entries should still be findable
+            for i, p in enumerate(pinned_paths):
+                result = self._svc._tts_cache_get(f"pinned {i}")
+                self.assertEqual(result, p, f"Pinned entry {i} was evicted")
+        finally:
+            self._svc.TTS_CACHE_MAX = original_max
+            for p in pinned_paths + extra_paths:
+                try:
+                    os.unlink(p)
+                except OSError:
+                    pass
+
+    def test_text_to_speech_populates_cache(self):
+        """text_to_speech stores result in cache on successful synthesis."""
+        text = "Cache test phrase"
+        # Ensure cache starts empty for this text
+        self.assertIsNone(self._svc._tts_cache_get(text))
+
+        # Mock kokoro to simulate synthesis
+        import numpy as np
+        mock_kokoro = unittest.mock.MagicMock()
+        mock_kokoro.create.return_value = (np.zeros(1000, dtype=np.float32), 24000)
+
+        original_get = self._svc._get_kokoro
+        self._svc._get_kokoro = lambda: mock_kokoro
+        try:
+            result = self._svc.text_to_speech(text, time.time())
+            self.assertEqual(result["status"], "ok")
+            self.assertIn("audio_file", result)
+            # Second call should hit cache
+            result2 = self._svc.text_to_speech(text, time.time())
+            self.assertTrue(result2.get("tts_cached", False))
+        finally:
+            self._svc._get_kokoro = original_get
+            # Clean up generated file
+            audio_file = result.get("audio_file", "")
+            if audio_file:
+                path = os.path.join("responses", audio_file)
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+
+    def test_text_to_speech_returns_audio_file_field(self):
+        """text_to_speech result includes audio_file for consistent access."""
+        import numpy as np
+        mock_kokoro = unittest.mock.MagicMock()
+        mock_kokoro.create.return_value = (np.zeros(1000, dtype=np.float32), 24000)
+
+        original_get = self._svc._get_kokoro
+        self._svc._get_kokoro = lambda: mock_kokoro
+        try:
+            result = self._svc.text_to_speech("Audio file test", time.time())
+            self.assertEqual(result["status"], "ok")
+            self.assertIn("audio_file", result)
+            self.assertIn("audio_uri", result)
+            self.assertTrue(result["audio_file"].endswith(".wav"))
+        finally:
+            self._svc._get_kokoro = original_get
+            audio_file = result.get("audio_file", "")
+            if audio_file:
+                try:
+                    os.unlink(os.path.join("responses", audio_file))
+                except OSError:
+                    pass
+
+
+class TestLatencyConfig(unittest.TestCase):
+    """Unit tests for latency-related configuration changes (#21)."""
+
+    _svc = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import orchestration_service
+            cls._svc = orchestration_service
+        except Exception as exc:
+            cls._svc = None
+            print(f"[TestLatencyConfig] Could not import orchestration_service: {exc}")
+
+    def setUp(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+
+    def test_kokoro_speed_default(self):
+        """Default Kokoro speed should be 1.2 for latency optimisation."""
+        # KOKORO_SPEED comes from env; default in code is 1.2
+        self.assertGreaterEqual(self._svc.KOKORO_SPEED, 1.0)
+
+    def test_short_mode_max_tokens(self):
+        """Short mode max_tokens should be 50 (reduced from 60)."""
+        config = self._svc.RESPONSE_MODE_CONFIG["short"]
+        self.assertEqual(config["max_tokens"], 50)
+
+    def test_temperature_is_reduced(self):
+        """LLM temperature should be 0.7 for more focused responses."""
+        # Temperature is in the payload builder, not a top-level constant,
+        # so we verify via a mock LLM call.
+        self._svc.conversation_history = []
+        self._svc._last_response_mode = "short"
+        mock_resp = unittest.mock.MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"choices": [{"message": {"content": "OK"}}]}
+        with unittest.mock.patch.object(
+            self._svc.requests, "post", return_value=mock_resp
+        ) as mock_post:
+            self._svc.language_model_inference("test", time.time())
+            payload = mock_post.call_args[1]["json"]
+        self.assertAlmostEqual(payload["temperature"], 0.7)
+
+    def test_diagnostics_includes_tts_cache_stats(self):
+        """Diagnostics endpoint should report TTS cache stats."""
+        with self._svc.app.test_client() as client:
+            resp = client.get("/api/diagnostics")
+            data = resp.get_json()
+            self.assertIn("tts", data)
+            self.assertIn("cache_entries", data["tts"])
+            self.assertIn("cache_pinned", data["tts"])
+            self.assertIn("speed", data["tts"])
+
+    def test_diagnostics_includes_llm_config(self):
+        """Diagnostics endpoint should report LLM config."""
+        with self._svc.app.test_client() as client:
+            resp = client.get("/api/diagnostics")
+            data = resp.get_json()
+            self.assertIn("llm", data)
+            self.assertIn("temperature", data["llm"])
+            self.assertIn("short_max_tokens", data["llm"])
 
 
 class TestMovementIntentClassification(unittest.TestCase):
