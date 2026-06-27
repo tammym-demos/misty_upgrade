@@ -14,6 +14,7 @@ import time
 import os
 import threading
 from io import BytesIO
+from types import SimpleNamespace
 from urllib.parse import urlparse, urlunparse
 
 # ---------------------------------------------------------------------------
@@ -131,6 +132,114 @@ class TestLaptopMistyRecordingConfig(unittest.TestCase):
                 phase="initial recording",
                 misty_fallback_available=False,
             )
+
+class TestLaptopFastRearm(unittest.TestCase):
+    """Unit tests for laptop wake-word re-arm behavior (#65)."""
+
+    _controller_module = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import misty_controller  # noqa: PLC0415
+            cls._controller_module = misty_controller
+        except ModuleNotFoundError as exc:
+            if exc.name != "websocket":  # pragma: no cover
+                cls._controller_module = None
+                print(f"[TestLaptopFastRearm] Could not import misty_controller: {exc}")
+                return
+            websocket_stub = unittest.mock.MagicMock()
+            websocket_stub.WebSocketApp = unittest.mock.MagicMock()
+            with unittest.mock.patch.dict(sys.modules, {"websocket": websocket_stub}):
+                import misty_controller  # noqa: PLC0415
+                cls._controller_module = misty_controller
+        except Exception as exc:  # pragma: no cover
+            cls._controller_module = None
+            print(f"[TestLaptopFastRearm] Could not import misty_controller: {exc}")
+
+    def setUp(self):
+        if self._controller_module is None:
+            self.skipTest("misty_controller could not be imported")
+
+    def _controller_with_mocks(self):
+        ctrl = self._controller_module.MistyController()
+        ctrl.move_head = unittest.mock.MagicMock()
+        ctrl.stop_recording = unittest.mock.MagicMock(return_value={"status": "Success"})
+        ctrl.misty_post = unittest.mock.MagicMock()
+        ctrl.set_led = unittest.mock.MagicMock()
+        ctrl.display_image = unittest.mock.MagicMock()
+        ctrl._connect_ws = unittest.mock.MagicMock()
+        return ctrl
+
+    def test_laptop_rearm_keeps_healthy_websocket_open(self):
+        """Normal laptop-mode re-arm must resume listening without reconnecting."""
+        ctrl = self._controller_with_mocks()
+        ctrl._wake_word_listener = unittest.mock.MagicMock()
+        ws = SimpleNamespace(sock=SimpleNamespace(connected=True), close=unittest.mock.MagicMock())
+        ctrl.ws = ws
+        ctrl.ws_thread = SimpleNamespace(is_alive=lambda: True)
+        state_when_resumed = []
+        ctrl._wake_word_listener.resume.side_effect = lambda: state_when_resumed.append(ctrl.get_state())
+
+        with unittest.mock.patch.object(self._controller_module.time, "sleep"):
+            with self.assertLogs("misty_controller", level="INFO") as logs:
+                ctrl._rearm()
+
+        ctrl.stop_recording.assert_called_once()
+        ws.close.assert_not_called()
+        ctrl._connect_ws.assert_not_called()
+        ctrl._wake_word_listener.resume.assert_called_once()
+        self.assertEqual(ctrl.get_state(), self._controller_module.State.IDLE)
+        self.assertEqual(state_when_resumed, [self._controller_module.State.IDLE])
+        self.assertTrue(
+            any("Fast re-arm complete" in message and "WebSocket kept open" in message for message in logs.output)
+        )
+
+    def test_laptop_rearm_reconnects_when_websocket_unhealthy(self):
+        """Laptop mode must fall back to full reconnect when the socket is unhealthy."""
+        ctrl = self._controller_with_mocks()
+        ctrl._wake_word_listener = unittest.mock.MagicMock()
+        ws = SimpleNamespace(sock=SimpleNamespace(connected=False), close=unittest.mock.MagicMock())
+        ctrl.ws = ws
+        ctrl.ws_thread = SimpleNamespace(is_alive=lambda: True)
+
+        with unittest.mock.patch.object(self._controller_module.time, "sleep"):
+            with self.assertLogs("misty_controller", level="WARNING") as logs:
+                ctrl._rearm()
+
+        ws.close.assert_called_once()
+        ctrl._connect_ws.assert_called_once()
+        ctrl._wake_word_listener.resume.assert_called_once()
+        self.assertTrue(any("falling back to full reconnect" in message for message in logs.output))
+
+    def test_laptop_rearm_reconnects_when_websocket_thread_is_stopped(self):
+        """Laptop mode must reconnect if the WebSocket loop is no longer alive."""
+        ctrl = self._controller_with_mocks()
+        ctrl._wake_word_listener = unittest.mock.MagicMock()
+        ws = SimpleNamespace(sock=SimpleNamespace(connected=True), close=unittest.mock.MagicMock())
+        ctrl.ws = ws
+        ctrl.ws_thread = SimpleNamespace(is_alive=lambda: False)
+
+        with unittest.mock.patch.object(self._controller_module.time, "sleep"):
+            ctrl._rearm()
+
+        ws.close.assert_called_once()
+        ctrl._connect_ws.assert_called_once()
+        ctrl._wake_word_listener.resume.assert_called_once()
+
+    def test_misty_keyphrase_rearm_still_reconnects_websocket(self):
+        """Non-laptop keyphrase mode keeps the existing full re-arm path."""
+        ctrl = self._controller_with_mocks()
+        ctrl._wake_word_listener = None
+        ws = SimpleNamespace(sock=SimpleNamespace(connected=True), close=unittest.mock.MagicMock())
+        ctrl.ws = ws
+
+        with unittest.mock.patch.object(self._controller_module.time, "sleep"):
+            ctrl._rearm()
+
+        ctrl.misty_post.assert_any_call("/api/audio/keyphrase/stop")
+        ws.close.assert_called_once()
+        ctrl._connect_ws.assert_called_once()
 
 class TestWindowsOrchestration(unittest.TestCase):
     """Test Windows orchestration service."""
