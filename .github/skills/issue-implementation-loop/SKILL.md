@@ -50,7 +50,7 @@ Before entering an autonomous loop, verify the current GitHub identity can perfo
 - The identity can push feature branches and tags.
 - The identity can open PRs, request Copilot review, merge PRs, close issues, and delete merged remote branches.
 - Branch protection for `main` does not require human approval for autonomous issue loops.
-- Required status checks are configured and expected to run for PRs. In this repository the required PR checks are `Analyze (python)`, `Analyze (javascript-typescript)`, and `CodeQL`.
+- Required status checks are configured and expected to run for PRs. Query `main` branch protection with the GitHub API/CLI and treat the returned contexts as the source of truth.
 - Repository auto-merge is enabled when the agent may need to queue merges while checks are pending.
 - Auto-delete merged branches may be enabled; this is acceptable because the main merge commit is still available for tagging after merge.
 
@@ -98,7 +98,7 @@ If any preflight requirement fails, stop before editing code and report the exac
    | Documentation, agent, or skill only | `git diff --check`; no code tests unless documentation tooling exists |
    | GitHub workflow or repository policy | `git diff --check` plus a GitHub CLI/API verification of the setting or PR lifecycle behavior |
 
-   PR-level required checks must also pass before merge: `Analyze (python)`, `Analyze (javascript-typescript)`, and `CodeQL`.
+   PR-level required checks from `main` branch protection must also pass before merge. Query the required contexts at runtime instead of hardcoding check names.
 
 6. **Open, review, merge, close, or hand off**
    - Push the issue-scoped feature branch and open a pull request against `main` for completed issue work.
