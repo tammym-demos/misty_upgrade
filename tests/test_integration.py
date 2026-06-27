@@ -53,6 +53,85 @@ MISTY_HOST = os.getenv("MISTY_HOST", "http://10.0.0.44")
 WINDOWS_HOST = os.getenv("WINDOWS_HOST", "http://localhost:5000")
 FOUNDRY_HOST = _discover_foundry_endpoint()
 
+class TestLaptopMistyRecordingConfig(unittest.TestCase):
+    """Unit tests for laptop-mode Misty recording configuration (#66)."""
+
+    _controller_module = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import misty_controller  # noqa: PLC0415
+            cls._controller_module = misty_controller
+        except ModuleNotFoundError as exc:
+            if exc.name != "websocket":  # pragma: no cover
+                cls._controller_module = None
+                print(f"[TestLaptopMistyRecordingConfig] Could not import misty_controller: {exc}")
+                return
+            # The config/error-path tests do not open WebSockets.  Allow the
+            # unit tests to run in minimal CI environments where the optional
+            # controller runtime dependency has not been installed.
+            websocket_stub = unittest.mock.MagicMock()
+            websocket_stub.WebSocketApp = unittest.mock.MagicMock()
+            with unittest.mock.patch.dict(sys.modules, {"websocket": websocket_stub}):
+                import misty_controller  # noqa: PLC0415
+                cls._controller_module = misty_controller
+        except Exception as exc:  # pragma: no cover
+            cls._controller_module = None
+            print(f"[TestLaptopMistyRecordingConfig] Could not import misty_controller: {exc}")
+
+    def setUp(self):
+        if self._controller_module is None:
+            self.skipTest("misty_controller could not be imported")
+        self._old_mode = self._controller_module.LAPTOP_MISTY_RECORDING_MODE
+        self._old_tally = self._controller_module.LAPTOP_MISTY_TALLY_RECORDING_S
+
+    def tearDown(self):
+        if self._controller_module is not None:
+            self._controller_module.LAPTOP_MISTY_RECORDING_MODE = self._old_mode
+            self._controller_module.LAPTOP_MISTY_TALLY_RECORDING_S = self._old_tally
+
+    def test_recording_mode_helpers_distinguish_fallback_tally_and_off(self):
+        """Mode helpers must expose fallback, tally-only, and disabled behavior."""
+        ctrl = self._controller_module.MistyController()
+
+        self._controller_module.LAPTOP_MISTY_RECORDING_MODE = "fallback"
+        self.assertTrue(ctrl._laptop_misty_recording_enabled())
+        self.assertTrue(ctrl._laptop_misty_fallback_enabled())
+
+        self._controller_module.LAPTOP_MISTY_RECORDING_MODE = "tally"
+        self.assertTrue(ctrl._laptop_misty_recording_enabled())
+        self.assertFalse(ctrl._laptop_misty_fallback_enabled())
+
+        self._controller_module.LAPTOP_MISTY_RECORDING_MODE = "off"
+        self.assertFalse(ctrl._laptop_misty_recording_enabled())
+        self.assertFalse(ctrl._laptop_misty_fallback_enabled())
+
+    def test_laptop_capture_failure_falls_back_when_available(self):
+        """Safe default uses Misty audio when laptop capture is empty."""
+        ctrl = self._controller_module.MistyController()
+        self._controller_module.LAPTOP_MISTY_RECORDING_MODE = "fallback"
+
+        result = ctrl._handle_laptop_capture_failure(
+            turn=1,
+            phase="initial recording",
+            misty_fallback_available=True,
+        )
+
+        self.assertIsNone(result)
+
+    def test_laptop_capture_failure_raises_when_fallback_disabled(self):
+        """Disabled fallback must surface a clear retryable error."""
+        ctrl = self._controller_module.MistyController()
+        self._controller_module.LAPTOP_MISTY_RECORDING_MODE = "off"
+
+        with self.assertRaisesRegex(RuntimeError, "Misty fallback is disabled or unavailable"):
+            ctrl._handle_laptop_capture_failure(
+                turn=1,
+                phase="initial recording",
+                misty_fallback_available=False,
+            )
+
 class TestWindowsOrchestration(unittest.TestCase):
     """Test Windows orchestration service."""
     
