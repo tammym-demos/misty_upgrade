@@ -48,7 +48,8 @@ Before entering an autonomous loop, verify the current GitHub identity can perfo
 
 - `gh auth status` succeeds for the target repository.
 - The identity can push feature branches and tags.
-- The identity can open PRs, request Copilot review, merge PRs, close issues, and delete merged remote branches.
+- The identity can open PRs, request Copilot review, merge PRs, and close issues.
+- The identity can delete merged remote branches, or repository branch auto-delete is enabled. If neither is true, continue the loop but report branch cleanup as unavailable after merge/tag.
 - Branch protection for `main` does not require human approval for autonomous issue loops. If current branch protection or the user explicitly requires owner approval, request that review and treat missing approval as a merge blocker.
 - Required status checks are configured and expected to run for PRs. Query `main` branch protection with the GitHub API/CLI and treat the returned contexts as the source of truth.
 - Repository auto-merge is enabled when the agent may need to queue merges while checks are pending.

@@ -33,7 +33,7 @@ When running in fleet mode, treat the parent agent as the coordinator and shard 
 
 When monitoring repository issue and PR status, refresh issue state, labels, comments, linked PRs, check runs, reviews, branch protection blockers, and existing feature branches before selecting, merging, tagging, cleanup, or closing work. Skip issues that are closed, blocked, assigned to unclear ownership, already have active in-progress branches, or already have linked in-flight PRs unless the user explicitly asks to take them over.
 
-Use `.github\skills\issue-implementation-loop\SKILL.md` as the policy for the loop. Use `.github\skills\feature-planning\SKILL.md` before implementation when an issue is vague, duplicated, missing criteria, blocked, or needs a human-review off-ramp.
+Use `.github/skills/issue-implementation-loop/SKILL.md` as the policy for the loop. Use `.github/skills/feature-planning/SKILL.md` before implementation when an issue is vague, duplicated, missing criteria, blocked, or needs a human-review off-ramp.
 
 Stop the loop instead of continuing inefficiently when acceptance criteria are absent or contradictory, two implementation attempts fail, verification cannot run with no credible substitute, the diff grows beyond issue scope, required external access is unavailable, or the work needs product/safety/architecture input.
 
