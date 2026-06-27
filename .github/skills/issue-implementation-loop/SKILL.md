@@ -109,14 +109,10 @@ If any preflight requirement fails, stop before editing code and report the exac
    - If a required check is not reported within 30 minutes, stop with a required-check timeout off-ramp that names the missing check and links the PR.
    - Retrieve Copilot review comments with the GitHub API, address all actionable comments on the same branch, re-run targeted verification, update the PR, and re-request review when needed.
    - If a Copilot comment is unclear, incorrect, or not safely actionable, leave a PR comment explaining the disposition and continue only when no material risk remains.
-   - Before merging any PR that can close an issue, add the `AI usage` issue comment first so auto-closing keywords cannot close the issue before usage is recorded.
+   - Before merging, verify the PR body links issues without closing keywords. If closing keywords are present, remove them; if they cannot be removed, add the `AI usage` issue comment before merge so auto-close cannot happen without usage data.
    - After all applicable tests/lints/checks pass and code review completes, merge the PR into `main` only when repository policy, branch protection, and run authorization permit it. Use `gh pr merge --auto --merge --delete-branch` only after Copilot review is complete and any remaining checks are still pending; otherwise merge only after checks pass.
    - If auto-merge is queued, poll the PR until `state=MERGED` before tagging, cleanup, or issue closure. If it does not merge within 30 minutes after all required checks pass, stop with a merge-timeout off-ramp.
    - If merge is not permitted or cannot be completed, leave the issue open and report the ready PR, branch, or worktree plus the exact blocker.
-   - Before closing or handing off the issue, add an issue comment titled `AI usage` that reports tokens consumed and AIC/AI Credits consumed to complete that issue.
-   - Include model breakdown, telemetry source or session IDs when available, subagent usage when applicable, and the issue/PR scope used for the usage query.
-   - Use exact usage from available Copilot/session usage telemetry when available; if exact usage is unavailable, do not estimate. State which usage source was checked and that the metric was unavailable.
-   - Never close an issue without either an exact AI usage comment or an explicit AI usage unavailable comment.
    - After a successful merge, refresh `main`, verify the merge commit is present, then create and push a corresponding main-branch tag so the merged code can be correlated to the issue and PR.
    - Use a safe, lowercase tag name derived from the issue and PR, such as `issue-66-pr-78-laptop-recording-config`, or `pr-78-title-slug` when no single issue applies.
    - If the intended tag already exists, append the short merge SHA, for example `issue-66-pr-78-laptop-recording-config-68204b6`.
@@ -125,6 +121,10 @@ If any preflight requirement fails, stop before editing code and report the exac
    - GitHub may auto-delete the remote branch at merge time; this is acceptable because the main merge commit remains available for tagging.
    - Never delete a dirty worktree or unmerged local branch.
    - Verify cleanup with `git worktree list --porcelain`, `git branch --merged main`, and `git branch --all --merged main`.
+   - Before closing or handing off the issue, add or verify an issue comment titled `AI usage` that reports tokens consumed and AIC/AI Credits consumed to complete that issue.
+   - Include model breakdown, telemetry source or session IDs when available, subagent usage when applicable, and the issue/PR scope used for the usage query.
+   - Use exact usage from available Copilot/session usage telemetry when available; if exact usage is unavailable, do not estimate. State which usage source was checked and that the metric was unavailable.
+   - Never close an issue without either an exact AI usage comment or an explicit AI usage unavailable comment.
    - After merge, tag, and cleanup steps are complete, verify the issue is closed or close it explicitly with the AI usage closeout comment already present.
    - Do not rely on PR closing keywords for issue closure; close explicitly after AI usage, merge, tag, and cleanup.
    - Note any unavailable checks, residual risks, or manual validation needed.
