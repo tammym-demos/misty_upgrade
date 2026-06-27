@@ -1788,6 +1788,11 @@ class MistyController:
         )
         self.ws_thread.start()
 
+    def _ws_is_connected(self) -> bool:
+        """Return True when the current Misty WebSocket still appears usable."""
+        sock = getattr(self.ws, "sock", None)
+        return bool(self.ws and sock and getattr(sock, "connected", False))
+
     # --- Laptop wake word listener (issue #44) ---
 
     def _start_laptop_wake_word(self):
@@ -2354,9 +2359,23 @@ class MistyController:
         # Normal re-arm: audio resource cleanup before re-arming.
         self.stop_recording()
         if self._wake_word_listener:
-            # Laptop mode — no keyphrase to restart, shorter cooldown needed
-            logger.info("Re-arm: audio cleanup (2s) — laptop wake word mode")
+            # Laptop mode — no keyphrase to restart, shorter cooldown needed.
+            # Keep the WebSocket open on the normal path; the laptop listener
+            # owns wake detection and the existing subscriptions remain valid.
+            logger.info("Fast re-arm: audio cleanup (2s) — laptop wake word mode")
             time.sleep(2.0)
+            if self._ws_is_connected():
+                self._wake_word_listener.resume()
+                self.set_led(0, 255, 0)
+                self.display_image("e_DefaultContent.jpg")
+                self.last_activity_time = time.time()
+                self.set_state(State.IDLE)
+                logger.info("Fast re-arm complete — laptop wake word resumed; WebSocket kept open")
+                return
+            logger.warning(
+                "Fast re-arm unavailable — WebSocket disconnected/unhealthy; "
+                "falling back to full reconnect"
+            )
         else:
             # Misty keyphrase mode — aggressive cleanup needed for Snapdragon 410
             # hardware to fully release resources before keyphrase restart (#22).
