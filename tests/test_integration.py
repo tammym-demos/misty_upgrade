@@ -177,6 +177,7 @@ class TestLaptopFastRearm(unittest.TestCase):
         ctrl._wake_word_listener = unittest.mock.MagicMock()
         ws = SimpleNamespace(sock=SimpleNamespace(connected=True), close=unittest.mock.MagicMock())
         ctrl.ws = ws
+        ctrl.ws_thread = SimpleNamespace(is_alive=lambda: True)
 
         with unittest.mock.patch.object(self._controller_module.time, "sleep"):
             with self.assertLogs("misty_controller", level="INFO") as logs:
@@ -197,6 +198,7 @@ class TestLaptopFastRearm(unittest.TestCase):
         ctrl._wake_word_listener = unittest.mock.MagicMock()
         ws = SimpleNamespace(sock=SimpleNamespace(connected=False), close=unittest.mock.MagicMock())
         ctrl.ws = ws
+        ctrl.ws_thread = SimpleNamespace(is_alive=lambda: True)
 
         with unittest.mock.patch.object(self._controller_module.time, "sleep"):
             with self.assertLogs("misty_controller", level="WARNING") as logs:
@@ -206,6 +208,21 @@ class TestLaptopFastRearm(unittest.TestCase):
         ctrl._connect_ws.assert_called_once()
         ctrl._wake_word_listener.resume.assert_called_once()
         self.assertTrue(any("falling back to full reconnect" in message for message in logs.output))
+
+    def test_laptop_rearm_reconnects_when_websocket_thread_is_stopped(self):
+        """Laptop mode must reconnect if the WebSocket loop is no longer alive."""
+        ctrl = self._controller_with_mocks()
+        ctrl._wake_word_listener = unittest.mock.MagicMock()
+        ws = SimpleNamespace(sock=SimpleNamespace(connected=True), close=unittest.mock.MagicMock())
+        ctrl.ws = ws
+        ctrl.ws_thread = SimpleNamespace(is_alive=lambda: False)
+
+        with unittest.mock.patch.object(self._controller_module.time, "sleep"):
+            ctrl._rearm()
+
+        ws.close.assert_called_once()
+        ctrl._connect_ws.assert_called_once()
+        ctrl._wake_word_listener.resume.assert_called_once()
 
     def test_misty_keyphrase_rearm_still_reconnects_websocket(self):
         """Non-laptop keyphrase mode keeps the existing full re-arm path."""

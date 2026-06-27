@@ -1791,7 +1791,8 @@ class MistyController:
     def _ws_is_connected(self) -> bool:
         """Return True when the current Misty WebSocket still appears usable."""
         sock = getattr(self.ws, "sock", None)
-        return bool(self.ws and sock and getattr(sock, "connected", False))
+        thread_alive = bool(self.ws_thread and self.ws_thread.is_alive())
+        return bool(self.ws and sock and getattr(sock, "connected", False) and thread_alive)
 
     # --- Laptop wake word listener (issue #44) ---
 
