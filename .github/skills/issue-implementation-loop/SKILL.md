@@ -27,11 +27,11 @@ When this loop runs under `/fleet`, use parallelism only for independent issue w
 - Give every subagent a distinct issue number, acceptance criteria, branch name, and verification expectation.
 - Do not run multiple subagents on issues that likely touch the same files, runtime state, hardware path, or GitHub artifact.
 - If issue ownership, file overlap, branch conflicts, or PR conflicts appear, stop the affected subagents and record a coordination off-ramp.
-- Require each subagent to report the issue number, title, branch, PR, Copilot review status, merge/close status, tag, cleanup status, files changed, commands run, verification result, unavailable checks, and off-ramp reason when applicable.
+- Require each subagent to report the issue number, title, branch, PR, Copilot review status, merge/close status, main-branch tag, cleanup status, files changed, commands run, verification result, unavailable checks, and off-ramp reason when applicable.
 
 ## Repository monitoring
 
-When asked to monitor issue status, refresh repository state before selecting, assigning, merging, or closing work:
+When asked to monitor issue and PR status, refresh repository state before selecting, assigning, merging, tagging, cleanup, or closing work:
 
 - Check current issue state, labels, assignees, comments, linked PRs, PR reviews, check runs, branch protection blockers, and existing feature branches.
 - Skip issues that are closed, blocked, deferred, assigned to unclear ownership, already being handled by an active branch, or already linked to an in-flight PR unless the user explicitly asks to take over.
@@ -77,8 +77,10 @@ When asked to monitor issue status, refresh repository state before selecting, a
    - Address actionable review feedback on the same branch, re-run targeted verification, update the PR, and re-request review when needed.
    - After verification and review, merge the PR into `main` only when repository policy, branch protection, and run authorization permit it.
    - If merge is not permitted or cannot be completed, leave the issue open and report the ready PR, branch, or worktree plus the exact blocker.
-   - Update the issue with an `AI usage` closeout note that reports tokens consumed and AIC/AI Credits consumed for the loop.
+   - Before closing or handing off the issue, add an issue comment titled `AI usage` that reports tokens consumed and AIC/AI Credits consumed to complete that issue.
+   - Include model breakdown, telemetry source or session IDs when available, and the issue/PR scope used for the usage query.
    - Use exact usage from available Copilot/session usage telemetry when available; if exact usage is unavailable, do not estimate. State which usage source was checked and that the metric was unavailable.
+   - Never close an issue without either an exact AI usage comment or an explicit AI usage unavailable comment.
    - After a successful merge, refresh `main`, verify the merge commit is present, then create and push a corresponding main-branch tag so the merged code can be correlated to the issue and PR.
    - Use a safe, lowercase tag name derived from the issue and PR, such as `issue-66-pr-78-laptop-recording-config`, or `pr-78-title-slug` when no single issue applies.
    - Create the main-branch tag before closing the issue.
@@ -127,7 +129,7 @@ The off-ramp record must include:
 - What was attempted.
 - Why the loop stopped.
 - Evidence from commands, errors, tests, or code review.
-- AI usage: tokens consumed and AIC/AI Credits consumed, or an explicit unavailable note with the source checked.
+- AI usage: tokens consumed and AIC/AI Credits consumed, model breakdown and telemetry source/session IDs when available, or an explicit unavailable note with the source checked.
 - Recommended next human decision.
 
 ## Loop performance monitoring
@@ -148,7 +150,7 @@ Track these metrics for each loop run:
 - Worktree removal and merged branch deletion status after the main-branch tag is pushed.
 - Failures and retries.
 - Off-ramp reason, when applicable.
-- Tokens consumed and AIC/AI Credits consumed, or the usage source checked when exact values are unavailable.
+- Tokens consumed and AIC/AI Credits consumed, model breakdown, telemetry source/session IDs, or the usage source checked when exact values are unavailable.
 
 Use these metrics to decide whether to continue, narrow scope, switch to `feature-planning`, or stop for human review.
 
@@ -168,7 +170,7 @@ Report:
 - Branch or worktree, PR, Copilot review status, merge commit, main-branch tag, cleanup, or issue closure status, when available.
 - Success criteria completed.
 - Verification commands and results.
-- AI usage issue update status, including tokens and AIC/AI Credits consumed when available.
+- AI usage issue update status, including tokens and AIC/AI Credits consumed, model breakdown, and telemetry source/session IDs when available.
 - Any off-ramp, unavailable check, unavailable Copilot review, unavailable merge/tag/close/worktree-cleanup/branch-cleanup step, or manual follow-up.
 
 Keep the response concise and distinguish completed work from planned or blocked work.

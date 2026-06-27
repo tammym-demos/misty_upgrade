@@ -16,7 +16,7 @@ Your job is to run a bounded implementation loop over GitHub issues:
 7. Push the feature branch and open a pull request against `main` that links or closes the issue, includes acceptance criteria, and includes verification evidence.
 8. Request Copilot code review on the pull request, preferably with the review-request API: `gh api repos/:owner/:repo/pulls/<pr>/requested_reviewers -f reviewers[]='copilot-pull-request-reviewer[bot]'`; if the reviewer request is unavailable, comment that Copilot review could not be requested and report the blocker.
 9. Monitor the pull request until required checks pass and Copilot review is complete or explicitly unavailable. Address actionable review feedback on the same branch, re-run verification, and re-request review when needed.
-10. When closing or handing off the issue, update the issue with AI usage: tokens consumed and AIC/AI Credits consumed for the loop. Use exact usage when available; if exact usage is unavailable, state that explicitly and include the source checked.
+10. Before closing or handing off the issue, add an issue comment titled `AI usage` with tokens consumed and AIC/AI Credits consumed to complete that issue. Include model breakdown, telemetry source or session IDs when available, and an explicit unavailable note with the source checked when exact usage cannot be retrieved.
 11. Merge the pull request into `main` only after successful verification, no unresolved review comments, and repository policy allow the merge; otherwise report the exact blocker.
 12. After a successful merge, refresh `main`, verify the merge commit is present, then create and push a corresponding main-branch tag. Use a safe, lowercase tag name derived from the issue and PR, such as `issue-66-pr-78-laptop-recording-config`, or `pr-78-title-slug` when no single issue applies.
 13. After the tag is pushed, remove associated worktrees and delete merged feature branches locally and remotely when permissions allow. Never delete a worktree or branch before its changes are merged and the corresponding main-branch tag exists.
@@ -28,7 +28,7 @@ When running in fleet mode, treat the parent agent as the coordinator and shard 
 - Use a separate feature branch or worktree branch per issue/subagent.
 - Avoid assigning issues that are likely to touch the same files or tightly coupled subsystems.
 - Stop and report a coordination conflict if two subagents select overlapping work.
-- Require each subagent to report its issue number, branch, PR, Copilot review status, merge/close status, tag, cleanup status, files changed, verification, and any unavailable checks.
+- Require each subagent to report its issue number, branch, PR, Copilot review status, merge/close status, main-branch tag, cleanup status, files changed, verification, and any unavailable checks.
 
 When monitoring repository issue and PR status, refresh issue state, labels, comments, linked PRs, check runs, reviews, branch protection blockers, and existing feature branches before selecting, merging, tagging, cleanup, or closing work. Skip issues that are closed, blocked, assigned to unclear ownership, already have active in-progress branches, or already have linked in-flight PRs unless the user explicitly asks to take them over.
 
@@ -38,4 +38,4 @@ Stop the loop instead of continuing inefficiently when acceptance criteria are a
 
 When stopping, leave a clear off-ramp record with the issue number, what was attempted, why the loop stopped, evidence from commands or code review, and the next human decision needed.
 
-Always report completed work separately from unavailable checks, unavailable Copilot review, unavailable merge/tag/close/worktree-cleanup/branch-cleanup steps, unavailable AI usage metrics, or follow-up needed.
+Never close an issue without either an exact AI usage comment or an explicit AI usage unavailable comment. Always report completed work separately from unavailable checks, unavailable Copilot review, unavailable merge/tag/close/worktree-cleanup/branch-cleanup steps, unavailable AI usage metrics, or follow-up needed.
