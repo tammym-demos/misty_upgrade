@@ -35,7 +35,7 @@ Orchestration Service (Flask)
 Misty speakers + LED/display/movement
 ```
 
-The preferred mode is `USE_LAPTOP_WAKE_WORD=true`. In that mode, the laptop mic handles both wake word detection and STT recording. Misty's mic is not trusted for intelligence; it is used mainly to activate the robot tally light during recording and as a fallback path if laptop capture fails.
+The preferred mode is `USE_LAPTOP_WAKE_WORD=true`. In that mode, the laptop mic handles both wake word detection and STT recording. Misty's mic is not trusted for intelligence; by default it is used only to activate the robot tally light during recording and to keep fallback audio if laptop capture fails. Operators can reduce robot audio churn with `LAPTOP_MISTY_RECORDING_MODE=tally` for a short tally-light pulse, or `LAPTOP_MISTY_RECORDING_MODE=off` to avoid Misty-side recording entirely.
 
 ---
 
@@ -189,8 +189,12 @@ Common environment variables:
 | `FOLLOWUP_MAX_TURNS` | `12` | Max follow-up recording cycles in one session. |
 | `PROACTIVE_REBOOT_AFTER_CYCLES` | `5` | Full reboot after this many successful conversation cycles. |
 | `PROACTIVE_REBOOT_AFTER_RECORDINGS` | `15` | Full reboot after this many recording cycles. |
+| `LAPTOP_MISTY_RECORDING_MODE` | `fallback` | In laptop wake-word mode, choose Misty recorder behavior: `fallback` keeps full Misty audio as a safe fallback, `tally` records only a short tally-light pulse, and `off` disables Misty-side recording. |
+| `LAPTOP_MISTY_TALLY_RECORDING_S` | `1.0` | Length of the tally-light-only Misty recording pulse when `LAPTOP_MISTY_RECORDING_MODE=tally`. |
 
 Copy `src\windows-orchestration\.env.example` to `.env` if you want persistent local settings for the orchestration service.
+
+If `LAPTOP_MISTY_RECORDING_MODE` is `tally` or `off` and laptop mic capture returns no usable audio, the controller raises a clear retryable error instead of silently falling back to Misty. Check the laptop microphone or switch back to `fallback` when robot-side backup audio is needed.
 
 ---
 
