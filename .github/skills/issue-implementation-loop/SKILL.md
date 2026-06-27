@@ -49,7 +49,7 @@ Before entering an autonomous loop, verify the current GitHub identity can perfo
 - `gh auth status` succeeds for the target repository.
 - The identity can push feature branches and tags.
 - The identity can open PRs, request Copilot review, merge PRs, close issues, and delete merged remote branches.
-- Branch protection for `main` does not require human approval for autonomous issue loops.
+- Branch protection for `main` does not require human approval for autonomous issue loops. If current branch protection or the user explicitly requires owner approval, request that review and treat missing approval as a merge blocker.
 - Required status checks are configured and expected to run for PRs. Query `main` branch protection with the GitHub API/CLI and treat the returned contexts as the source of truth.
 - Repository auto-merge is enabled when the agent may need to queue merges while checks are pending.
 - Auto-delete merged branches may be enabled; this is acceptable because the main merge commit is still available for tagging after merge.
@@ -104,13 +104,14 @@ If any preflight requirement fails, stop before editing code and report the exac
    - Push the issue-scoped feature branch and open a pull request against `main` for completed issue work.
    - Link the issue from the PR body without closing keywords such as `closes`, `fixes`, or `resolves`; include the completed success-criteria checklist and commands run with verification results.
    - Request Copilot code review on the PR, preferably with the review-request API: `gh api repos/:owner/:repo/pulls/<pull_number>/requested_reviewers -f reviewers[]='copilot-pull-request-reviewer[bot]'`; if the request fails, treat it as a blocker/off-ramp unless Copilot review is confirmed unsupported for the repository.
+   - Do not require owner approval for autonomous issue loops unless current branch protection or the user explicitly requires it. If owner approval is required, request it and block merge until it is granted.
    - Monitor the PR until all required checks pass and Copilot code review is complete or explicitly unsupported.
    - Never queue auto-merge while Copilot review is requested but incomplete.
    - If a required check is not reported within 30 minutes, stop with a required-check timeout off-ramp that names the missing check and links the PR.
    - Retrieve Copilot review comments with the GitHub API, address all actionable comments on the same branch, re-run targeted verification, update the PR, and re-request review when needed.
    - If a Copilot comment is unclear, incorrect, or not safely actionable, leave a PR comment explaining the disposition and continue only when no material risk remains.
    - Before merging, verify the PR body links issues without closing keywords. If closing keywords are present, remove them; if they cannot be removed, add the `AI usage` issue comment before merge so auto-close cannot happen without usage data.
-   - After all applicable tests/lints/checks pass and code review completes, merge the PR into `main` only when repository policy, branch protection, and run authorization permit it. Use `gh pr merge --auto --merge --delete-branch` only after Copilot review is complete and any remaining checks are still pending; otherwise merge only after checks pass.
+   - After all applicable tests/lints/checks pass and required code review completes, merge the PR into `main` only when repository policy, branch protection, and run authorization permit it. Use `gh pr merge --auto --merge --delete-branch` only after Copilot review is complete and any remaining checks are still pending; otherwise merge only after checks pass.
    - If auto-merge is queued, poll the PR until `state=MERGED` before tagging, cleanup, or issue closure. If it does not merge within 30 minutes after all required checks pass, stop with a merge-timeout off-ramp.
    - If merge is not permitted or cannot be completed, leave the issue open and report the ready PR, branch, or worktree plus the exact blocker.
    - After a successful merge, refresh `main`, verify the merge commit is present, then create and push a corresponding main-branch tag so the merged code can be correlated to the issue and PR.
