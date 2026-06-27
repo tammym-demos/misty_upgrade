@@ -2366,11 +2366,11 @@ class MistyController:
             logger.info("Fast re-arm: audio cleanup (2s) — laptop wake word mode")
             time.sleep(2.0)
             if self._ws_is_connected():
-                self._wake_word_listener.resume()
                 self.set_led(0, 255, 0)
                 self.display_image("e_DefaultContent.jpg")
                 self.last_activity_time = time.time()
                 self.set_state(State.IDLE)
+                self._wake_word_listener.resume()
                 logger.info("Fast re-arm complete — laptop wake word resumed; WebSocket kept open")
                 return
             logger.warning(

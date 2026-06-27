@@ -178,6 +178,8 @@ class TestLaptopFastRearm(unittest.TestCase):
         ws = SimpleNamespace(sock=SimpleNamespace(connected=True), close=unittest.mock.MagicMock())
         ctrl.ws = ws
         ctrl.ws_thread = SimpleNamespace(is_alive=lambda: True)
+        state_when_resumed = []
+        ctrl._wake_word_listener.resume.side_effect = lambda: state_when_resumed.append(ctrl.get_state())
 
         with unittest.mock.patch.object(self._controller_module.time, "sleep"):
             with self.assertLogs("misty_controller", level="INFO") as logs:
@@ -188,6 +190,7 @@ class TestLaptopFastRearm(unittest.TestCase):
         ctrl._connect_ws.assert_not_called()
         ctrl._wake_word_listener.resume.assert_called_once()
         self.assertEqual(ctrl.get_state(), self._controller_module.State.IDLE)
+        self.assertEqual(state_when_resumed, [self._controller_module.State.IDLE])
         self.assertTrue(
             any("Fast re-arm complete" in message and "WebSocket kept open" in message for message in logs.output)
         )
