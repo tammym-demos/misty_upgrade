@@ -57,6 +57,14 @@ Before entering an autonomous loop, verify the current GitHub identity can perfo
 
 If any preflight requirement fails, stop before editing code and report the exact permission or settings blocker.
 
+## AI usage prediction and checkpoints
+
+Before editing, record a pre-run AI usage prediction in the issue claim or run log. Include expected input tokens, output tokens, cache read tokens, cache write tokens, AIC/AI Credits or usage cost when available, confidence, and the assumptions that drive the estimate. This prediction is for learning and calibration; do not treat it as a hard budget unless the user sets one.
+
+At minimum, record usage checkpoints after issue selection/preflight, after implementation, after PR creation, after each Copilot review round, before merge, and at closeout or off-ramp. Use exact telemetry when available. If exact telemetry is unavailable, state the telemetry source checked and the fields that were unavailable.
+
+Cached tokens must be reported separately from ordinary input/output tokens because cached reads and writes can still be paid usage. At closeout or off-ramp, compare the initial prediction with the actual exposed telemetry and capture any lesson learned about why the prediction was accurate or inaccurate.
+
 ## Loop workflow
 
 1. **Review candidate issues**
@@ -75,6 +83,7 @@ If any preflight requirement fails, stop before editing code and report the exac
 3. **Plan the implementation**
    - Restate the acceptance criteria as an execution checklist.
    - Identify affected files, tests, docs, and runtime constraints.
+   - Record the pre-run AI usage prediction and assumptions before editing.
    - Create an issue-scoped feature branch, using a worktree when useful for parallel isolation; never work directly on `main`.
    - Keep the planned diff narrow and tied to the issue.
 
@@ -82,6 +91,8 @@ If any preflight requirement fails, stop before editing code and report the exac
    - Make surgical code or documentation changes that satisfy the checklist.
    - Preserve repository conventions and existing behavior unless the issue explicitly changes behavior.
    - Do not silently skip invalid input, broad errors, failed checks, or unavailable dependencies.
+   - Count implementation attempts. If two attempts fail to satisfy verification or materially drift from scope, stop before starting a third and create/comment the human-review off-ramp.
+   - Record an AI usage checkpoint after each implementation attempt.
 
 5. **Verify**
    - Run all applicable tests, lints, builds, and documentation checks for the changed scope.
@@ -110,6 +121,8 @@ If any preflight requirement fails, stop before editing code and report the exac
    - Never queue auto-merge while Copilot review is requested but incomplete.
    - If a required check is not reported within 30 minutes, stop with a required-check timeout off-ramp that names the missing check and links the PR.
    - Retrieve Copilot review comments with the GitHub API, address all actionable comments on the same branch, re-run targeted verification, update the PR, and re-request review when needed.
+   - Count Copilot review rounds that produce actionable findings. If two actionable rounds have been addressed and another actionable round would be required, stop and create/comment the human-review off-ramp instead of continuing inefficiently.
+   - Record an AI usage checkpoint after PR creation and after each Copilot review round.
    - If a Copilot comment is unclear, incorrect, or not safely actionable, leave a PR comment explaining the disposition and continue only when no material risk remains.
    - Before merging, verify the PR body links issues without closing keywords. If closing keywords are present, remove them; if they cannot be removed, add the `AI usage` issue comment before merge so auto-close cannot happen without usage data.
    - After all applicable tests/lints/checks pass and required code review completes, merge the PR into `main` only when repository policy, branch protection, and run authorization permit it. Use `gh pr merge --auto --merge --delete-branch` only after Copilot review is complete and any remaining checks are still pending; otherwise merge only after checks pass.
@@ -123,7 +136,7 @@ If any preflight requirement fails, stop before editing code and report the exac
    - GitHub may auto-delete the remote branch at merge time; this is acceptable because the main merge commit remains available for tagging.
    - Never delete a dirty worktree or unmerged local branch.
    - Verify cleanup with `git worktree list --porcelain`, `git branch --merged main`, and `git branch --all --merged main`.
-   - Before closing or handing off the issue, add or verify an issue comment titled `AI usage` that reports tokens consumed and AIC/AI Credits consumed to complete that issue.
+   - Before closing or handing off the issue, add or verify an issue comment titled `AI usage` that reports the pre-run prediction, actual input tokens, output tokens, cache read tokens, cache write tokens, AIC/AI Credits or usage cost when available, and the prediction-vs-actual lesson for that issue.
    - Include model breakdown, telemetry source or session IDs when available, subagent usage when applicable, and the issue/PR scope used for the usage query.
    - Use exact usage from available Copilot/session usage telemetry when available; if exact usage is unavailable, do not estimate. State which usage source was checked and that the metric was unavailable.
    - Never close an issue without either an exact AI usage comment or an explicit AI usage unavailable comment.
@@ -159,6 +172,7 @@ Stop and create or comment a human-review issue when any of these occur:
 
 - Acceptance criteria are absent or contradictory.
 - The agent has made two unsuccessful implementation attempts for the same issue.
+- Continuing would require a third implementation attempt or a third Copilot review round with actionable findings.
 - Verification cannot be run and there is no credible substitute.
 - A required PR check is not reported within 30 minutes or remains pending after its workflow should have completed.
 - Copilot review cannot be requested and Copilot review is not confirmed unsupported for the repository.
@@ -167,6 +181,7 @@ Stop and create or comment a human-review issue when any of these occur:
 - The diff is growing beyond the issue scope.
 - Required credentials, services, hardware, or external access are unavailable.
 - The task is blocked on product, safety, privacy, or architectural decisions.
+- Usage checkpoints show repeated or redundant work that makes continued automation inefficient without a new human decision.
 
 The off-ramp record must include:
 
@@ -174,7 +189,7 @@ The off-ramp record must include:
 - What was attempted.
 - Why the loop stopped.
 - Evidence from commands, errors, tests, or code review.
-- AI usage: tokens consumed and AIC/AI Credits consumed, model breakdown and telemetry source/session IDs when available, or an explicit unavailable note with the source checked.
+- AI usage: pre-run prediction, actual input/output/cache read/cache write tokens, AIC/AI Credits or usage cost when available, model breakdown and telemetry source/session IDs when available, prediction-vs-actual lesson, or an explicit unavailable note with the source checked.
 - Recommended next human decision.
 
 ## Loop performance monitoring
@@ -186,6 +201,8 @@ Track these metrics for each loop run:
 - Agent claim comment URL and session/subagent IDs when available.
 - Started and completed timestamps.
 - Iteration count.
+- Pre-run AI usage prediction, confidence, and assumptions.
+- AI usage checkpoints after selection/preflight, implementation, PR creation, each Copilot review round, pre-merge, and closeout/off-ramp.
 - Files changed.
 - Commands run.
 - Verification status, including all applicable tests, lints, builds, and documentation checks.
@@ -197,7 +214,7 @@ Track these metrics for each loop run:
 - Worktree removal and merged branch deletion status after the main-branch tag is pushed.
 - Failures and retries.
 - Off-ramp reason, when applicable.
-- Tokens consumed and AIC/AI Credits consumed, model breakdown, telemetry source/session IDs, subagent usage, or the usage source checked when exact values are unavailable.
+- Actual input tokens, output tokens, cache read tokens, cache write tokens, AIC/AI Credits or usage cost when available, prediction-vs-actual comparison, model breakdown, telemetry source/session IDs, subagent usage, or the usage source checked when exact values are unavailable.
 
 Use these metrics to decide whether to continue, narrow scope, switch to `feature-planning`, or stop for human review.
 
@@ -217,7 +234,7 @@ Report:
 - Branch or worktree, PR, Copilot review status, merge commit, main-branch tag, cleanup, or issue closure status, when available.
 - Success criteria completed.
 - Verification commands and results, including all applicable tests, lints, builds, and documentation checks.
-- AI usage issue update status, including tokens and AIC/AI Credits consumed, model breakdown, and telemetry source/session IDs when available.
+- AI usage issue update status, including prediction, actual input/output/cache read/cache write tokens, AIC/AI Credits or usage cost when available, model breakdown, telemetry source/session IDs, and prediction-vs-actual lesson when available.
 - Any off-ramp, unavailable check, unavailable Copilot review, unavailable merge/tag/close/worktree-cleanup/branch-cleanup step, or manual follow-up.
 
 Keep the response concise and distinguish completed work from planned or blocked work.
