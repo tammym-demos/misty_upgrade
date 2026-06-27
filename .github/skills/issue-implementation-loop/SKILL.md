@@ -5,11 +5,11 @@ description: Use when asked to run or define an agent loop that reviews GitHub i
 
 # Issue Implementation Loop Skill
 
-Use this skill when the user asks an agent to review GitHub issues, monitor issue status, select prioritized work, implement from issue success criteria, run verification, merge completed feature branches when allowed, close completed issues, or create an off-ramp for work that is not efficient to automate.
+Use this skill when the user asks an agent to review GitHub issues, monitor issue status, select prioritized work, implement from issue success criteria, run verification, open pull requests, request Copilot code review, merge completed pull requests when allowed, tag `main`, close completed issues, or create an off-ramp for work that is not efficient to automate.
 
 This workflow is **both agent and skill**:
 
-- The **agent** is the autonomous executor. It reads issues, chooses ready work, edits files, runs commands, merges verified feature branches when allowed, updates and closes issues, and reports results.
+- The **agent** is the autonomous executor. It reads issues, chooses ready work, edits files, runs commands, opens PRs, requests Copilot code review, merges verified PRs when allowed, tags `main`, updates and closes issues, and reports results.
 - This **skill** is the reusable policy and runbook. It defines selection rules, guardrails, verification, metrics, and off-ramp behavior.
 
 ## Core rule
@@ -27,14 +27,15 @@ When this loop runs under `/fleet`, use parallelism only for independent issue w
 - Give every subagent a distinct issue number, acceptance criteria, branch name, and verification expectation.
 - Do not run multiple subagents on issues that likely touch the same files, runtime state, hardware path, or GitHub artifact.
 - If issue ownership, file overlap, branch conflicts, or PR conflicts appear, stop the affected subagents and record a coordination off-ramp.
-- Require each subagent to report the issue number, title, branch, merge/close status, files changed, commands run, verification result, unavailable checks, and off-ramp reason when applicable.
+- Require each subagent to report the issue number, title, branch, PR, Copilot review status, merge/close status, tag, cleanup status, files changed, commands run, verification result, unavailable checks, and off-ramp reason when applicable.
 
 ## Repository monitoring
 
 When asked to monitor issue status, refresh repository state before selecting, assigning, merging, or closing work:
-- Check current issue state, labels, assignees, comments, and existing feature branches.
-- Skip issues that are closed, blocked, deferred, assigned to unclear ownership, or already being handled by an active branch unless the user explicitly asks to take over.
-- Re-check the selected issue before merging or closing it to ensure the scope, labels, or ownership did not change during implementation.
+
+- Check current issue state, labels, assignees, comments, linked PRs, PR reviews, check runs, branch protection blockers, and existing feature branches.
+- Skip issues that are closed, blocked, deferred, assigned to unclear ownership, already being handled by an active branch, or already linked to an in-flight PR unless the user explicitly asks to take over.
+- Re-check the selected issue and linked PR before merging, tagging, cleanup, or closing to ensure the scope, labels, ownership, reviews, and check status did not change during implementation.
 - In fleet mode, the parent agent owns monitoring and assignment; subagents own only their assigned issue.
 
 ## Loop workflow
@@ -68,20 +69,22 @@ When asked to monitor issue status, refresh repository state before selecting, a
    - Add or update tests when behavior changes and a practical test path exists.
    - If live services, hardware, or credentials are required and unavailable, state exactly which check could not run and why.
 
-6. **Merge, close, or hand off**
-   - Do not create a pull request by default. Create or prepare a PR only when the user asks for one or repository policy requires one.
-   - After verification, merge all issue-scoped branch or worktree branches into `main` only when repository policy, branch protection, and run authorization permit it.
-   - If merge is not permitted or cannot be completed, leave the issue open and report the ready branch or worktree plus the exact blocker.
-   - Include the completed success-criteria checklist.
-   - Include commands run and verification results.
+6. **Open, review, merge, close, or hand off**
+   - Push the issue-scoped feature branch and open a pull request against `main` for completed issue work.
+   - Link or close the issue from the PR body, include the completed success-criteria checklist, and include commands run and verification results.
+   - Request Copilot code review on the PR, preferably with the review-request API: `gh api repos/:owner/:repo/pulls/<pr>/requested_reviewers -f reviewers[]='copilot-pull-request-reviewer[bot]'`; if the request fails or the feature is unavailable, note the exact blocker on the PR or in the handoff.
+   - Monitor the PR until required checks, required human review, and Copilot review are complete.
+   - Address actionable review feedback on the same branch, re-run targeted verification, update the PR, and re-request review when needed.
+   - After verification and review, merge the PR into `main` only when repository policy, branch protection, and run authorization permit it.
+   - If merge is not permitted or cannot be completed, leave the issue open and report the ready PR, branch, or worktree plus the exact blocker.
    - Update the issue with an `AI usage` closeout note that reports tokens consumed and AIC/AI Credits consumed for the loop.
    - Use exact usage from available Copilot/session usage telemetry when available; if exact usage is unavailable, do not estimate. State which usage source was checked and that the metric was unavailable.
-   - After a successful merge to `main`, create and push a corresponding issue tag so the merged code can be correlated to the issue.
-   - Use a safe, lowercase tag name derived from the issue number and title, such as `issue-66-make-misty-recording-tally-light-fallback-configurable-in-laptop-mode`.
-   - Create the issue tag before closing the issue.
-   - After the issue tag is pushed, remove associated worktrees and delete merged feature branches locally and remotely when permissions allow.
-   - Never delete a worktree or feature branch before its changes are merged and the corresponding issue tag exists.
-   - After merge, tag, and cleanup steps are complete, close the issue.
+   - After a successful merge, refresh `main`, verify the merge commit is present, then create and push a corresponding main-branch tag so the merged code can be correlated to the issue and PR.
+   - Use a safe, lowercase tag name derived from the issue and PR, such as `issue-66-pr-78-laptop-recording-config`, or `pr-78-title-slug` when no single issue applies.
+   - Create the main-branch tag before closing the issue.
+   - After the main-branch tag is pushed, remove associated worktrees and delete merged feature branches locally and remotely when permissions allow.
+   - Never delete a worktree or feature branch before its changes are merged and the corresponding main-branch tag exists.
+   - After merge, tag, and cleanup steps are complete, verify the issue is closed or close it explicitly.
    - Note any unavailable checks, residual risks, or manual validation needed.
 
 ## When to invoke `feature-planning`
@@ -138,9 +141,11 @@ Track these metrics for each loop run:
 - Files changed.
 - Commands run.
 - Verification status.
+- Pull request number and URL.
+- Copilot code review request and completion status.
 - Merge and issue closure status.
-- Issue tag name and push status after merge.
-- Worktree removal and merged branch deletion status after the issue tag is pushed.
+- Main-branch tag name and push status after merge.
+- Worktree removal and merged branch deletion status after the main-branch tag is pushed.
 - Failures and retries.
 - Off-ramp reason, when applicable.
 - Tokens consumed and AIC/AI Credits consumed, or the usage source checked when exact values are unavailable.
@@ -160,10 +165,10 @@ Use these metrics to decide whether to continue, narrow scope, switch to `featur
 Report:
 
 - Issue number and title.
-- Branch or worktree, merge commit, issue tag, cleanup, or issue closure status, when available.
+- Branch or worktree, PR, Copilot review status, merge commit, main-branch tag, cleanup, or issue closure status, when available.
 - Success criteria completed.
 - Verification commands and results.
 - AI usage issue update status, including tokens and AIC/AI Credits consumed when available.
-- Any off-ramp, unavailable check, unavailable merge/tag/close/worktree-cleanup/branch-cleanup step, or manual follow-up.
+- Any off-ramp, unavailable check, unavailable Copilot review, unavailable merge/tag/close/worktree-cleanup/branch-cleanup step, or manual follow-up.
 
 Keep the response concise and distinguish completed work from planned or blocked work.
