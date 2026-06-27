@@ -36,7 +36,6 @@ When asked to monitor issue status, refresh repository state before selecting, a
 - Skip issues that are closed, blocked, deferred, assigned to unclear ownership, or already being handled by an active branch unless the user explicitly asks to take over.
 - Re-check the selected issue before merging or closing it to ensure the scope, labels, or ownership did not change during implementation.
 - In fleet mode, the parent agent owns monitoring and assignment; subagents own only their assigned issue.
-- In fleet mode, the parent agent owns monitoring and assignment; subagents own only their assigned issue.
 
 ## Loop workflow
 

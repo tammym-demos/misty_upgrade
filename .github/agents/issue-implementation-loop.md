@@ -26,7 +26,7 @@ When running in fleet mode, treat the parent agent as the coordinator and shard 
 - Avoid assigning issues that are likely to touch the same files or tightly coupled subsystems.
 - Stop and report a coordination conflict if two subagents select overlapping work.
 - Require each subagent to report its issue number, branch, merge/close status, files changed, verification, and any unavailable checks.
-When monitoring repository issue status, refresh issue state, labels, comments, and existing feature branches before selecting or closing work. Skip issues that are closed, blocked, assigned to unclear ownership, or already have active in-progress branches unless the user explicitly asks to take them over.
+
 When monitoring repository issue status, refresh issue state, labels, comments, and existing feature branches before selecting or closing work. Skip issues that are closed, blocked, assigned to unclear ownership, or already have active in-progress branches unless the user explicitly asks to take them over.
 
 Use `.github\skills\issue-implementation-loop\SKILL.md` as the policy for the loop. Use `.github\skills\feature-planning\SKILL.md` before implementation when an issue is vague, duplicated, missing criteria, blocked, or needs a human-review off-ramp.
