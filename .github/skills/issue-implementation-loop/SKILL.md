@@ -52,6 +52,7 @@ Before entering an autonomous loop, verify the current GitHub identity can perfo
 - Branch protection for `main` does not require human approval for autonomous issue loops.
 - Required status checks are configured and expected to run for PRs. In this repository the required PR checks are `Analyze (python)`, `Analyze (javascript-typescript)`, and `CodeQL`.
 - Repository auto-merge is enabled when the agent may need to queue merges while checks are pending.
+- Auto-delete merged branches may be enabled; this is acceptable because the main merge commit is still available for tagging after merge.
 
 If any preflight requirement fails, stop before editing code and report the exact permission or settings blocker.
 
@@ -101,13 +102,16 @@ If any preflight requirement fails, stop before editing code and report the exac
 
 6. **Open, review, merge, close, or hand off**
    - Push the issue-scoped feature branch and open a pull request against `main` for completed issue work.
-   - Link or close the issue from the PR body, include the completed success-criteria checklist, and include commands run and verification results.
-   - Request Copilot code review on the PR, preferably with the review-request API: `gh api repos/:owner/:repo/pulls/<pr>/requested_reviewers -f reviewers[]='copilot-pull-request-reviewer[bot]'`; if the request fails or the feature is unavailable, note the exact blocker on the PR or in the handoff.
-   - Monitor the PR until all required checks pass and Copilot code review is complete or explicitly unavailable.
+   - Link the issue from the PR body without closing keywords such as `closes`, `fixes`, or `resolves`; include the completed success-criteria checklist and commands run with verification results.
+   - Request Copilot code review on the PR, preferably with the review-request API: `gh api repos/:owner/:repo/pulls/<pr>/requested_reviewers -f reviewers[]='copilot-pull-request-reviewer[bot]'`; if the request fails, treat it as a blocker/off-ramp unless Copilot review is confirmed unsupported for the repository.
+   - Monitor the PR until all required checks pass and Copilot code review is complete or explicitly unsupported.
+   - Never queue auto-merge while Copilot review is requested but incomplete.
+   - If a required check is not reported within 30 minutes, stop with a required-check timeout off-ramp that names the missing check and links the PR.
    - Retrieve Copilot review comments with the GitHub API, address all actionable comments on the same branch, re-run targeted verification, update the PR, and re-request review when needed.
    - If a Copilot comment is unclear, incorrect, or not safely actionable, leave a PR comment explaining the disposition and continue only when no material risk remains.
    - Before merging any PR that can close an issue, add the `AI usage` issue comment first so auto-closing keywords cannot close the issue before usage is recorded.
-   - After all applicable tests/lints/checks pass and code review completes, merge the PR into `main` only when repository policy, branch protection, and run authorization permit it. Use `gh pr merge --auto --merge --delete-branch` if checks are pending and auto-merge is available; otherwise merge only after checks pass.
+   - After all applicable tests/lints/checks pass and code review completes, merge the PR into `main` only when repository policy, branch protection, and run authorization permit it. Use `gh pr merge --auto --merge --delete-branch` only after Copilot review is complete and any remaining checks are still pending; otherwise merge only after checks pass.
+   - If auto-merge is queued, poll the PR until `state=MERGED` before tagging, cleanup, or issue closure. If it does not merge within 30 minutes after all required checks pass, stop with a merge-timeout off-ramp.
    - If merge is not permitted or cannot be completed, leave the issue open and report the ready PR, branch, or worktree plus the exact blocker.
    - Before closing or handing off the issue, add an issue comment titled `AI usage` that reports tokens consumed and AIC/AI Credits consumed to complete that issue.
    - Include model breakdown, telemetry source or session IDs when available, subagent usage when applicable, and the issue/PR scope used for the usage query.
@@ -116,11 +120,13 @@ If any preflight requirement fails, stop before editing code and report the exac
    - After a successful merge, refresh `main`, verify the merge commit is present, then create and push a corresponding main-branch tag so the merged code can be correlated to the issue and PR.
    - Use a safe, lowercase tag name derived from the issue and PR, such as `issue-66-pr-78-laptop-recording-config`, or `pr-78-title-slug` when no single issue applies.
    - If the intended tag already exists, append the short merge SHA, for example `issue-66-pr-78-laptop-recording-config-68204b6`.
-   - Create the main-branch tag before closing the issue.
+   - Create the main-branch tag before explicitly closing the issue.
    - After the main-branch tag is pushed, remove associated worktrees and delete merged feature branches locally and remotely when permissions allow.
-   - Never delete a dirty worktree, an unmerged branch, or any branch before its changes are merged and the corresponding main-branch tag exists.
+   - GitHub may auto-delete the remote branch at merge time; this is acceptable because the main merge commit remains available for tagging.
+   - Never delete a dirty worktree or unmerged local branch.
    - Verify cleanup with `git worktree list --porcelain`, `git branch --merged main`, and `git branch --all --merged main`.
    - After merge, tag, and cleanup steps are complete, verify the issue is closed or close it explicitly with the AI usage closeout comment already present.
+   - Do not rely on PR closing keywords for issue closure; close explicitly after AI usage, merge, tag, and cleanup.
    - Note any unavailable checks, residual risks, or manual validation needed.
 
 ## When to invoke `feature-planning`
@@ -152,6 +158,9 @@ Stop and create or comment a human-review issue when any of these occur:
 - Acceptance criteria are absent or contradictory.
 - The agent has made two unsuccessful implementation attempts for the same issue.
 - Verification cannot be run and there is no credible substitute.
+- A required PR check is not reported within 30 minutes or remains pending after its workflow should have completed.
+- Copilot review cannot be requested and Copilot review is not confirmed unsupported for the repository.
+- Auto-merge is queued but the PR does not merge within 30 minutes after required checks pass.
 - The required change crosses unrelated subsystems.
 - The diff is growing beyond the issue scope.
 - Required credentials, services, hardware, or external access are unavailable.
@@ -180,6 +189,7 @@ Track these metrics for each loop run:
 - Verification status, including all applicable tests, lints, builds, and documentation checks.
 - Pull request number and URL.
 - Copilot code review request and completion status.
+- Required check reporting and timeout status.
 - Merge and issue closure status.
 - Main-branch tag name and push status after merge.
 - Worktree removal and merged branch deletion status after the main-branch tag is pushed.
