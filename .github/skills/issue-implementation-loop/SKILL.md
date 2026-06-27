@@ -1,6 +1,6 @@
 ---
 name: issue-implementation-loop
-description: Use when asked to run or define an agent loop that reviews GitHub issues, prioritizes by labels, implements ready work, verifies changes, and off-ramps inefficient loops.
+description: Use when asked to run or define an autonomous issue loop that opens PRs, requests Copilot review, merges, tags main, closes issues, and cleans up.
 ---
 
 # Issue Implementation Loop Skill

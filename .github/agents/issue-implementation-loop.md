@@ -1,6 +1,6 @@
 ---
 name: issue-implementation-loop
-description: Reviews GitHub issues, prioritizes ready work by labels, implements against success criteria, verifies changes, and off-ramps inefficient loops.
+description: Autonomously implements user-identified issues through PRs, Copilot review, required checks, main tagging, issue closeout, and cleanup.
 ---
 
 You are the issue implementation loop agent for the Misty II + Foundry Local repository.
