@@ -53,6 +53,13 @@ HEALTH_CHECK_INTERVAL_S = 10.0  # reduced from 30s for watchdog responsiveness
 
 # Laptop wake word listener (issue #44) — use laptop mic instead of Misty's keyphrase engine
 USE_LAPTOP_WAKE_WORD = os.getenv("USE_LAPTOP_WAKE_WORD", "").lower() in ("1", "true", "yes")
+_RAW_LAPTOP_MISTY_RECORDING_MODE = os.getenv("LAPTOP_MISTY_RECORDING_MODE", "fallback").strip().lower()
+LAPTOP_MISTY_RECORDING_MODE = (
+    _RAW_LAPTOP_MISTY_RECORDING_MODE
+    if _RAW_LAPTOP_MISTY_RECORDING_MODE in ("fallback", "tally", "off")
+    else "fallback"
+)
+LAPTOP_MISTY_TALLY_RECORDING_S = float(os.getenv("LAPTOP_MISTY_TALLY_RECORDING_S", "1.0"))
 
 # Face recognition (#16) — use Misty's camera to identify people
 USE_FACE_RECOGNITION = os.getenv("USE_FACE_RECOGNITION", "").lower() in ("1", "true", "yes")
@@ -96,6 +103,13 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("misty_controller")
+
+if LAPTOP_MISTY_RECORDING_MODE != _RAW_LAPTOP_MISTY_RECORDING_MODE:
+    logger.warning(
+        "Invalid LAPTOP_MISTY_RECORDING_MODE=%r; using safe default 'fallback'. "
+        "Valid values: fallback, tally, off.",
+        _RAW_LAPTOP_MISTY_RECORDING_MODE,
+    )
 
 
 # ============================================================================
@@ -678,6 +692,109 @@ class MistyController:
 
     def stop_recording(self):
         return self.misty_post("/api/audio/record/stop")
+
+    def _laptop_misty_recording_enabled(self) -> bool:
+        """Whether laptop wake-word mode should touch Misty's recorder."""
+        return LAPTOP_MISTY_RECORDING_MODE in ("fallback", "tally")
+
+    def _laptop_misty_fallback_enabled(self) -> bool:
+        """Whether a Misty-side recording is expected to be usable as fallback audio."""
+        return LAPTOP_MISTY_RECORDING_MODE == "fallback"
+
+    def _start_misty_recording_window(
+        self,
+        turn: int,
+        phase: str,
+        max_duration_s: float | None = None,
+    ):
+        """Start Misty's recorder and return an idempotent stop callback.
+
+        In laptop wake-word mode this is used either for the full fallback
+        recording window or a short tally-light-only pulse.  The returned
+        callback returns True only for the call that actually stopped Misty's
+        recorder.
+        """
+        result = self.start_recording(RECORDING_FILENAME)
+        if not result or result.get("status") != "Success":
+            logger.warning(f"[Turn {turn}] {phase}: Misty recording did not start: {result}")
+            return None
+
+        started_at = time.time()
+        stopped = False
+        lock = threading.Lock()
+        timer_holder: dict[str, threading.Timer | None] = {"timer": None}
+
+        def stop_once() -> bool:
+            nonlocal stopped
+            with lock:
+                if stopped:
+                    return False
+                stopped = True
+                timer = timer_holder["timer"]
+
+            if timer:
+                timer.cancel()
+
+            stop_result = self.stop_recording()
+            duration = time.time() - started_at
+            if stop_result and stop_result.get("status") == "Success":
+                self._recording_cycles += 1
+                logger.info(
+                    f"[Turn {turn}] {phase}: Misty recording stopped after "
+                    f"{duration:.1f}s (cycle {self._recording_cycles})"
+                )
+            else:
+                logger.warning(f"[Turn {turn}] {phase}: Misty recording stop failed: {stop_result}")
+            return True
+
+        if max_duration_s is not None:
+            if max_duration_s <= 0:
+                stop_once()
+            else:
+                timer = threading.Timer(max_duration_s, stop_once)
+                timer.daemon = True
+                timer_holder["timer"] = timer
+                timer.start()
+
+        return stop_once
+
+    def _start_configured_laptop_misty_recording(self, turn: int, phase: str):
+        """Start Misty recording according to laptop-mode fallback/tally/off config."""
+        if not self._laptop_misty_recording_enabled():
+            logger.info(
+                f"[Turn {turn}] {phase}: Misty recording disabled "
+                f"(LAPTOP_MISTY_RECORDING_MODE=off)"
+            )
+            return None
+
+        if self._laptop_misty_fallback_enabled():
+            logger.info(f"[Turn {turn}] {phase}: Misty recording enabled for fallback audio")
+            return self._start_misty_recording_window(turn, phase)
+
+        tally_s = max(0.0, LAPTOP_MISTY_TALLY_RECORDING_S)
+        logger.info(
+            f"[Turn {turn}] {phase}: Misty recording enabled for tally light only "
+            f"({tally_s:.1f}s; fallback disabled)"
+        )
+        return self._start_misty_recording_window(turn, phase, max_duration_s=tally_s)
+
+    def _handle_laptop_capture_failure(
+        self,
+        turn: int,
+        phase: str,
+        misty_fallback_available: bool,
+    ):
+        """Return None to fall back to Misty audio, or raise a clear retryable error."""
+        if self._laptop_misty_fallback_enabled() and misty_fallback_available:
+            logger.warning(f"[Turn {turn}] {phase}: laptop mic empty, falling back to Misty mic")
+            return None
+
+        raise RuntimeError(
+            f"{phase}: laptop mic capture returned no usable audio and Misty fallback "
+            f"is disabled or unavailable (LAPTOP_MISTY_RECORDING_MODE="
+            f"{LAPTOP_MISTY_RECORDING_MODE!r}). Check the laptop microphone or set "
+            "LAPTOP_MISTY_RECORDING_MODE=fallback, then retry."
+        )
 
     def get_audio_base64(self, filename: str) -> str | None:
         result = self.misty_get("/api/audio", {"FileName": filename, "Base64": "true"})
@@ -1852,15 +1969,29 @@ class MistyController:
         use_laptop_mic = self._wake_word_listener and self._wake_word_listener.is_running
         if use_laptop_mic:
             self._wake_word_listener.start_recording()
-        
-        # Also start Misty recording for tally light indicator (audio not used for STT)
-        self.start_recording(RECORDING_FILENAME)
+
+        # In laptop mode, Misty's recorder is configurable: full fallback audio
+        # (default), a short tally-light-only pulse, or fully disabled.
+        misty_recording_stop = None
+        misty_fallback_available = False
+        if use_laptop_mic:
+            misty_recording_stop = self._start_configured_laptop_misty_recording(
+                turn,
+                "initial recording",
+            )
+            misty_fallback_available = (
+                self._laptop_misty_fallback_enabled() and misty_recording_stop is not None
+            )
+        else:
+            self.start_recording(RECORDING_FILENAME)
+            misty_fallback_available = True
+
         record_start = time.time()
         
         if use_laptop_mic:
             # Dynamic recording: laptop mic monitors speech and signals when to stop.
-            # Misty recording runs for at least RECORDING_DURATION_S regardless —
-            # decoupled from laptop VAD so the fallback has full audio if needed.
+            # Misty fallback mode records for at least RECORDING_DURATION_S.
+            # Tally-only mode may stop Misty's recorder earlier via timer.
             speech_ended = threading.Event()
             self._wake_word_listener.start_speech_monitor(
                 on_speech_end=lambda: speech_ended.set(),
@@ -1869,16 +2000,20 @@ class MistyController:
             )
             speech_ended.wait(timeout=15.0)
             self._wake_word_listener.stop_speech_monitor()
-            # Ensure Misty has recorded at least the standard duration for fallback
+            # Ensure Misty has recorded at least the standard duration when it
+            # is acting as fallback audio.
             elapsed = time.time() - record_start
-            if elapsed < RECORDING_DURATION_S:
+            if self._laptop_misty_fallback_enabled() and elapsed < RECORDING_DURATION_S:
                 time.sleep(RECORDING_DURATION_S - elapsed)
         else:
             # Fallback: fixed duration recording
             time.sleep(RECORDING_DURATION_S)
-        
-        self.stop_recording()
-        self._recording_cycles += 1
+
+        if misty_recording_stop:
+            misty_recording_stop()
+        elif not use_laptop_mic:
+            self.stop_recording()
+            self._recording_cycles += 1
         record_duration = time.time() - record_start
         
         # Get audio from laptop mic (preferred) or fall back to Misty's mic
@@ -1888,8 +2023,11 @@ class MistyController:
                 logger.info(f"[Turn {turn}] Using LAPTOP mic: {len(laptop_audio)} bytes, {record_duration:.1f}s")
                 audio_bytes = laptop_audio
             else:
-                logger.warning(f"[Turn {turn}] Laptop mic empty, falling back to Misty mic")
-                audio_bytes = None  # will fetch from Misty below
+                audio_bytes = self._handle_laptop_capture_failure(
+                    turn,
+                    "initial recording",
+                    misty_fallback_available,
+                )
         else:
             audio_bytes = None
 
@@ -2050,8 +2188,21 @@ class MistyController:
         use_laptop_mic = self._wake_word_listener and self._wake_word_listener.is_running
         if use_laptop_mic:
             self._wake_word_listener.start_recording()
-        
-        self.start_recording(RECORDING_FILENAME)
+
+        misty_recording_stop = None
+        misty_fallback_available = False
+        if use_laptop_mic:
+            misty_recording_stop = self._start_configured_laptop_misty_recording(
+                turn,
+                "follow-up recording",
+            )
+            misty_fallback_available = (
+                self._laptop_misty_fallback_enabled() and misty_recording_stop is not None
+            )
+        else:
+            self.start_recording(RECORDING_FILENAME)
+            misty_fallback_available = True
+
         record_start = time.time()
         if use_laptop_mic:
             speech_ended = threading.Event()
@@ -2062,14 +2213,19 @@ class MistyController:
             )
             speech_ended.wait(timeout=10.0)
             self._wake_word_listener.stop_speech_monitor()
-            # Ensure Misty records at least FOLLOWUP_LISTEN_S for fallback
+            # Ensure Misty records at least FOLLOWUP_LISTEN_S when it is acting
+            # as fallback audio. Tally-only mode may stop earlier via timer.
             elapsed = time.time() - record_start
-            if elapsed < FOLLOWUP_LISTEN_S:
+            if self._laptop_misty_fallback_enabled() and elapsed < FOLLOWUP_LISTEN_S:
                 time.sleep(FOLLOWUP_LISTEN_S - elapsed)
         else:
             time.sleep(FOLLOWUP_LISTEN_S)
-        self.stop_recording()
-        self._recording_cycles += 1
+
+        if misty_recording_stop:
+            misty_recording_stop()
+        elif not use_laptop_mic:
+            self.stop_recording()
+            self._recording_cycles += 1
         time.sleep(0.5)  # finalize
 
         # Get audio from laptop mic (preferred) or Misty
@@ -2079,8 +2235,11 @@ class MistyController:
                 logger.info(f"[Turn {turn}] Follow-up using LAPTOP mic: {len(laptop_audio)} bytes")
                 audio_bytes = laptop_audio
             else:
-                logger.warning(f"[Turn {turn}] Follow-up laptop mic empty, falling back to Misty mic")
-                audio_bytes = None
+                audio_bytes = self._handle_laptop_capture_failure(
+                    turn,
+                    "follow-up recording",
+                    misty_fallback_available,
+                )
         else:
             audio_bytes = None
 
@@ -2357,6 +2516,10 @@ class MistyController:
         logger.info(f"  Misty:         {MISTY_BASE}")
         logger.info(f"  Orchestration: {ORCHESTRATION_URL}")
         logger.info(f"  Recording:     {RECORDING_DURATION_S}s")
+        logger.info(
+            f"  Laptop Misty recording: {LAPTOP_MISTY_RECORDING_MODE} "
+            f"(tally={max(0.0, LAPTOP_MISTY_TALLY_RECORDING_S):.1f}s)"
+        )
         logger.info(f"  Idle timeout:  {IDLE_TIMEOUT_S}s")
         logger.info(f"  Watchdog:      soft={WATCHDOG_IDLE_TIMEOUT_S}s, escalate={WATCHDOG_ESCALATE_TIMEOUT_S}s")
         logger.info(f"  Wake word:     {'laptop mic (openWakeWord)' if USE_LAPTOP_WAKE_WORD else 'Misty keyphrase (Snapdragon 410)'}")
@@ -2464,6 +2627,9 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
                 "turn_id": ctrl.turn_id,
                 "conversation_cycles": ctrl._conversation_cycles,
                 "proactive_reboot_at": PROACTIVE_REBOOT_AFTER_CYCLES,
+                "laptop_wake_word": USE_LAPTOP_WAKE_WORD,
+                "laptop_misty_recording_mode": LAPTOP_MISTY_RECORDING_MODE,
+                "laptop_misty_tally_recording_s": max(0.0, LAPTOP_MISTY_TALLY_RECORDING_S),
                 "battery_percent": round(battery.charge_percent * 100),
                 "battery_charging": battery.is_charging,
                 "uptime_s": round(time.time() - ctrl._start_time) if hasattr(ctrl, "_start_time") else None,
