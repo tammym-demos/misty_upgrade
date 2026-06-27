@@ -2190,18 +2190,13 @@ class MistyController:
             self._wake_word_listener.start_recording()
 
         misty_recording_stop = None
-        misty_fallback_available = False
         if use_laptop_mic:
             misty_recording_stop = self._start_configured_laptop_misty_recording(
                 turn,
                 "follow-up recording",
             )
-            misty_fallback_available = (
-                self._laptop_misty_fallback_enabled() and misty_recording_stop is not None
-            )
         else:
             self.start_recording(RECORDING_FILENAME)
-            misty_fallback_available = True
 
         record_start = time.time()
         if use_laptop_mic:
