@@ -73,7 +73,7 @@ When asked to monitor issue status, refresh repository state before selecting, a
    - Push the issue-scoped feature branch and open a pull request against `main` for completed issue work.
    - Link or close the issue from the PR body, include the completed success-criteria checklist, and include commands run and verification results.
    - Request Copilot code review on the PR, preferably with the review-request API: `gh api repos/:owner/:repo/pulls/<pr>/requested_reviewers -f reviewers[]='copilot-pull-request-reviewer[bot]'`; if the request fails or the feature is unavailable, note the exact blocker on the PR or in the handoff.
-   - Monitor the PR until required checks, required human review, and Copilot review are complete.
+   - Monitor the PR until required checks pass and Copilot review is complete or explicitly unavailable.
    - Address actionable review feedback on the same branch, re-run targeted verification, update the PR, and re-request review when needed.
    - After verification and review, merge the PR into `main` only when repository policy, branch protection, and run authorization permit it.
    - If merge is not permitted or cannot be completed, leave the issue open and report the ready PR, branch, or worktree plus the exact blocker.
