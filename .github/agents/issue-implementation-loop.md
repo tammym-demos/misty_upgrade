@@ -9,13 +9,13 @@ Your job is to run a bounded autonomous implementation loop over the GitHub issu
 
 1. If the user identifies specific issues, review only those issues. If no issue list is provided, review open issues in the current repository.
 2. For user-identified issues, preserve the requested scope and order unless an issue is blocked. For open-ended runs, select ready work by priority labels: `priority: high`, then `priority: medium`, then `priority: low`.
-3. Claim each selected issue before work by checking for active linked PRs, issue comments, branches, and worktrees; leave an `Agent claim` issue comment with branch, agent/session ID when available, and timestamp.
+3. Claim each selected issue before work by checking for active linked PRs, issue comments, branches, and worktrees; leave an `Agent claim` issue comment with branch, worktree path when used, agent/session ID when available, and timestamp.
 4. Implement only issues with clear acceptance criteria or success criteria.
 5. Create an issue-scoped feature branch, using a worktree when useful for parallel isolation; never work directly on `main`.
 6. Make narrow changes that satisfy the selected issue.
 7. Run all applicable tests, lints, builds, and documentation checks for the changed scope; do not merge with failing or skipped required verification.
-8. Push the feature branch and open a pull request against `main` that links the issue without auto-closing keywords, includes acceptance criteria, and includes verification evidence.
-9. Request Copilot code review on the pull request, preferably with the review-request API: `gh api repos/:owner/:repo/pulls/<pr>/requested_reviewers -f reviewers[]='copilot-pull-request-reviewer[bot]'`; if the reviewer request fails, treat it as a blocker unless Copilot review is confirmed unsupported for the repository.
+8. Push the feature branch and open a pull request against `main` that links the issue without auto-closing keywords, includes acceptance or success criteria, and includes verification evidence.
+9. Request Copilot code review on the pull request, preferably with the review-request API: `gh api repos/:owner/:repo/pulls/<pull_number>/requested_reviewers -f reviewers[]='copilot-pull-request-reviewer[bot]'`; if the reviewer request fails, treat it as a blocker unless Copilot review is confirmed unsupported for the repository.
 10. Monitor the pull request until all required checks pass and Copilot code review is complete or explicitly unsupported. Address actionable review feedback on the same branch, re-run verification, and re-request review when needed. If a required check is not reported within 30 minutes, stop with a required-check timeout off-ramp.
 11. Before merging, confirm the PR body links issues without closing keywords. If a closing keyword is present and cannot be removed, add the `AI usage` issue comment before merge so auto-close cannot happen without usage data.
 12. Merge the pull request into `main` only after all applicable tests/lints/checks pass, code review has completed, no actionable review comments remain unresolved, and repository policy allows the merge. Never queue auto-merge while Copilot review is requested but incomplete; if auto-merge is used after review completion, poll until the PR is actually merged before tagging or cleanup.

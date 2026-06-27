@@ -92,7 +92,7 @@ If any preflight requirement fails, stop before editing code and report the exac
 
    | Change type | Required local verification |
    |---|---|
-   | Python source or tests | `python -m py_compile <changed .py files>` plus targeted `python -m unittest ...` or existing pytest selector that covers changed behavior |
+   | Python source or tests | `python -m py_compile <changed .py files>` plus the narrowest existing `python -m pytest ...` selector that covers changed behavior |
    | Python dependency/config changes | Python compile/import smoke check plus the narrowest relevant unit or integration test available |
    | Controller/orchestration behavior | Targeted tests for the touched behavior; live Misty/Foundry checks only when the issue explicitly requires hardware or live services |
    | Documentation, agent, or skill only | `git diff --check`; no code tests unless documentation tooling exists |
@@ -103,7 +103,7 @@ If any preflight requirement fails, stop before editing code and report the exac
 6. **Open, review, merge, close, or hand off**
    - Push the issue-scoped feature branch and open a pull request against `main` for completed issue work.
    - Link the issue from the PR body without closing keywords such as `closes`, `fixes`, or `resolves`; include the completed success-criteria checklist and commands run with verification results.
-   - Request Copilot code review on the PR, preferably with the review-request API: `gh api repos/:owner/:repo/pulls/<pr>/requested_reviewers -f reviewers[]='copilot-pull-request-reviewer[bot]'`; if the request fails, treat it as a blocker/off-ramp unless Copilot review is confirmed unsupported for the repository.
+   - Request Copilot code review on the PR, preferably with the review-request API: `gh api repos/:owner/:repo/pulls/<pull_number>/requested_reviewers -f reviewers[]='copilot-pull-request-reviewer[bot]'`; if the request fails, treat it as a blocker/off-ramp unless Copilot review is confirmed unsupported for the repository.
    - Monitor the PR until all required checks pass and Copilot code review is complete or explicitly unsupported.
    - Never queue auto-merge while Copilot review is requested but incomplete.
    - If a required check is not reported within 30 minutes, stop with a required-check timeout off-ramp that names the missing check and links the PR.
