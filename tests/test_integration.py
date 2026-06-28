@@ -993,6 +993,7 @@ class TestTTSCache(unittest.TestCase):
                 try:
                     os.unlink(f2.name)
                 except OSError:
+                    # Best-effort cleanup in test teardown; file may already be removed.
                     pass
 
 
