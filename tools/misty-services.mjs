@@ -204,6 +204,12 @@ function ensureCommand(command, args) {
   }
 }
 
+function redactSensitive(value) {
+  return String(value ?? "")
+    .replace(/(token|key|secret|password|pwd)=([^&\s]+)/gi, "$1=<redacted>")
+    .replace(/(https?:\/\/[^:\s]+:)[^@\s]+@/gi, "$1<redacted>@");
+}
+
 function foundryIsRunning() {
   const result = run("foundry", ["service", "status"], { timeout: 15000 });
   const output = `${result.stdout}\n${result.stderr}`.toLowerCase();
@@ -470,7 +476,7 @@ async function pingMisty(env, state, options) {
     if (discovered) {
       env.MISTY_IP = discovered.ipAddress;
       state.misty = discovered;
-      console.log(`Misty robot: reachable at ${discovered.ipAddress} (${discovered.broadcastName})`);
+      console.log("Misty robot: reachable");
       return;
     }
 
@@ -488,9 +494,9 @@ async function pingMisty(env, state, options) {
     }
 
     throw new Error(
-      `Misty robot is not reachable at ${mistyIp}; not starting the controller.\n` +
+      "Misty robot is not reachable; not starting the controller.\n" +
       `Check power, Wi-Fi, pass the correct address with --misty-ip <ip>, or allow network scanning.\n` +
-      `Details: ${error.message}`,
+      `Details: ${redactSensitive(error.message)}`,
     );
   }
 }
@@ -711,6 +717,6 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error(error.message);
+  console.error(redactSensitive(error.message));
   process.exitCode = 1;
 });
