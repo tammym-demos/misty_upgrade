@@ -20,6 +20,24 @@ When the user identifies specific issues to work, treat that list as the run que
 
 If an issue is vague, missing acceptance criteria, likely duplicated, blocked, or better suited to planning than execution, invoke the `feature-planning` skill instead of starting implementation.
 
+## Cloud-safe repository filter
+
+For this repository, a cloud-safe issue must have both:
+
+- clear acceptance or success criteria; and
+- a credible verification path that does not depend on Misty hardware, Foundry Local, Windows-only audio/TTS behavior, or other unavailable local services.
+
+Prefer documentation, repository policy/automation, and other changes that can be verified with cloud-available commands such as `git diff --check`, targeted Python checks, or GitHub CLI/API inspection.
+
+Off-ramp issues instead of implementing them when they require any of the following:
+
+- Misty hardware or on-network robot validation
+- Foundry Local runtime availability or live model execution
+- Windows-only audio, device, or SAPI5 behavior
+- product or design decisions that are not already resolved in the issue
+- unclear or contradictory criteria
+- required verification that cannot be performed credibly in the cloud
+
 ## Fleet-mode guidance
 
 When this loop runs under `/fleet`, use parallelism only for independent issue work:
@@ -71,6 +89,7 @@ Cached tokens must be reported separately from ordinary input/output tokens beca
    - List open issues in the current repository.
    - Exclude closed issues, issues assigned to someone else when ownership is unclear, and issues explicitly marked blocked or deferred.
    - Prefer issues with clear `## Acceptance criteria`, `## Success criteria`, or an equivalent checklist.
+   - Exclude issues whose required verification depends on Misty hardware, Foundry Local, Windows-only audio/SAPI5, or another unavailable local runtime.
 
 2. **Prioritize by labels**
    - Work in this order:
@@ -111,6 +130,7 @@ Cached tokens must be reported separately from ordinary input/output tokens beca
    | GitHub workflow or repository policy | `git diff --check` plus a GitHub CLI/API verification of the setting or PR lifecycle behavior |
 
    PR-level required checks from `main` branch protection must also pass before merge. Query the required contexts at runtime instead of hardcoding check names.
+   For cloud-safe issue-loop runs in this repository, treat verification that depends on Misty hardware, Foundry Local, or Windows-only audio/SAPI5 as unavailable and off-ramp the issue unless the issue already defines a credible cloud substitute.
 
 6. **Open, review, merge, close, or hand off**
    - Push the issue-scoped feature branch and open a pull request against `main` for completed issue work.
