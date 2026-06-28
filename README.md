@@ -109,7 +109,7 @@ src\
     requirements.txt           # Python dependencies
 
 tests\
-  test_integration.py          # Integration and mocked service tests
+  test_integration.py          # Mixed suite; use @pytest.mark.live to filter live-service tests
   autonomous_test_harness.py   # Long-running physical-system harness
 
 docs\
@@ -240,11 +240,24 @@ Controller test API:
 
 ## Testing
 
-Most tests require live services or physical hardware.
+`tests/test_integration.py` includes both fast mocked tests and live-service/hardware tests.
+Live-dependent classes are marked with `@pytest.mark.live`.
 
 ```powershell
 cd tests
 python -m pytest test_integration.py -v
+```
+
+Quick fast-feedback run (no Misty, Foundry Local, or orchestration service required):
+
+```powershell
+python -m pytest test_integration.py -m "not live" -v
+```
+
+Live/integration-only run:
+
+```powershell
+python -m pytest test_integration.py -m live -v
 ```
 
 Targeted examples:
