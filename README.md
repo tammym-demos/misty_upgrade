@@ -35,7 +35,7 @@ Orchestration Service (Flask)
 Misty speakers + LED/display/movement
 ```
 
-The laptop mic handles both wake word detection (via openWakeWord) and STT recording. Misty's mic is not used for intelligence; by default it is used only to activate the robot tally light during recording and to keep fallback audio if laptop capture fails. Operators can reduce robot audio churn with `LAPTOP_MISTY_RECORDING_MODE=tally` for a short tally-light pulse, or `LAPTOP_MISTY_RECORDING_MODE=off` to avoid Misty-side recording entirely.
+The preferred mode is `USE_LAPTOP_WAKE_WORD=true`. In that mode, the laptop mic handles both wake word detection and STT recording. Misty's mic is not trusted for intelligence; by default it is used only to activate the robot tally light during recording and to keep fallback audio if laptop capture fails. Operators can reduce robot audio churn with `LAPTOP_MISTY_RECORDING_MODE=tally` for a short tally-light pulse, or `LAPTOP_MISTY_RECORDING_MODE=off` to avoid Misty-side recording entirely.
 
 ---
 
