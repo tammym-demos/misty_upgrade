@@ -31,43 +31,45 @@ from dataclasses import dataclass
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+import config_defaults  # canonical source for all shared default values (see config_defaults.py)
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-MISTY_IP = os.getenv("MISTY_IP", "10.0.0.44")
+MISTY_IP = os.getenv("MISTY_IP", config_defaults.MISTY_IP)
 MISTY_BASE = f"http://{MISTY_IP}"
 MISTY_WS = f"ws://{MISTY_IP}/pubsub"
-ORCHESTRATION_URL = os.getenv("ORCHESTRATION_URL", "http://10.0.0.58:5000")
-RECORDING_DURATION_S = float(os.getenv("RECORDING_DURATION_S", "6"))
+ORCHESTRATION_URL = os.getenv("ORCHESTRATION_URL", config_defaults.ORCHESTRATION_URL)
+RECORDING_DURATION_S = float(os.getenv("RECORDING_DURATION_S", str(config_defaults.RECORDING_DURATION_S)))
 RECORDING_FILENAME = "foundry_input.wav"
 RESPONSE_FILENAME = "foundry_response.wav"
 REARM_DELAY_S = 3.0  # delay after playback before re-arming wake word (increased from 1.0 for reliability)
-FOLLOWUP_LISTEN_S = float(os.getenv("FOLLOWUP_LISTEN_S", "5"))  # seconds to listen for follow-up
-FOLLOWUP_TIMEOUT_S = float(os.getenv("FOLLOWUP_TIMEOUT_S", "90"))  # max follow-up window (extended from 60)
+FOLLOWUP_LISTEN_S = float(os.getenv("FOLLOWUP_LISTEN_S", str(config_defaults.FOLLOWUP_LISTEN_S)))  # seconds to listen for follow-up
+FOLLOWUP_TIMEOUT_S = float(os.getenv("FOLLOWUP_TIMEOUT_S", str(config_defaults.FOLLOWUP_TIMEOUT_S)))  # max follow-up window (extended from 60)
 FOLLOWUP_SILENCE_THRESHOLD = 1000  # audio bytes below this = silence (no speech)
-FOLLOWUP_MAX_TURNS = int(os.getenv("FOLLOWUP_MAX_TURNS", "12"))  # cap recording cycles per session
+FOLLOWUP_MAX_TURNS = int(os.getenv("FOLLOWUP_MAX_TURNS", str(config_defaults.FOLLOWUP_MAX_TURNS)))  # cap recording cycles per session
 WS_RECONNECT_BASE_S = 2.0
 WS_RECONNECT_MAX_S = 30.0
 HEALTH_CHECK_INTERVAL_S = 10.0  # reduced from 30s for watchdog responsiveness
 
 # Laptop wake word listener (issue #44) — use laptop mic instead of Misty's keyphrase engine
 USE_LAPTOP_WAKE_WORD = os.getenv("USE_LAPTOP_WAKE_WORD", "").lower() in ("1", "true", "yes")
-_RAW_LAPTOP_MISTY_RECORDING_MODE = os.getenv("LAPTOP_MISTY_RECORDING_MODE", "fallback").strip().lower()
+_RAW_LAPTOP_MISTY_RECORDING_MODE = os.getenv("LAPTOP_MISTY_RECORDING_MODE", config_defaults.LAPTOP_MISTY_RECORDING_MODE).strip().lower()
 LAPTOP_MISTY_RECORDING_MODE = (
     _RAW_LAPTOP_MISTY_RECORDING_MODE
     if _RAW_LAPTOP_MISTY_RECORDING_MODE in ("fallback", "tally", "off")
     else "fallback"
 )
-LAPTOP_MISTY_TALLY_RECORDING_S = float(os.getenv("LAPTOP_MISTY_TALLY_RECORDING_S", "1.0"))
+LAPTOP_MISTY_TALLY_RECORDING_S = float(os.getenv("LAPTOP_MISTY_TALLY_RECORDING_S", str(config_defaults.LAPTOP_MISTY_TALLY_RECORDING_S)))
 
 # Face recognition (#16) — use Misty's camera to identify people
 USE_FACE_RECOGNITION = os.getenv("USE_FACE_RECOGNITION", "").lower() in ("1", "true", "yes")
-FACE_RECOGNITION_TIMEOUT_S = float(os.getenv("FACE_RECOGNITION_TIMEOUT_S", "3.0"))
+FACE_RECOGNITION_TIMEOUT_S = float(os.getenv("FACE_RECOGNITION_TIMEOUT_S", str(config_defaults.FACE_RECOGNITION_TIMEOUT_S)))
 
 # Keyphrase watchdog — detects silent failures and auto-recovers
-WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", "90"))  # 90s after rearm with no wake event
-WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", "60"))  # 60s after recovery attempt
+WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", str(config_defaults.WATCHDOG_IDLE_TIMEOUT_S)))  # 90s after rearm with no wake event
+WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", str(config_defaults.WATCHDOG_ESCALATE_TIMEOUT_S)))  # 60s after recovery attempt
 
 # Battery thresholds (as fractions 0.0–1.0)
 BATTERY_LOW_WARN = 0.20       # yellow LED warning
@@ -83,14 +85,14 @@ BATTERY_SLAM_CUTOFF = 0.35         # deny SLAM below 35% (memory-intensive)
 BATTERY_VOLTAGE_DROP_HALT = 0.3    # halt if voltage drops >0.3V between readings (load-induced sag)
 
 # Idle timeout
-IDLE_TIMEOUT_S = float(os.getenv("IDLE_TIMEOUT_S", "900"))  # 15 minutes
+IDLE_TIMEOUT_S = float(os.getenv("IDLE_TIMEOUT_S", str(config_defaults.IDLE_TIMEOUT_S)))  # 15 minutes
 
 # Proactive reboot — keyphrase engine degrades after ~2 conversation cycles (#22)
-PROACTIVE_REBOOT_AFTER_CYCLES = int(os.getenv("PROACTIVE_REBOOT_AFTER_CYCLES", "5"))
+PROACTIVE_REBOOT_AFTER_CYCLES = int(os.getenv("PROACTIVE_REBOOT_AFTER_CYCLES", str(config_defaults.PROACTIVE_REBOOT_AFTER_CYCLES)))
 # Max recording cycles before proactive reboot — each record/play cycle stresses
 # the Snapdragon 410 mic hardware. With follow-up conversations, a single "cycle"
 # can have 8+ recordings. Reboot before hardware exhaustion.
-PROACTIVE_REBOOT_AFTER_RECORDINGS = int(os.getenv("PROACTIVE_REBOOT_AFTER_RECORDINGS", "15"))
+PROACTIVE_REBOOT_AFTER_RECORDINGS = int(os.getenv("PROACTIVE_REBOOT_AFTER_RECORDINGS", str(config_defaults.PROACTIVE_REBOOT_AFTER_RECORDINGS)))
 REBOOT_POLL_INTERVAL_S = 5.0   # poll interval while waiting for Misty to come back
 REBOOT_TIMEOUT_S = 120.0       # max wait for Misty to come back after reboot
 
@@ -1788,12 +1790,12 @@ class MistyController:
         )
         self.ws_thread.start()
 
-    def _ws_is_connected(self) -> bool:
-        """Return True when the current Misty WebSocket still appears usable."""
-        sock = getattr(self.ws, "sock", None)
-        thread_alive = bool(self.ws_thread and self.ws_thread.is_alive())
-        return bool(self.ws and sock and getattr(sock, "connected", False) and thread_alive)
-
+    def _ws_is_connected(self) -> bool:
+        """Return True when the current Misty WebSocket still appears usable."""
+        sock = getattr(self.ws, "sock", None)
+        thread_alive = bool(self.ws_thread and self.ws_thread.is_alive())
+        return bool(self.ws and sock and getattr(sock, "connected", False) and thread_alive)
+
     # --- Laptop wake word listener (issue #44) ---
 
     def _start_laptop_wake_word(self):
@@ -2095,7 +2097,8 @@ class MistyController:
         # Processing state already set by caller — just send to orchestration
 
         # Send to orchestration service (include speaker_name from face recognition if available)
-        form_data = {}
+        # Request inline audio bytes to avoid a second GET round trip (#69)
+        form_data = {"return_audio_bytes": "true"}
         if speaker_name:
             form_data["speaker_name"] = speaker_name
         response = requests.post(
@@ -2128,23 +2131,36 @@ class MistyController:
             logger.info(f"[Turn {turn}] MOVEMENT: '{user_text}' -> {movement.get('command')} "
                          f"ack='{ack_text}' ({pipeline_ms}ms)")
 
-            # Download and play acknowledgment audio (speak first, then move)
+            # Retrieve and play acknowledgment audio (speak first, then move)
+            # Prefer inline bytes (#69); fall back to GET if not provided.
             audio_file = result.get("audio_file")
             if audio_file:
-                audio_url = f"{ORCHESTRATION_URL}/api/audio/{audio_file}"
-                try:
-                    audio_resp = requests.get(audio_url, timeout=10.0)
-                    audio_resp.raise_for_status()
-                    response_wav = audio_resp.content
-                    logger.info(f"[Turn {turn}] Downloaded movement ack audio: {len(response_wav)} bytes")
-
-                    self.set_state(State.PLAYING)
-                    self.set_led(148, 0, 211)  # purple = speaking
-                    self.display_image("e_EcstacyHilarious.jpg")
-                    play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
-                    time.sleep(play_duration + 1.0)
-                except Exception as e:
-                    logger.warning(f"[Turn {turn}] Movement ack audio failed: {e}")
+                response_wav = None
+                audio_bytes_b64 = result.get("audioBytes")
+                if audio_bytes_b64:
+                    try:
+                        response_wav = base64.b64decode(audio_bytes_b64)
+                        logger.info(f"[Turn {turn}] Inline movement ack audio: {len(response_wav)} bytes")
+                    except Exception as e:
+                        logger.warning(f"[Turn {turn}] Failed to decode inline movement ack audio: {e}")
+                if response_wav is None:
+                    audio_url = f"{ORCHESTRATION_URL}/api/audio/{audio_file}"
+                    try:
+                        audio_resp = requests.get(audio_url, timeout=10.0)
+                        audio_resp.raise_for_status()
+                        response_wav = audio_resp.content
+                        logger.info(f"[Turn {turn}] Downloaded movement ack audio: {len(response_wav)} bytes")
+                    except Exception as e:
+                        logger.warning(f"[Turn {turn}] Movement ack audio failed: {e}")
+                if response_wav:
+                    try:
+                        self.set_state(State.PLAYING)
+                        self.set_led(148, 0, 211)  # purple = speaking
+                        self.display_image("e_EcstacyHilarious.jpg")
+                        play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
+                        time.sleep(play_duration + 1.0)
+                    except Exception as e:
+                        logger.warning(f"[Turn {turn}] Movement ack playback failed: {e}")
 
             return {"movement": movement, "had_speech": True}
 
@@ -2158,15 +2174,26 @@ class MistyController:
         if result.get("ttsFallback"):
             logger.warning(f"[Turn {turn}] WARNING: TTS FALLBACK was used")
 
-        # Download response audio
-        if not audio_uri:
+        # Retrieve response audio — prefer inline bytes (#69), fall back to GET
+        if not audio_uri and not result.get("audioBytes"):
             raise RuntimeError("No response audio URI")
 
-        audio_url = f"{ORCHESTRATION_URL}{audio_uri}"
-        audio_resp = requests.get(audio_url, timeout=10.0)
-        audio_resp.raise_for_status()
-        response_wav = audio_resp.content
-        logger.info(f"[Turn {turn}] Downloaded response audio: {len(response_wav)} bytes")
+        response_wav = None
+        audio_bytes_b64 = result.get("audioBytes")
+        if audio_bytes_b64:
+            try:
+                response_wav = base64.b64decode(audio_bytes_b64, validate=True)
+                logger.info(f"[Turn {turn}] Inline response audio: {len(response_wav)} bytes")
+            except Exception as e:
+                logger.warning(f"[Turn {turn}] Failed to decode inline audio, falling back to GET: {e}")
+        if response_wav is None:
+            if not audio_uri:
+                raise RuntimeError("No response audio URI and inline audio decode failed")
+            audio_url = f"{ORCHESTRATION_URL}{audio_uri}"
+            audio_resp = requests.get(audio_url, timeout=10.0)
+            audio_resp.raise_for_status()
+            response_wav = audio_resp.content
+            logger.info(f"[Turn {turn}] Downloaded response audio: {len(response_wav)} bytes")
 
         # Upload to Misty and play — animated, looking at user
         self.set_state(State.PLAYING)
@@ -2360,23 +2387,23 @@ class MistyController:
         # Normal re-arm: audio resource cleanup before re-arming.
         self.stop_recording()
         if self._wake_word_listener:
-            # Laptop mode — no keyphrase to restart, shorter cooldown needed.
-            # Keep the WebSocket open on the normal path; the laptop listener
-            # owns wake detection and the existing subscriptions remain valid.
-            logger.info("Fast re-arm: audio cleanup (2s) — laptop wake word mode")
-            time.sleep(2.0)
-            if self._ws_is_connected():
-                self.set_led(0, 255, 0)
-                self.display_image("e_DefaultContent.jpg")
-                self.last_activity_time = time.time()
-                self.set_state(State.IDLE)
-                self._wake_word_listener.resume()
-                logger.info("Fast re-arm complete — laptop wake word resumed; WebSocket kept open")
-                return
-            logger.warning(
-                "Fast re-arm unavailable — WebSocket disconnected/unhealthy; "
-                "falling back to full reconnect"
-            )
+            # Laptop mode — no keyphrase to restart, shorter cooldown needed.
+            # Keep the WebSocket open on the normal path; the laptop listener
+            # owns wake detection and the existing subscriptions remain valid.
+            logger.info("Fast re-arm: audio cleanup (2s) — laptop wake word mode")
+            time.sleep(2.0)
+            if self._ws_is_connected():
+                self.set_led(0, 255, 0)
+                self.display_image("e_DefaultContent.jpg")
+                self.last_activity_time = time.time()
+                self.set_state(State.IDLE)
+                self._wake_word_listener.resume()
+                logger.info("Fast re-arm complete — laptop wake word resumed; WebSocket kept open")
+                return
+            logger.warning(
+                "Fast re-arm unavailable — WebSocket disconnected/unhealthy; "
+                "falling back to full reconnect"
+            )
         else:
             # Misty keyphrase mode — aggressive cleanup needed for Snapdragon 410
             # hardware to fully release resources before keyphrase restart (#22).

@@ -109,7 +109,7 @@ src\
     requirements.txt           # Python dependencies
 
 tests\
-  test_integration.py          # Integration and mocked service tests
+  test_integration.py          # Mixed suite; use @pytest.mark.live to filter live-service tests
   autonomous_test_harness.py   # Long-running physical-system harness
 
 docs\
@@ -211,6 +211,25 @@ If `LAPTOP_MISTY_RECORDING_MODE` is `tally` or `off` and laptop mic capture retu
 
 `/api/orchestrate` returns normal conversational responses or movement responses. Movement commands short-circuit the LLM and return a quick TTS acknowledgment plus a bounded movement command for the controller to execute safely.
 
+### Inline audio bytes (optional)
+
+Add `return_audio_bytes=true` as a form field to receive the generated WAV base64-encoded directly in the JSON response. This avoids a separate `GET /api/audio/<filename>` round trip:
+
+```json
+{
+  "status": "ok",
+  "transcribedText": "...",
+  "inferenceResponse": "...",
+  "responseAudio": "/api/audio/response_12345.wav",
+  "audioBytes": "<base64-encoded WAV>",
+  "latencyMs": 1234,
+  "ttsFallback": false,
+  "ttsCached": false
+}
+```
+
+The `responseAudio` URI is always included for compatibility. `audioBytes` is only present when `return_audio_bytes=true` is requested. Error responses remain structured JSON regardless.
+
 ---
 
 ## Controller Behavior
@@ -240,11 +259,24 @@ Controller test API:
 
 ## Testing
 
-Most tests require live services or physical hardware.
+`tests/test_integration.py` includes both fast mocked tests and live-service/hardware tests.
+Live-dependent classes are marked with `@pytest.mark.live`.
 
 ```powershell
 cd tests
 python -m pytest test_integration.py -v
+```
+
+Quick fast-feedback run (no Misty, Foundry Local, or orchestration service required):
+
+```powershell
+python -m pytest test_integration.py -m "not live" -v
+```
+
+Live/integration-only run:
+
+```powershell
+python -m pytest test_integration.py -m live -v
 ```
 
 Targeted examples:
