@@ -63,7 +63,7 @@ curl http://localhost:5000/api/health
 
 **Foundry Local** runs on a dynamic port (not 5000). The orchestration service auto-discovers it via `foundry service status` and strips the path to get the base URL. Override with `FOUNDRY_LOCAL_HOST` env var if needed.
 
-**Misty controller** connects to Misty via WebSocket (`ws://<MISTY_IP>/pubsub`) for wake word events and REST API for all commands. Configure via env vars: `MISTY_IP` (default: `10.0.0.44`), `ORCHESTRATION_URL` (default: `http://10.0.0.58:5000`).
+**Misty controller** connects to Misty via WebSocket (`ws://<MISTY_IP>/pubsub`) for robot telemetry/events and REST API for all commands. Wake-word detection is laptop-side OpenWakeWord only. Configure via env vars: `MISTY_IP` (default: `10.0.0.44`), `ORCHESTRATION_URL` (default: `http://10.0.0.58:5000`), and `OWW_CUSTOM_MODEL_PATH` for the trained "Hey Misty" model.
 
 ## Tests
 
@@ -113,8 +113,8 @@ Key endpoints used by the controller (all at `http://<MISTY_IP>/api/`):
 
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
-| POST | `/api/audio/keyphrase/start` | Start listening for "Hey Misty" (no params) |
-| POST | `/api/audio/keyphrase/stop` | Stop listening for wake word |
+| POST | `/api/audio/keyphrase/start` | Legacy built-in keyphrase start (unsupported; do not use for normal operation) |
+| POST | `/api/audio/keyphrase/stop` | Stop legacy keyphrase / release audio resources during cleanup |
 | POST | `/api/audio/record/start` | Start recording (`{"FileName": "name.wav"}`) |
 | POST | `/api/audio/record/stop` | Stop recording |
 | GET | `/api/audio?FileName=X&Base64=true` | Get recorded audio as base64 |

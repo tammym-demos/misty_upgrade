@@ -1,0 +1,17 @@
+{
+  "name": "misty-services",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local CLI for starting and stopping the Misty II companion services.",
+  "bin": {
+    "misty-services": "./tools/misty-services.mjs"
+  },
+  "scripts": {
+    "misty:start": "node tools/misty-services.mjs start",
+    "misty:stop": "node tools/misty-services.mjs stop",
+    "misty:status": "node tools/misty-services.mjs status"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
