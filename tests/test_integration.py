@@ -938,25 +938,26 @@ class TestTTSCache(unittest.TestCase):
 
 
     def test_controller_phrases_in_prewarm_set(self):
-        """_CONTROLLER_PHRASES are included in the _prewarm_tts_cache phrase list (#67).
+        """_CONTROLLER_PHRASES are included in _prewarm_tts_cache prewarm calls (#67).
 
-        Ensures greeting ('What's up baby?') and thinking ('Let me think about that.')
-        phrases are prewarmed and pinned alongside movement acknowledgments.
+        Verifies _prewarm_tts_cache() attempts to cache/pin the controller phrases.
         """
         svc = self._svc
-        # Collect the same phrase list that _prewarm_tts_cache builds
-        phrases = []
-        for ack_list in svc._MOVEMENT_ACKS.values():
-            phrases.extend(ack_list)
-        phrases.extend(svc._CONTROLLER_PHRASES)
 
+        # Avoid depending on kokoro-onnx / soundfile during tests: pretend cached files already exist.
+        with unittest.mock.patch.object(svc, "_get_kokoro", return_value=object()), \
+             unittest.mock.patch.dict("sys.modules", {"soundfile": unittest.mock.MagicMock()}), \
+             unittest.mock.patch.object(svc.os.path, "exists", return_value=True), \
+             unittest.mock.patch.object(svc, "_tts_cache_put") as mock_put:
+            svc._prewarm_tts_cache()
+
+        calls_by_text = {call.args[0]: call for call in mock_put.call_args_list}
         for phrase in svc._CONTROLLER_PHRASES:
-            self.assertIn(
-                phrase,
-                phrases,
-                f"Controller phrase '{phrase}' missing from prewarm list",
+            self.assertIn(phrase, calls_by_text, f"Controller phrase '{phrase}' was not prewarmed")
+            self.assertTrue(
+                calls_by_text[phrase].kwargs.get("pinned", False),
+                f"Controller phrase '{phrase}' was not pinned",
             )
-
     def test_controller_phrases_are_pinned_on_cache_put(self):
         """_CONTROLLER_PHRASES entries stored with pinned=True survive eviction (#67)."""
         import tempfile
