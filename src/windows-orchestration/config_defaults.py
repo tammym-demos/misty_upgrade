@@ -50,6 +50,10 @@ FOLLOWUP_LISTEN_S: float = 5.0
 FOLLOWUP_TIMEOUT_S: float = 90.0
 FOLLOWUP_MAX_TURNS: int = 12
 
+# Watchdog / keyphrase recovery
+WATCHDOG_IDLE_TIMEOUT_S: float = 90.0
+WATCHDOG_ESCALATE_TIMEOUT_S: float = 60.0
+
 # Idle timeout
 IDLE_TIMEOUT_S: float = 900.0
 
