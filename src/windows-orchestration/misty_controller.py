@@ -31,43 +31,45 @@ from dataclasses import dataclass
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+import config_defaults  # canonical source for all shared default values (see config_defaults.py)
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-MISTY_IP = os.getenv("MISTY_IP", "10.0.0.44")
+MISTY_IP = os.getenv("MISTY_IP", config_defaults.MISTY_IP)
 MISTY_BASE = f"http://{MISTY_IP}"
 MISTY_WS = f"ws://{MISTY_IP}/pubsub"
-ORCHESTRATION_URL = os.getenv("ORCHESTRATION_URL", "http://10.0.0.58:5000")
-RECORDING_DURATION_S = float(os.getenv("RECORDING_DURATION_S", "6"))
+ORCHESTRATION_URL = os.getenv("ORCHESTRATION_URL", config_defaults.ORCHESTRATION_URL)
+RECORDING_DURATION_S = float(os.getenv("RECORDING_DURATION_S", str(config_defaults.RECORDING_DURATION_S)))
 RECORDING_FILENAME = "foundry_input.wav"
 RESPONSE_FILENAME = "foundry_response.wav"
 REARM_DELAY_S = 3.0  # delay after playback before re-arming wake word (increased from 1.0 for reliability)
-FOLLOWUP_LISTEN_S = float(os.getenv("FOLLOWUP_LISTEN_S", "5"))  # seconds to listen for follow-up
-FOLLOWUP_TIMEOUT_S = float(os.getenv("FOLLOWUP_TIMEOUT_S", "90"))  # max follow-up window (extended from 60)
+FOLLOWUP_LISTEN_S = float(os.getenv("FOLLOWUP_LISTEN_S", str(config_defaults.FOLLOWUP_LISTEN_S)))  # seconds to listen for follow-up
+FOLLOWUP_TIMEOUT_S = float(os.getenv("FOLLOWUP_TIMEOUT_S", str(config_defaults.FOLLOWUP_TIMEOUT_S)))  # max follow-up window (extended from 60)
 FOLLOWUP_SILENCE_THRESHOLD = 1000  # audio bytes below this = silence (no speech)
-FOLLOWUP_MAX_TURNS = int(os.getenv("FOLLOWUP_MAX_TURNS", "12"))  # cap recording cycles per session
+FOLLOWUP_MAX_TURNS = int(os.getenv("FOLLOWUP_MAX_TURNS", str(config_defaults.FOLLOWUP_MAX_TURNS)))  # cap recording cycles per session
 WS_RECONNECT_BASE_S = 2.0
 WS_RECONNECT_MAX_S = 30.0
 HEALTH_CHECK_INTERVAL_S = 10.0  # reduced from 30s for watchdog responsiveness
 
 # Laptop wake word listener (issue #44) — use laptop mic instead of Misty's keyphrase engine
 USE_LAPTOP_WAKE_WORD = os.getenv("USE_LAPTOP_WAKE_WORD", "").lower() in ("1", "true", "yes")
-_RAW_LAPTOP_MISTY_RECORDING_MODE = os.getenv("LAPTOP_MISTY_RECORDING_MODE", "fallback").strip().lower()
+_RAW_LAPTOP_MISTY_RECORDING_MODE = os.getenv("LAPTOP_MISTY_RECORDING_MODE", config_defaults.LAPTOP_MISTY_RECORDING_MODE).strip().lower()
 LAPTOP_MISTY_RECORDING_MODE = (
     _RAW_LAPTOP_MISTY_RECORDING_MODE
     if _RAW_LAPTOP_MISTY_RECORDING_MODE in ("fallback", "tally", "off")
     else "fallback"
 )
-LAPTOP_MISTY_TALLY_RECORDING_S = float(os.getenv("LAPTOP_MISTY_TALLY_RECORDING_S", "1.0"))
+LAPTOP_MISTY_TALLY_RECORDING_S = float(os.getenv("LAPTOP_MISTY_TALLY_RECORDING_S", str(config_defaults.LAPTOP_MISTY_TALLY_RECORDING_S)))
 
 # Face recognition (#16) — use Misty's camera to identify people
 USE_FACE_RECOGNITION = os.getenv("USE_FACE_RECOGNITION", "").lower() in ("1", "true", "yes")
-FACE_RECOGNITION_TIMEOUT_S = float(os.getenv("FACE_RECOGNITION_TIMEOUT_S", "3.0"))
+FACE_RECOGNITION_TIMEOUT_S = float(os.getenv("FACE_RECOGNITION_TIMEOUT_S", str(config_defaults.FACE_RECOGNITION_TIMEOUT_S)))
 
 # Keyphrase watchdog — detects silent failures and auto-recovers
-WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", "90"))  # 90s after rearm with no wake event
-WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", "60"))  # 60s after recovery attempt
+WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", str(config_defaults.WATCHDOG_IDLE_TIMEOUT_S)))  # 90s after rearm with no wake event
+WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", str(config_defaults.WATCHDOG_ESCALATE_TIMEOUT_S)))  # 60s after recovery attempt
 
 # Battery thresholds (as fractions 0.0–1.0)
 BATTERY_LOW_WARN = 0.20       # yellow LED warning
@@ -83,14 +85,14 @@ BATTERY_SLAM_CUTOFF = 0.35         # deny SLAM below 35% (memory-intensive)
 BATTERY_VOLTAGE_DROP_HALT = 0.3    # halt if voltage drops >0.3V between readings (load-induced sag)
 
 # Idle timeout
-IDLE_TIMEOUT_S = float(os.getenv("IDLE_TIMEOUT_S", "900"))  # 15 minutes
+IDLE_TIMEOUT_S = float(os.getenv("IDLE_TIMEOUT_S", str(config_defaults.IDLE_TIMEOUT_S)))  # 15 minutes
 
 # Proactive reboot — keyphrase engine degrades after ~2 conversation cycles (#22)
-PROACTIVE_REBOOT_AFTER_CYCLES = int(os.getenv("PROACTIVE_REBOOT_AFTER_CYCLES", "5"))
+PROACTIVE_REBOOT_AFTER_CYCLES = int(os.getenv("PROACTIVE_REBOOT_AFTER_CYCLES", str(config_defaults.PROACTIVE_REBOOT_AFTER_CYCLES)))
 # Max recording cycles before proactive reboot — each record/play cycle stresses
 # the Snapdragon 410 mic hardware. With follow-up conversations, a single "cycle"
 # can have 8+ recordings. Reboot before hardware exhaustion.
-PROACTIVE_REBOOT_AFTER_RECORDINGS = int(os.getenv("PROACTIVE_REBOOT_AFTER_RECORDINGS", "15"))
+PROACTIVE_REBOOT_AFTER_RECORDINGS = int(os.getenv("PROACTIVE_REBOOT_AFTER_RECORDINGS", str(config_defaults.PROACTIVE_REBOOT_AFTER_RECORDINGS)))
 REBOOT_POLL_INTERVAL_S = 5.0   # poll interval while waiting for Misty to come back
 REBOOT_TIMEOUT_S = 120.0       # max wait for Misty to come back after reboot
 

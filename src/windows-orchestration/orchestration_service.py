@@ -23,6 +23,8 @@ from dotenv import load_dotenv
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
+import config_defaults  # canonical source for all shared default values (see config_defaults.py)
+
 # Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
@@ -40,10 +42,10 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()  # Load .env before reading any env vars
 
-FOUNDRY_API_TIMEOUT = float(os.getenv("FOUNDRY_API_TIMEOUT", "10.0"))
-SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", "15.0"))
-KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_sky")
-KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.2"))
+FOUNDRY_API_TIMEOUT = float(os.getenv("FOUNDRY_API_TIMEOUT", str(config_defaults.FOUNDRY_API_TIMEOUT)))
+SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", str(config_defaults.SERVICE_TIMEOUT)))
+KOKORO_VOICE = os.getenv("KOKORO_VOICE", config_defaults.KOKORO_VOICE)
+KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", str(config_defaults.KOKORO_SPEED)))
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     (
@@ -283,9 +285,9 @@ def classify_intent(user_text: str, last_response_mode: str) -> str:
 
 
 # Maximum characters for a single user prompt (truncated if exceeded)
-MAX_USER_CHARS = int(os.getenv("MAX_USER_CHARS", "400"))
+MAX_USER_CHARS = int(os.getenv("MAX_USER_CHARS", str(config_defaults.MAX_USER_CHARS)))
 # Maximum total characters across all messages sent to the LLM (0 = disabled)
-MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "5000"))
+MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", str(config_defaults.MAX_CONTEXT_CHARS)))
 
 # Locked v1 model stack
 # Foundry Local requires full model IDs for inference calls
@@ -769,7 +771,7 @@ MAX_AUDIO_FILES = 50  # Keep at most 50 response files on disk
 # TTS audio cache — avoids re-synthesizing identical phrases
 # ---------------------------------------------------------------------------
 
-TTS_CACHE_MAX = int(os.getenv("TTS_CACHE_MAX", "200"))
+TTS_CACHE_MAX = int(os.getenv("TTS_CACHE_MAX", str(config_defaults.TTS_CACHE_MAX)))
 _tts_cache: OrderedDict = OrderedDict()  # text_hash → {"path": str, "pinned": bool}
 _tts_cache_lock = threading.Lock()
 

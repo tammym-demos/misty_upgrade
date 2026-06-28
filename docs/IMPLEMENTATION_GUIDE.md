@@ -75,20 +75,20 @@ The Misty controller runs on the companion device and drives the robot entirely 
 **Key Configuration** (environment variables):
 - `MISTY_IP`: Robot IP address (default: `10.0.0.44`)
 - `ORCHESTRATION_URL`: Orchestration service URL (default: `http://10.0.0.58:5000`)
-- `RECORDING_DURATION_S`: How long to record after wake word (default: `4` seconds)
-- `FOLLOWUP_LISTEN_S`: Duration of each follow-up listen clip (default: `4` seconds)
-- `FOLLOWUP_TIMEOUT_S`: Max follow-up conversation window (default: `60` seconds)
-- `WATCHDOG_IDLE_TIMEOUT_S`: Time before watchdog soft-resets keyphrase (default: `60` seconds)
+- `RECORDING_DURATION_S`: How long to record after wake word (default: `6` seconds)
+- `FOLLOWUP_LISTEN_S`: Duration of each follow-up listen clip (default: `5` seconds)
+- `FOLLOWUP_TIMEOUT_S`: Max follow-up conversation window (default: `90` seconds)
+- `WATCHDOG_IDLE_TIMEOUT_S`: Time before watchdog soft-resets keyphrase (default: `90` seconds)
 - `WATCHDOG_ESCALATE_TIMEOUT_S`: Time before watchdog escalates recovery (default: `60` seconds)
 
-**Sensory Reboot on Re-arm**:
-After each conversation ends, `_rearm()` performs a sensory-services-only reboot (`POST /api/reboot {"SensoryServices": true, "Core": false}`) to fully reset the Snapdragon 410 audio subsystem. This adds ~20s dead time but is the only reliable way to restore keyphrase recognition after recording+playback cycles (#28). During reboot, Misty shows a gear icon face (`e_SystemGearPrompt.jpg`) and light-blue LED (`0, 100, 255`).
+**Re-arm strategy**:
+After each conversation ends, `_rearm()` performs a soft reset: it reconnects the WebSocket and restarts keyphrase listening. A full Core+Sensory reboot is triggered proactively after `PROACTIVE_REBOOT_AFTER_CYCLES` (default: `5`) successful conversation cycles. Sensory-only reboots are **never used** — they permanently break the microphone until physical power cycle (#33).
 
 **Keyphrase Watchdog** (safety net):
 The Snapdragon 410 sensory services silently stop firing `KeyPhraseRecognized` events while the REST API still returns "Success". The watchdog detects this and auto-recovers:
-1. **Soft reset** (after 60s in IDLE with no wake events): 🟡 yellow LED → cancel skills → stop/start keyphrase
-2. **Sensory reboot** (if soft reset fails after 60s): 🔴 red LED → reboot sensory services only
-3. **Full reboot** (if sensory reboot fails after 60s): 🔴 red LED → full Core+Sensory reboot
+1. **Soft reset** (after 90s in IDLE with no wake events): 🟡 yellow LED → cancel skills → stop/start keyphrase
+2. **Second soft reset** (if first fails after 60s): 🟡 darker yellow LED → repeat soft reset
+3. **Full reboot** (if second fails after 60s): 🔴 red LED → full Core+Sensory reboot
 
 The watchdog only triggers when in IDLE state. It uses separate timestamps for actual wake events vs recovery attempts to avoid false positives. Health checks run every 10s.
 
@@ -133,12 +133,12 @@ The watchdog only triggers when in IDLE state. It uses separate timestamps for a
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `FOUNDRY_LOCAL_HOST` | Auto-discovered | Foundry Local base URL (overrides CLI discovery) |
-| `FOUNDRY_API_TIMEOUT` | `5.0` | Per-request timeout (seconds) for Foundry API calls |
-| `SERVICE_TIMEOUT` | `6.0` | Overall orchestration pipeline timeout (seconds) |
-| `KOKORO_VOICE` | `af_heart` | Kokoro TTS voice ID |
+| `FOUNDRY_API_TIMEOUT` | `10.0` | Per-request timeout (seconds) for Foundry API calls |
+| `SERVICE_TIMEOUT` | `15.0` | Overall orchestration pipeline timeout (seconds) |
+| `KOKORO_VOICE` | `af_sky` | Kokoro TTS voice ID |
 | `SYSTEM_PROMPT` | *(built-in Misty persona)* | Full system prompt for the LLM. Override to change persona without code changes. The default includes summarization and brevity instructions. |
 | `MAX_USER_CHARS` | `400` | Hard character limit on the transcribed user utterance. Inputs longer than this are silently truncated **before** being sent to Foundry, reducing input token count and LLM latency. Tune down for faster responses, up for richer context. |
-| `MAX_CONTEXT_CHARS` | `3000` | Maximum total characters across all messages (system prompt + conversation history) included in each LLM request. When exceeded, oldest turns are removed first while the system prompt and the latest user message are always kept. Set to `0` to disable trimming. |
+| `MAX_CONTEXT_CHARS` | `5000` | Maximum total characters across all messages (system prompt + conversation history) included in each LLM request. When exceeded, oldest turns are removed first while the system prompt and the latest user message are always kept. Set to `0` to disable trimming. |
 
 
 **Deployment**: Local machine (same as Windows companion)
