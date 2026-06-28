@@ -116,6 +116,7 @@ LATENCY_BUDGET = {
 ### 3. Integration Tests
 **Type**: Python unittest suite  
 **Location**: `tests/test_integration.py`  
+**Selection**: Live-service and hardware classes use `@pytest.mark.live` and can be filtered with pytest markers (`-m "not live"` for fast mocked checks, `-m live` for live validation).  
 **Test Classes**:
 | Test class | Requires |
 |-----------|----------|
@@ -298,6 +299,13 @@ misty-upgrade/
 - Pipeline success: Wake word → transcribe → infer → speak
 - Timeout handling: Each stage respects latency budget
 - Fallback activation: Service failures trigger Misty fallback responses
+
+### Quick Commands
+```powershell
+cd tests
+python -m pytest test_integration.py -m "not live" -v
+python -m pytest test_integration.py -m live -v
+```
 
 ### System-Level
 - End-to-end interaction on live robot

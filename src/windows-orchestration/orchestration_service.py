@@ -4,6 +4,7 @@ Handles STT -> LLM -> TTS pipeline with timeout and error handling.
 Serves OpenAI-compatible endpoints for Misty skill integration.
 """
 
+import base64
 import hashlib
 import os
 import re
@@ -23,6 +24,8 @@ from dotenv import load_dotenv
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 
+import config_defaults  # canonical source for all shared default values (see config_defaults.py)
+
 # Configure logging
 logging.basicConfig(
     level=logging.DEBUG,
@@ -40,10 +43,10 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()  # Load .env before reading any env vars
 
-FOUNDRY_API_TIMEOUT = float(os.getenv("FOUNDRY_API_TIMEOUT", "10.0"))
-SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", "15.0"))
-KOKORO_VOICE = os.getenv("KOKORO_VOICE", "af_sky")
-KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", "1.2"))
+FOUNDRY_API_TIMEOUT = float(os.getenv("FOUNDRY_API_TIMEOUT", str(config_defaults.FOUNDRY_API_TIMEOUT)))
+SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", str(config_defaults.SERVICE_TIMEOUT)))
+KOKORO_VOICE = os.getenv("KOKORO_VOICE", config_defaults.KOKORO_VOICE)
+KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", str(config_defaults.KOKORO_SPEED)))
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     (
@@ -198,6 +201,15 @@ _MOVEMENT_ACKS = {
 }
 
 
+# Fixed phrases used by the Misty controller (greeting + thinking audio).
+# These are uploaded to Misty at startup and must be pre-warmed so the first
+# interaction doesn't pay a synthesis cost.
+_CONTROLLER_PHRASES = [
+    "What's up baby?",
+    "Let me think about that.",
+]
+
+
 def _get_movement_acknowledgment(command: str) -> str:
     """Get a random sassy acknowledgment for a movement command."""
     acks = _MOVEMENT_ACKS.get(command, ["Okay!"])
@@ -274,9 +286,9 @@ def classify_intent(user_text: str, last_response_mode: str) -> str:
 
 
 # Maximum characters for a single user prompt (truncated if exceeded)
-MAX_USER_CHARS = int(os.getenv("MAX_USER_CHARS", "400"))
+MAX_USER_CHARS = int(os.getenv("MAX_USER_CHARS", str(config_defaults.MAX_USER_CHARS)))
 # Maximum total characters across all messages sent to the LLM (0 = disabled)
-MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", "5000"))
+MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", str(config_defaults.MAX_CONTEXT_CHARS)))
 
 # Locked v1 model stack
 # Foundry Local requires full model IDs for inference calls
@@ -397,8 +409,13 @@ def health_check():
 def orchestrate():
     """
     Main orchestration endpoint.
-    Input: WAV file (multipart/form-data), optional speaker_name form field
-    Output: JSON with response audio URI or error
+    Input: WAV file (multipart/form-data), optional form fields:
+      - speaker_name: identified speaker from face recognition (#16)
+      - return_audio_bytes: if "true", the response JSON includes an
+        ``audioBytes`` field containing the generated WAV base64-encoded.
+        This avoids a second GET /api/audio/<filename> round trip.
+        The ``responseAudio`` URI field is still included for compatibility.
+    Output: JSON with response audio URI (and optionally inline audio bytes) or error
     """
     start_time = time.time()
     
@@ -413,6 +430,9 @@ def orchestrate():
 
         # Optional: speaker name from face recognition (#16)
         speaker_name = request.form.get("speaker_name", "").strip() or None
+
+        # Optional: return WAV bytes inline to save a round trip (#69)
+        return_audio_bytes = request.form.get("return_audio_bytes", "").lower() == "true"
 
         # Security: limit upload size (10MB max for WAV audio)
         if len(audio_bytes) > 10 * 1024 * 1024:
@@ -454,6 +474,8 @@ def orchestrate():
             }
             if tts_result.get("status") == "ok":
                 result["audio_file"] = tts_result.get("audio_file")
+                if return_audio_bytes:
+                    result["audioBytes"] = _read_audio_bytes_b64(tts_result.get("audio_file"))
             return jsonify(result), 200
         
         # Step 2: Language Model Inference
@@ -488,7 +510,7 @@ def orchestrate():
         tts_cached = tts_result.get("tts_cached", False)
         logger.info(f"[Pipeline {total_latency_ms:.0f}ms] STT={stt_ms:.0f} LLM={llm_ms:.0f} TTS={tts_ms:.0f} history={len(conversation_history)} fallback={tts_fallback} cached={tts_cached}")
         
-        return jsonify({
+        resp = {
             "status": "ok",
             "transcribedText": user_text,
             "inferenceResponse": response_text,
@@ -496,7 +518,10 @@ def orchestrate():
             "latencyMs": total_latency_ms,
             "ttsFallback": tts_fallback,
             "ttsCached": tts_cached,
-        }), 200
+        }
+        if return_audio_bytes:
+            resp["audioBytes"] = _read_audio_bytes_b64(tts_result.get("audio_file"))
+        return jsonify(resp), 200
         
     except Exception as e:
         logger.error(f"Orchestration failed: {e}", exc_info=True)
@@ -760,7 +785,7 @@ MAX_AUDIO_FILES = 50  # Keep at most 50 response files on disk
 # TTS audio cache — avoids re-synthesizing identical phrases
 # ---------------------------------------------------------------------------
 
-TTS_CACHE_MAX = int(os.getenv("TTS_CACHE_MAX", "200"))
+TTS_CACHE_MAX = int(os.getenv("TTS_CACHE_MAX", str(config_defaults.TTS_CACHE_MAX)))
 _tts_cache: OrderedDict = OrderedDict()  # text_hash → {"path": str, "pinned": bool}
 _tts_cache_lock = threading.Lock()
 
@@ -833,6 +858,8 @@ def _prewarm_tts_cache():
     # Collect all movement acknowledgment phrases
     for ack_list in _MOVEMENT_ACKS.values():
         phrases.extend(ack_list)
+    # Add fixed controller phrases (greeting + thinking audio)
+    phrases.extend(_CONTROLLER_PHRASES)
 
     os.makedirs("responses", exist_ok=True)
     generated = 0
@@ -953,6 +980,32 @@ def text_to_speech(text: str, start_time: float) -> Dict[str, Any]:
 # ============================================================================
 # AUDIO RETRIEVAL
 # ============================================================================
+
+def _read_audio_bytes_b64(audio_filename: str) -> str | None:
+    """Read a generated audio file and return its contents as a base64 string.
+
+    Returns None if ``audio_filename`` is falsy or the file cannot be read.
+    Used by /api/orchestrate when ``return_audio_bytes=true`` is requested to
+    embed the WAV inline in the JSON response, saving a round-trip GET.
+    """
+    if not audio_filename:
+        return None
+    # Security: prevent path traversal (same guard as get_audio)
+    if "/" in audio_filename or "\\" in audio_filename or ".." in audio_filename:
+        logger.warning(f"_read_audio_bytes_b64: rejected unsafe filename: {audio_filename!r}")
+        return None
+    audio_path = os.path.abspath(os.path.join("responses", audio_filename))
+    base_path = os.path.abspath("responses")
+    if not audio_path.startswith(base_path):
+        logger.warning(f"_read_audio_bytes_b64: path traversal blocked: {audio_filename!r}")
+        return None
+    try:
+        with open(audio_path, "rb") as f:
+            return base64.b64encode(f.read()).decode("ascii")
+    except OSError as exc:
+        logger.warning(f"_read_audio_bytes_b64: could not read {audio_filename!r}: {exc}")
+        return None
+
 
 @app.route("/api/audio/<filename>", methods=["GET"])
 def get_audio(filename):
