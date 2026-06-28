@@ -35,7 +35,7 @@ Orchestration Service (Flask)
 Misty speakers + LED/display/movement
 ```
 
-The preferred mode is `USE_LAPTOP_WAKE_WORD=true`. In that mode, the laptop mic handles both wake word detection and STT recording. Misty's mic is not trusted for intelligence; by default it is used only to activate the robot tally light during recording and to keep fallback audio if laptop capture fails. Operators can reduce robot audio churn with `LAPTOP_MISTY_RECORDING_MODE=tally` for a short tally-light pulse, or `LAPTOP_MISTY_RECORDING_MODE=off` to avoid Misty-side recording entirely.
+The laptop mic handles both wake word detection (via openWakeWord) and STT recording. Misty's mic is not used for intelligence; by default it is used only to activate the robot tally light during recording and to keep fallback audio if laptop capture fails. Operators can reduce robot audio churn with `LAPTOP_MISTY_RECORDING_MODE=tally` for a short tally-light pulse, or `LAPTOP_MISTY_RECORDING_MODE=off` to avoid Misty-side recording entirely.
 
 ---
 
@@ -153,7 +153,6 @@ In a second terminal:
 
 ```powershell
 cd src\windows-orchestration
-$env:USE_LAPTOP_WAKE_WORD = "true"
 $env:MISTY_IP = "10.0.0.44"
 $env:ORCHESTRATION_URL = "http://10.0.0.58:5000"
 python misty_controller.py
@@ -175,7 +174,6 @@ Common environment variables:
 
 | Variable | Default | Purpose |
 |---|---:|---|
-| `USE_LAPTOP_WAKE_WORD` | false | Set to `true` for the recommended laptop-mic wake word and recording path. |
 | `MISTY_IP` | `10.0.0.44` | Misty robot IP address. |
 | `ORCHESTRATION_URL` | `http://10.0.0.58:5000` | URL for the Flask orchestration service. |
 | `FOUNDRY_LOCAL_HOST` | auto-discovered | Optional Foundry Local base URL override. |
@@ -189,7 +187,7 @@ Common environment variables:
 | `FOLLOWUP_MAX_TURNS` | `12` | Max follow-up recording cycles in one session. |
 | `PROACTIVE_REBOOT_AFTER_CYCLES` | `5` | Full reboot after this many successful conversation cycles. |
 | `PROACTIVE_REBOOT_AFTER_RECORDINGS` | `15` | Full reboot after this many recording cycles. |
-| `LAPTOP_MISTY_RECORDING_MODE` | `fallback` | In laptop wake-word mode, choose Misty recorder behavior: `fallback` keeps full Misty audio as a safe fallback, `tally` records only a short tally-light pulse, and `off` disables Misty-side recording. |
+| `LAPTOP_MISTY_RECORDING_MODE` | `fallback` | Misty recorder behavior during conversations: `fallback` keeps full Misty audio as a safe fallback, `tally` records only a short tally-light pulse, and `off` disables Misty-side recording. |
 | `LAPTOP_MISTY_TALLY_RECORDING_S` | `1.0` | Length of the tally-light-only Misty recording pulse when `LAPTOP_MISTY_RECORDING_MODE=tally`. |
 
 Copy `src\windows-orchestration\.env.example` to `.env` if you want persistent local settings for the orchestration service.
@@ -310,7 +308,7 @@ For unattended physical testing, see `tests\autonomous_test_harness.py`.
 - Do not push changes directly to `main`; use a feature branch and PR.
 - Do not rely on Misty's on-robot skills for the current pipeline. Auto-starting skills were removed because they interfered with audio.
 - Do not use sensory-only reboot. Use full reboot with both `Core` and `SensoryServices` set to `true`.
-- On shutdown, stop keyphrase, stop recording, cancel skills, and turn the LED off so the tally light and audio resources are released.
+- On shutdown, stop recording, cancel skills, and turn the LED off so the tally light and audio resources are released.
 
 ---
 
@@ -318,7 +316,7 @@ For unattended physical testing, see `tests\autonomous_test_harness.py`.
 
 | Issue | Status |
 |---|---|
-| Misty keyphrase silently fails after repeated cycles | Mitigated by laptop wake word and proactive full reboot. |
+| Misty's Snapdragon 410 keyphrase engine silently fails | Resolved: keyphrase removed; laptop openWakeWord is the only supported wake path. |
 | Misty's on-chip face detection is dead | Avoided; future/optional recognition should be laptop-side. |
 | Sensory-only reboot breaks the mic until physical power cycle | Avoided; code uses full Core+Sensory reboot. |
 | Misty mic can degrade after extended recording cycles | Mitigated by laptop STT recording and proactive reboot by recording count. |
@@ -335,7 +333,7 @@ For unattended physical testing, see `tests\autonomous_test_harness.py`.
 - `docs\ADR-001-companion-device-over-onrobot-inference.md` - Companion-device decision.
 - `docs\ADR-002-non-blocking-audio-pattern.md` - Laptop-mic callback/queue/worker pattern.
 - `docs\lessons-learned.md` - Operational findings from real hardware testing.
-- `docs\keyphrase-debugging.md` - Keyphrase failure history and recovery notes.
+- `docs\keyphrase-debugging.md` - Keyphrase failure history and recovery notes (historical reference).
 
 ---
 
