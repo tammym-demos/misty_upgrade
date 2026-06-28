@@ -962,9 +962,10 @@ class TestTTSCache(unittest.TestCase):
         """_CONTROLLER_PHRASES entries stored with pinned=True survive eviction (#67)."""
         import tempfile
         original_max = self._svc.TTS_CACHE_MAX
+        pinned_paths = []
+        f2 = None
         try:
             self._svc.TTS_CACHE_MAX = 1  # very small to force eviction pressure
-            pinned_paths = []
             for phrase in self._svc._CONTROLLER_PHRASES:
                 f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
                 f.write(b"pinned controller phrase")
