@@ -37,10 +37,10 @@ logger = logging.getLogger("wake_word_listener")
 # ============================================================================
 
 # openWakeWord settings
-OWW_MODEL_NAME = os.getenv("OWW_MODEL_NAME", "hey_jarvis_v0.1")
+OWW_MODEL_NAME = os.getenv("OWW_MODEL_NAME", "hey_misty").strip()
 OWW_THRESHOLD = float(os.getenv("OWW_THRESHOLD", "0.7"))
 OWW_VAD_THRESHOLD = float(os.getenv("OWW_VAD_THRESHOLD", "0"))  # 0 = disabled
-OWW_CUSTOM_MODEL_PATH = os.getenv("OWW_CUSTOM_MODEL_PATH", "")
+OWW_CUSTOM_MODEL_PATH = os.getenv("OWW_CUSTOM_MODEL_PATH", "").strip()
 
 # Audio capture settings (laptop mic)
 SAMPLE_RATE = 16000       # openWakeWord native rate
@@ -121,20 +121,31 @@ class WakeWordListener:
         try:
             from openwakeword.model import Model as OWWModel
 
-            if self.custom_model_path and os.path.exists(self.custom_model_path):
-                logger.info(f"Loading custom wake word model: {self.custom_model_path}")
+            if self.custom_model_path:
+                if not os.path.exists(self.custom_model_path):
+                    logger.error(
+                        "Configured custom wake word model path does not exist: "
+                        f"{self.custom_model_path}. Set OWW_CUSTOM_MODEL_PATH to a trained "
+                        "'Hey Misty' model artifact or place the model files in the expected path."
+                    )
+                    return False
+
+                logger.info(
+                    f"Loading custom wake word model: {self.custom_model_path} "
+                    f"(model_name={self.model_name}, threshold={self.threshold})"
+                )
                 self._oww_model = OWWModel(
                     wakeword_models=[self.custom_model_path],
                     vad_threshold=OWW_VAD_THRESHOLD,
                     inference_framework="onnx",
                 )
             else:
-                logger.info(f"Loading built-in wake word model: {self.model_name}")
-                self._oww_model = OWWModel(
-                    wakeword_models=[self.model_name],
-                    vad_threshold=OWW_VAD_THRESHOLD,
-                    inference_framework="onnx",
+                logger.error(
+                    "No custom wake word model configured for the supported 'Hey Misty' wake phrase. "
+                    "Set OWW_CUSTOM_MODEL_PATH to a trained model artifact and optionally "
+                    "OWW_MODEL_NAME/OWW_THRESHOLD to match it."
                 )
+                return False
 
             logger.info(
                 f"openWakeWord ready (models={list(self._oww_model.models.keys())}, "
@@ -377,6 +388,8 @@ class WakeWordListener:
             "model": self.model_name,
             "threshold": self.threshold,
             "source": "laptop_mic",
+            "custom_model_path": self.custom_model_path or None,
+            "model_source": "custom" if self.custom_model_path else "missing_config",
         }
 
     # --- Audio capture callback (runs in sounddevice's audio thread) ---
