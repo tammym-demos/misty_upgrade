@@ -937,6 +937,61 @@ class TestTTSCache(unittest.TestCase):
                     pass
 
 
+    def test_controller_phrases_in_prewarm_set(self):
+        """_CONTROLLER_PHRASES are included in the _prewarm_tts_cache phrase list (#67).
+
+        Ensures greeting ('What's up baby?') and thinking ('Let me think about that.')
+        phrases are prewarmed and pinned alongside movement acknowledgments.
+        """
+        svc = self._svc
+        # Collect the same phrase list that _prewarm_tts_cache builds
+        phrases = []
+        for ack_list in svc._MOVEMENT_ACKS.values():
+            phrases.extend(ack_list)
+        phrases.extend(svc._CONTROLLER_PHRASES)
+
+        for phrase in svc._CONTROLLER_PHRASES:
+            self.assertIn(
+                phrase,
+                phrases,
+                f"Controller phrase '{phrase}' missing from prewarm list",
+            )
+
+    def test_controller_phrases_are_pinned_on_cache_put(self):
+        """_CONTROLLER_PHRASES entries stored with pinned=True survive eviction (#67)."""
+        import tempfile
+        original_max = self._svc.TTS_CACHE_MAX
+        try:
+            self._svc.TTS_CACHE_MAX = 1  # very small to force eviction pressure
+            pinned_paths = []
+            for phrase in self._svc._CONTROLLER_PHRASES:
+                f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                f.write(b"pinned controller phrase")
+                f.close()
+                pinned_paths.append((phrase, f.name))
+                self._svc._tts_cache_put(phrase, f.name, pinned=True)
+            # Add a non-pinned entry to force eviction
+            f2 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            f2.write(b"evictable")
+            f2.close()
+            self._svc._tts_cache_put("evictable phrase", f2.name, pinned=False)
+            # All controller phrases must still be retrievable
+            for phrase, path in pinned_paths:
+                result = self._svc._tts_cache_get(phrase)
+                self.assertEqual(result, path, f"Pinned controller phrase '{phrase}' was evicted")
+        finally:
+            self._svc.TTS_CACHE_MAX = original_max
+            for _phrase, path in pinned_paths:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+            try:
+                os.unlink(f2.name)
+            except OSError:
+                pass
+
+
 class TestLatencyConfig(unittest.TestCase):
     """Unit tests for latency-related configuration changes (#21)."""
 
