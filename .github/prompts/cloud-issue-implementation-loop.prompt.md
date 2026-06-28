@@ -1,5 +1,5 @@
 ---
-description: Run the cloud-safe issue implementation loop for all ready repository issues.
+description: Run the cloud-safe issue implementation loop for cloud-ready repository issues.
 ---
 
 # Cloud issue implementation loop

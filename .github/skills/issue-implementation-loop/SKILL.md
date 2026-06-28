@@ -22,7 +22,7 @@ If an issue is vague, missing acceptance criteria, likely duplicated, blocked, o
 
 ## Cloud-safe repository filter
 
-For this repository, a cloud-safe issue must have both:
+For this repository, a cloud-safe issue must have all of the following:
 
 - the `cloud-ready` label when selected during an open-ended cloud run;
 - clear acceptance or success criteria; and
