@@ -39,7 +39,7 @@ The robot's hardware (Snapdragon 820 + 410, 2 GB RAM) cannot run inference — 2
 
 - **Never push directly to `main`.** All changes must go through a pull request.
 - For normal manual work, request repository-owner review when branch protection or the user requires it.
-- For autonomous issue-implementation-loop work, require a PR, passing required status checks, Copilot code review, issue AI-usage closeout, a main-branch tag named with issue/PR metadata, and branch/worktree cleanup. Owner review is not required unless current branch protection or the user explicitly requires it.
+- For autonomous issue-implementation-loop work, require a PR with GitHub issue-closing keywords, passing required status checks, Copilot code review, issue AI-usage closeout before merge, a main-branch tag named with issue/PR metadata, auto-close verification, and branch/worktree cleanup. Owner review is not required unless current branch protection or the user explicitly requires it.
 - When working on changes, create a feature branch and open a PR.
 
 ## Build & Run

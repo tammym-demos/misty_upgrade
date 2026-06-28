@@ -10,6 +10,6 @@ Work through open issues labeled `cloud-ready` that can be safely executed in th
 
 Prefer documentation, repository policy/automation, and other work that can be verified entirely from the cloud runner.
 
-Open PRs, request Copilot review, wait for required checks, merge when allowed by branch protection, tag `main`, add AI usage closeout, close issues explicitly, and clean up branches/worktrees.
+Open PRs with GitHub closing keywords such as `Closes #123`, request Copilot review, wait for required checks, add AI usage closeout before merge or auto-merge, merge when allowed by branch protection, tag `main`, verify GitHub auto-closed linked issues, and clean up branches/worktrees.
 
 Off-ramp issues that require Misty hardware, Foundry Local, Windows-only audio/SAPI5, product decisions, unclear criteria, or unavailable required verification.

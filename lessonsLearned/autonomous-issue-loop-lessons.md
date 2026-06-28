@@ -11,7 +11,7 @@
 ## What worked
 
 - Preflight caught the important repository gates: authenticated admin user, protected `main`, required CodeQL checks, auto-merge support, and delete-branch-on-merge.
-- The PR body linked the issue without closing keywords, which kept issue closeout under agent control.
+- Earlier workflow kept issue closeout under agent control. This is superseded by the 2026-06-28 decision to use PR closing keywords for GitHub auto-close.
 - Copilot review was useful: it identified two race/health-check problems before merge.
 - Re-requesting Copilot review after each fix produced a final review with `0 new` comments.
 - Review threads can be resolved via GraphQL after the code changes address them.
@@ -23,6 +23,7 @@
 - Resume wake-word detection only after the controller has transitioned back to `IDLE`, otherwise an immediate detection can be dropped.
 - `git diff --check` can flag newly added CRLF lines as trailing whitespace in files already committed with CRLF; verify whitespace after patches.
 - AI usage closeout needs a clear unavailable note when the telemetry source exposes tokens but not AIC/AI Credits or fully up-to-date closeout totals.
+- Superseded 2026-06-28: future issue-loop PRs should use GitHub closing keywords so linked issues auto-close on merge, with AI usage closeout posted before merge or auto-merge is queued.
 
 ## Cost and safety guardrail lessons
 
