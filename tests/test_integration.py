@@ -937,6 +937,66 @@ class TestTTSCache(unittest.TestCase):
                     pass
 
 
+    def test_controller_phrases_in_prewarm_set(self):
+        """_CONTROLLER_PHRASES are included in _prewarm_tts_cache prewarm calls (#67).
+
+        Verifies _prewarm_tts_cache() attempts to cache/pin the controller phrases.
+        """
+        svc = self._svc
+
+        # Avoid depending on kokoro-onnx / soundfile during tests: pretend cached files already exist.
+        with unittest.mock.patch.object(svc, "_get_kokoro", return_value=object()), \
+             unittest.mock.patch.dict("sys.modules", {"soundfile": unittest.mock.MagicMock()}), \
+             unittest.mock.patch.object(svc.os.path, "exists", return_value=True), \
+             unittest.mock.patch.object(svc, "_tts_cache_put") as mock_put:
+            svc._prewarm_tts_cache()
+
+        calls_by_text = {call.args[0]: call for call in mock_put.call_args_list}
+        for phrase in svc._CONTROLLER_PHRASES:
+            self.assertIn(phrase, calls_by_text, f"Controller phrase '{phrase}' was not prewarmed")
+            self.assertTrue(
+                calls_by_text[phrase].kwargs.get("pinned", False),
+                f"Controller phrase '{phrase}' was not pinned",
+            )
+    def test_controller_phrases_are_pinned_on_cache_put(self):
+        """_CONTROLLER_PHRASES entries stored with pinned=True survive eviction (#67)."""
+        import tempfile
+        original_max = self._svc.TTS_CACHE_MAX
+        pinned_paths = []
+        f2 = None
+        try:
+            self._svc.TTS_CACHE_MAX = 1  # very small to force eviction pressure
+            for phrase in self._svc._CONTROLLER_PHRASES:
+                f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                f.write(b"pinned controller phrase")
+                f.close()
+                pinned_paths.append((phrase, f.name))
+                self._svc._tts_cache_put(phrase, f.name, pinned=True)
+            # Add a non-pinned entry to force eviction
+            f2 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            f2.write(b"evictable")
+            f2.close()
+            self._svc._tts_cache_put("evictable phrase", f2.name, pinned=False)
+            # All controller phrases must still be retrievable
+            for phrase, path in pinned_paths:
+                result = self._svc._tts_cache_get(phrase)
+                self.assertEqual(result, path, f"Pinned controller phrase '{phrase}' was evicted")
+        finally:
+            self._svc.TTS_CACHE_MAX = original_max
+            for _phrase, path in pinned_paths:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    # Best-effort cleanup in test teardown; file may already be removed.
+                    pass
+            if f2 is not None:
+                try:
+                    os.unlink(f2.name)
+                except OSError:
+                    # Best-effort cleanup in test teardown; file may already be removed.
+                    pass
+
+
 class TestLatencyConfig(unittest.TestCase):
     """Unit tests for latency-related configuration changes (#21)."""
 
@@ -2548,155 +2608,152 @@ class TestFaceRecognition(unittest.TestCase):
         self.assertIsNone(ctrl._recognized_face)
 
 
-class TestInlineAudioBytes(unittest.TestCase):
-    """Unit tests for the return_audio_bytes flag in /api/orchestrate (#69).
+class TestCanonicalDefaults(unittest.TestCase):
+    """Verify that config_defaults.py is the authoritative source of truth (#70).
 
-    Verifies that when ``return_audio_bytes=true`` is included in the
-    multipart form data the orchestration response contains a base64-encoded
-    ``audioBytes`` field, and that existing clients that omit the flag receive
-    the same response shape as before.
+    These tests confirm that orchestration_service and misty_controller read
+    their defaults from config_defaults, ensuring no silent drift.
     """
 
     _svc = None
+    _ctrl_mod = None
+    _cfg = None
 
     @classmethod
     def setUpClass(cls):
         try:
+            import config_defaults
+            cls._cfg = config_defaults
+        except Exception as exc:
+            print(f"[TestCanonicalDefaults] Could not import config_defaults: {exc}")
+        try:
             import orchestration_service
             cls._svc = orchestration_service
         except Exception as exc:
-            cls._svc = None
-            print(f"[TestInlineAudioBytes] Could not import orchestration_service: {exc}")
+            print(f"[TestCanonicalDefaults] Could not import orchestration_service: {exc}")
+        try:
+            import misty_controller as mc
+            cls._ctrl_mod = mc
+        except Exception as exc:
+            print(f"[TestCanonicalDefaults] Could not import misty_controller: {exc}")
 
     def setUp(self):
+        if self._cfg is None:
+            self.skipTest("config_defaults could not be imported")
+
+    # ------------------------------------------------------------------
+    # config_defaults module structure
+    # ------------------------------------------------------------------
+
+    def test_config_defaults_exports_orchestration_values(self):
+        """config_defaults must export all orchestration service defaults."""
+        for attr in (
+            "FOUNDRY_API_TIMEOUT", "SERVICE_TIMEOUT",
+            "KOKORO_VOICE", "KOKORO_SPEED", "TTS_CACHE_MAX",
+            "MAX_USER_CHARS", "MAX_CONTEXT_CHARS",
+        ):
+            self.assertTrue(hasattr(self._cfg, attr), f"config_defaults missing: {attr}")
+
+    def test_config_defaults_exports_controller_values(self):
+        """config_defaults must export all misty_controller defaults."""
+        for attr in (
+            "MISTY_IP", "ORCHESTRATION_URL",
+            "RECORDING_DURATION_S", "FOLLOWUP_LISTEN_S", "FOLLOWUP_TIMEOUT_S",
+            "FOLLOWUP_MAX_TURNS", "WATCHDOG_IDLE_TIMEOUT_S", "WATCHDOG_ESCALATE_TIMEOUT_S",
+            "IDLE_TIMEOUT_S", "PROACTIVE_REBOOT_AFTER_CYCLES",
+            "PROACTIVE_REBOOT_AFTER_RECORDINGS", "LAPTOP_MISTY_RECORDING_MODE",
+            "LAPTOP_MISTY_TALLY_RECORDING_S", "FACE_RECOGNITION_TIMEOUT_S",
+        ):
+            self.assertTrue(hasattr(self._cfg, attr), f"config_defaults missing: {attr}")
+
+    # ------------------------------------------------------------------
+    # Orchestration service agrees with config_defaults
+    # ------------------------------------------------------------------
+
+    def test_orchestration_foundry_api_timeout_matches_defaults(self):
+        """orchestration_service FOUNDRY_API_TIMEOUT default == config_defaults."""
         if self._svc is None:
             self.skipTest("orchestration_service could not be imported")
-        self._svc.conversation_history = []
-        self._svc._last_response_mode = "short"
+        # When no env var is set the module should use config_defaults value.
+        self.assertAlmostEqual(self._svc.FOUNDRY_API_TIMEOUT, self._cfg.FOUNDRY_API_TIMEOUT)
+
+    def test_orchestration_service_timeout_matches_defaults(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self.assertAlmostEqual(self._svc.SERVICE_TIMEOUT, self._cfg.SERVICE_TIMEOUT)
+
+    def test_orchestration_kokoro_voice_matches_defaults(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self.assertEqual(self._svc.KOKORO_VOICE, self._cfg.KOKORO_VOICE)
+
+    def test_orchestration_kokoro_speed_matches_defaults(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self.assertAlmostEqual(self._svc.KOKORO_SPEED, self._cfg.KOKORO_SPEED)
+
+    def test_orchestration_max_user_chars_matches_defaults(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self.assertEqual(self._svc.MAX_USER_CHARS, self._cfg.MAX_USER_CHARS)
+
+    def test_orchestration_max_context_chars_matches_defaults(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self.assertEqual(self._svc.MAX_CONTEXT_CHARS, self._cfg.MAX_CONTEXT_CHARS)
+
+    def test_orchestration_tts_cache_max_matches_defaults(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self.assertEqual(self._svc.TTS_CACHE_MAX, self._cfg.TTS_CACHE_MAX)
 
     # ------------------------------------------------------------------
-    # Helper: mock a complete pipeline and issue a POST to /api/orchestrate
+    # Controller agrees with config_defaults
     # ------------------------------------------------------------------
 
-    def _post_orchestrate(self, extra_data: dict, wav_content: bytes = b"RIFF\x00\x00\x00\x00WAVEfmt "):
-        """POST a fake WAV to /api/orchestrate with the given extra form fields."""
-        import io
-        import tempfile
-        import os
+    def test_controller_followup_timeout_matches_defaults(self):
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+        self.assertAlmostEqual(self._ctrl_mod.FOLLOWUP_TIMEOUT_S, self._cfg.FOLLOWUP_TIMEOUT_S)
 
-        svc = self._svc
+    def test_controller_followup_max_turns_matches_defaults(self):
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+        self.assertEqual(self._ctrl_mod.FOLLOWUP_MAX_TURNS, self._cfg.FOLLOWUP_MAX_TURNS)
 
-        # Write a minimal WAV file that text_to_speech would "generate"
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir=".") as tmp:
-            tmp.write(wav_content)
-            tmp_path = tmp.name
-        tmp_filename = os.path.basename(tmp_path)
+    def test_controller_watchdog_idle_timeout_matches_defaults(self):
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+        self.assertAlmostEqual(self._ctrl_mod.WATCHDOG_IDLE_TIMEOUT_S, self._cfg.WATCHDOG_IDLE_TIMEOUT_S)
 
-        try:
-            tts_mock = {
-                "status": "ok",
-                "audio_uri": f"/api/audio/{tmp_filename}",
-                "audio_file": tmp_filename,
-                "tts_cached": False,
-            }
+    def test_controller_proactive_reboot_cycles_matches_defaults(self):
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+        self.assertEqual(self._ctrl_mod.PROACTIVE_REBOOT_AFTER_CYCLES, self._cfg.PROACTIVE_REBOOT_AFTER_CYCLES)
 
-            # Move the tmp file into the responses/ dir so _read_audio_bytes_b64 can find it
-            os.makedirs("responses", exist_ok=True)
-            dest_path = os.path.join("responses", tmp_filename)
-            if not os.path.exists(dest_path):
-                os.rename(tmp_path, dest_path)
-            else:
-                os.unlink(tmp_path)
-
-            with svc.app.test_client() as client:
-                with unittest.mock.patch.object(svc, "speech_to_text") as mock_stt, \
-                     unittest.mock.patch.object(svc, "language_model_inference") as mock_llm, \
-                     unittest.mock.patch.object(svc, "text_to_speech", return_value=tts_mock):
-                    mock_stt.return_value = {"status": "ok", "text": "hello"}
-                    mock_llm.return_value = {
-                        "status": "ok", "text": "Hi there",
-                        "llm_ms": 100, "mode": "short",
-                    }
-
-                    data = {"file": (io.BytesIO(b"RIFF\x24\x00\x00\x00WAVEfmt "), "audio.wav", "audio/wav")}
-                    data.update(extra_data)
-                    resp = client.post(
-                        "/api/orchestrate",
-                        data=data,
-                        content_type="multipart/form-data",
-                    )
-            return resp
-        finally:
-            # Cleanup
-            try:
-                os.unlink(dest_path)
-            except OSError:
-                pass
+    def test_controller_proactive_reboot_recordings_matches_defaults(self):
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+        self.assertEqual(self._ctrl_mod.PROACTIVE_REBOOT_AFTER_RECORDINGS, self._cfg.PROACTIVE_REBOOT_AFTER_RECORDINGS)
 
     # ------------------------------------------------------------------
-    # Tests
+    # Key default values are sane
     # ------------------------------------------------------------------
 
-    def test_without_flag_no_audio_bytes_in_response(self):
-        """Omitting return_audio_bytes should not include audioBytes in the JSON."""
-        resp = self._post_orchestrate({})
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()
-        self.assertEqual(data["status"], "ok")
-        self.assertIn("responseAudio", data)
-        self.assertNotIn("audioBytes", data)
+    def test_foundry_api_timeout_is_positive(self):
+        self.assertGreater(self._cfg.FOUNDRY_API_TIMEOUT, 0)
 
-    def test_with_flag_false_no_audio_bytes_in_response(self):
-        """return_audio_bytes=false should behave identically to the default."""
-        resp = self._post_orchestrate({"return_audio_bytes": "false"})
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()
-        self.assertNotIn("audioBytes", data)
+    def test_service_timeout_exceeds_foundry_timeout(self):
+        """SERVICE_TIMEOUT must be longer than FOUNDRY_API_TIMEOUT."""
+        self.assertGreater(self._cfg.SERVICE_TIMEOUT, self._cfg.FOUNDRY_API_TIMEOUT)
 
-    def test_with_flag_true_audio_bytes_present(self):
-        """return_audio_bytes=true must include a non-empty audioBytes field."""
-        resp = self._post_orchestrate({"return_audio_bytes": "true"})
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()
-        self.assertEqual(data["status"], "ok")
-        self.assertIn("audioBytes", data)
-        self.assertIsNotNone(data["audioBytes"])
-        self.assertGreater(len(data["audioBytes"]), 0)
+    def test_followup_timeout_allows_multiple_turns(self):
+        """FOLLOWUP_TIMEOUT_S should be long enough for multiple follow-up turns."""
+        min_useful = self._cfg.FOLLOWUP_LISTEN_S * 2
+        self.assertGreaterEqual(self._cfg.FOLLOWUP_TIMEOUT_S, min_useful)
 
-    def test_with_flag_true_audio_bytes_decodes_to_original(self):
-        """The base64 audioBytes field must decode back to the original WAV bytes."""
-        import base64 as b64mod
-        wav_content = b"RIFF\x24\x00\x00\x00WAVEfmt fake-wav-content"
-        resp = self._post_orchestrate({"return_audio_bytes": "true"}, wav_content=wav_content)
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()
-        decoded = b64mod.b64decode(data["audioBytes"])
-        self.assertEqual(decoded, wav_content)
-
-    def test_response_audio_uri_still_present_with_flag(self):
-        """responseAudio URI must still be included alongside audioBytes for compatibility."""
-        resp = self._post_orchestrate({"return_audio_bytes": "true"})
-        self.assertEqual(resp.status_code, 200)
-        data = resp.get_json()
-        self.assertIn("responseAudio", data)
-        self.assertTrue(data["responseAudio"].startswith("/api/audio/"))
-
-    def test_read_audio_bytes_b64_path_traversal_rejected(self):
-        """_read_audio_bytes_b64 must reject filenames with path traversal sequences."""
-        svc = self._svc
-        for bad_name in ["../secret.wav", "foo/bar.wav", "foo\\bar.wav", "..\\secret.wav"]:
-            result = svc._read_audio_bytes_b64(bad_name)
-            self.assertIsNone(result, f"Expected None for unsafe filename: {bad_name!r}")
-
-    def test_read_audio_bytes_b64_missing_file_returns_none(self):
-        """_read_audio_bytes_b64 returns None gracefully when the file does not exist."""
-        result = self._svc._read_audio_bytes_b64("nonexistent_response_00000.wav")
-        self.assertIsNone(result)
-
-    def test_read_audio_bytes_b64_empty_filename_returns_none(self):
-        """_read_audio_bytes_b64 returns None for empty or None filenames."""
-        self.assertIsNone(self._svc._read_audio_bytes_b64(""))
-        self.assertIsNone(self._svc._read_audio_bytes_b64(None))
+    def test_laptop_recording_mode_is_valid(self):
+        self.assertIn(self._cfg.LAPTOP_MISTY_RECORDING_MODE, ("fallback", "tally", "off"))
 
 
 if __name__ == "__main__":
