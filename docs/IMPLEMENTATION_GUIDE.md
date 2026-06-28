@@ -78,19 +78,14 @@ The Misty controller runs on the companion device and drives the robot entirely 
 - `RECORDING_DURATION_S`: How long to record after wake word (default: `6` seconds)
 - `FOLLOWUP_LISTEN_S`: Duration of each follow-up listen clip (default: `5` seconds)
 - `FOLLOWUP_TIMEOUT_S`: Max follow-up conversation window (default: `90` seconds)
-- `WATCHDOG_IDLE_TIMEOUT_S`: Time before watchdog soft-resets keyphrase (default: `90` seconds)
-- `WATCHDOG_ESCALATE_TIMEOUT_S`: Time before watchdog escalates recovery (default: `60` seconds)
+- `LAPTOP_MISTY_RECORDING_MODE`: Misty recorder behavior during conversations (`fallback`, `tally`, or `off`)
 
 **Re-arm strategy**:
-After each conversation ends, `_rearm()` performs a soft reset: it reconnects the WebSocket and restarts keyphrase listening. A full Core+Sensory reboot is triggered proactively after `PROACTIVE_REBOOT_AFTER_CYCLES` (default: `5`) successful conversation cycles. Sensory-only reboots are **never used** — they permanently break the microphone until physical power cycle (#33).
+After each conversation ends, `_rearm()` behavior depends on the wake word mode:
+- **Laptop wake word mode** (`USE_LAPTOP_WAKE_WORD=true`): Fast re-arm — 2-second audio cooldown, then resumes the openWakeWord listener. If the WebSocket is still healthy, reconnection is skipped entirely. If the WebSocket is unhealthy, a full reconnect is performed before resuming.
+- **Misty keyphrase mode** (default): Full re-arm — 5-second audio cooldown to let the Snapdragon 410 release hardware resources, followed by a full WebSocket reconnect and keyphrase restart.
 
-**Keyphrase Watchdog** (safety net):
-The Snapdragon 410 sensory services silently stop firing `KeyPhraseRecognized` events while the REST API still returns "Success". The watchdog detects this and auto-recovers:
-1. **Soft reset** (after 90s in IDLE with no wake events): 🟡 yellow LED → cancel skills → stop/start keyphrase
-2. **Second soft reset** (if first fails after 60s): 🟡 darker yellow LED → repeat soft reset
-3. **Full reboot** (if second fails after 60s): 🔴 red LED → full Core+Sensory reboot
-
-The watchdog only triggers when in IDLE state. It uses separate timestamps for actual wake events vs recovery attempts to avoid false positives. Health checks run every 10s.
+In both modes, a full Core+Sensory reboot is triggered proactively after `PROACTIVE_REBOOT_AFTER_CYCLES` (default: `5`) successful conversation cycles. Sensory-only reboots are **never used** — they permanently break the microphone until physical power cycle (#33).
 
 ### 2. Windows Orchestration Service (Python/Flask)
 **Location**: `src/windows-orchestration/`

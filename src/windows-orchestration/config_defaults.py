@@ -57,11 +57,11 @@ WATCHDOG_ESCALATE_TIMEOUT_S: float = 60.0
 # Idle timeout
 IDLE_TIMEOUT_S: float = 900.0
 
-# Proactive reboot (keyphrase engine degrades after ~2 cycles — #22)
+# Proactive reboot (after extended use — hardware health maintenance)
 PROACTIVE_REBOOT_AFTER_CYCLES: int = 5
 PROACTIVE_REBOOT_AFTER_RECORDINGS: int = 15
 
-# Laptop wake-word mode (issue #44)
+# Laptop mic recording mode during conversations (issue #44)
 LAPTOP_MISTY_RECORDING_MODE: str = "fallback"
 LAPTOP_MISTY_TALLY_RECORDING_S: float = 1.0
 

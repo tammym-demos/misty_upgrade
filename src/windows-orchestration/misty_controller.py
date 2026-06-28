@@ -54,7 +54,7 @@ WS_RECONNECT_MAX_S = 30.0
 HEALTH_CHECK_INTERVAL_S = 10.0  # reduced from 30s for watchdog responsiveness
 
 # Laptop wake word listener (issue #44) — use laptop mic instead of Misty's keyphrase engine
-USE_LAPTOP_WAKE_WORD = os.getenv("USE_LAPTOP_WAKE_WORD", "").lower() in ("1", "true", "yes")
+USE_LAPTOP_WAKE_WORD = os.getenv("USE_LAPTOP_WAKE_WORD", "true").lower() in ("1", "true", "yes")
 _RAW_LAPTOP_MISTY_RECORDING_MODE = os.getenv("LAPTOP_MISTY_RECORDING_MODE", config_defaults.LAPTOP_MISTY_RECORDING_MODE).strip().lower()
 LAPTOP_MISTY_RECORDING_MODE = (
     _RAW_LAPTOP_MISTY_RECORDING_MODE

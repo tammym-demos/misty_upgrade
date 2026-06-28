@@ -19,20 +19,13 @@ Updated for the richer responses changes in PR #45 and adaptive conversations (i
 
 ## Setup
 
-**Laptop wake word mode** (recommended for testing):
+**Start the controller:**
 ```powershell
-$env:USE_LAPTOP_WAKE_WORD = "true"
 cd src\windows-orchestration
 python misty_controller.py
 ```
 Say **"Hey Jarvis"** near the laptop mic, then speak after the orange LED.
 
-**Misty keyphrase mode** (default):
-```powershell
-cd src\windows-orchestration
-python misty_controller.py
-```
-Say **"Hey Misty"** near the robot, then speak after the orange LED.
 
 ---
 
@@ -178,8 +171,8 @@ Tests unique to the laptop mic wake word mode:
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| No response to wake word | Keyphrase silent failure (#22) or laptop mic issue | Check logs; try `USE_LAPTOP_WAKE_WORD=true` |
-| 44-byte recording (empty) | Misty keyphrase still active during recording | Fixed in PR #45 — keyphrase stopped before recording in laptop mode |
+| No response to wake word | Laptop mic issue or openWakeWord threshold | Check logs; verify `sounddevice` mic selection |
+| 44-byte recording (empty) | Mic or recording pipeline issue | Check `misty_controller.log` for recording errors |
 | Response too long/wordy | Brevity drift past 35 words | Post-truncation should catch this; check max_tokens=60 |
 | Response too short | Old behavior persisted | Verify running updated code; check system prompt |
 | Follow-up doesn't work | Silence threshold too aggressive | Check `FOLLOWUP_SILENCE_THRESHOLD` (default 1000 bytes) |
