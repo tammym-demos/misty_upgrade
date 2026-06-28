@@ -51,7 +51,7 @@ companion laptop and pushes frames to Misty via REST.
 
 | Aspect | Today |
 |--------|-------|
-| Display API | `display_image(name)` → `POST /api/images/display {"FileName", "Alpha":1}` |
+| Display API | `display_image(name)` → `POST /api/images/display {"FileName": "e_Joy.jpg", "Alpha": 1}` |
 | Trigger | One call per state transition (IDLE, RECORDING, PLAYING, error, …) |
 | Assets | Built-in `e_*.jpg` (e.g. `e_Joy.jpg`, `e_Admiration.jpg`, `e_Contempt.jpg`, `e_Sadness.jpg`, `e_DefaultContent.jpg`) |
 | Animation | None — face is frozen between transitions |
@@ -125,8 +125,8 @@ A conservative starter map (built-in images only, no new assets) — illustrativ
 | LISTENING | `e_Joy.jpg`, `e_Admiration.jpg` | 1.0 | `e_Admiration.jpg` |
 | PROCESSING | `e_Contempt.jpg`, `e_ContentLeft.jpg` | 1.0 | `e_Contempt.jpg` |
 | PLAYING | `e_Joy.jpg`, `e_EcstacyHilarious.jpg` | 2.0 | `e_EcstacyHilarious.jpg` |
-| ERROR | `e_Sadness.jpg` | — | `e_Sadness.jpg` |
-| CHARGING | `e_Sleeping.jpg` | — | `e_Sleeping.jpg` |
+| ERROR | `e_Sadness.jpg` | 1.0 | `e_Sadness.jpg` |
+| CHARGING | `e_Sleeping.jpg` | 1.0 | `e_Sleeping.jpg` |
 
 Final frame lists and FPS are tuned **after** hardware validation (§7).
 
