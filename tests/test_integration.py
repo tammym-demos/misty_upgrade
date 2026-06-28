@@ -149,6 +149,19 @@ class TestWakeWordConfiguration(unittest.TestCase):
             import wake_word_listener  # noqa: PLC0415
             cls._controller_module = misty_controller
             cls._listener_module = wake_word_listener
+        except ModuleNotFoundError as exc:
+            if exc.name != "websocket":  # pragma: no cover
+                cls._controller_module = None
+                cls._listener_module = None
+                print(f"[TestWakeWordConfiguration] Could not import modules: {exc}")
+                return
+            websocket_stub = unittest.mock.MagicMock()
+            websocket_stub.WebSocketApp = unittest.mock.MagicMock()
+            with unittest.mock.patch.dict(sys.modules, {"websocket": websocket_stub}):
+                import misty_controller  # noqa: PLC0415
+                import wake_word_listener  # noqa: PLC0415
+                cls._controller_module = misty_controller
+                cls._listener_module = wake_word_listener
         except Exception as exc:  # pragma: no cover
             cls._controller_module = None
             cls._listener_module = None
