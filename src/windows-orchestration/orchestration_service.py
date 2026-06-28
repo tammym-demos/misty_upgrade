@@ -200,6 +200,15 @@ _MOVEMENT_ACKS = {
 }
 
 
+# Fixed phrases used by the Misty controller (greeting + thinking audio).
+# These are uploaded to Misty at startup and must be pre-warmed so the first
+# interaction doesn't pay a synthesis cost.
+_CONTROLLER_PHRASES = [
+    "What's up baby?",
+    "Let me think about that.",
+]
+
+
 def _get_movement_acknowledgment(command: str) -> str:
     """Get a random sassy acknowledgment for a movement command."""
     acks = _MOVEMENT_ACKS.get(command, ["Okay!"])
@@ -835,6 +844,8 @@ def _prewarm_tts_cache():
     # Collect all movement acknowledgment phrases
     for ack_list in _MOVEMENT_ACKS.values():
         phrases.extend(ack_list)
+    # Add fixed controller phrases (greeting + thinking audio)
+    phrases.extend(_CONTROLLER_PHRASES)
 
     os.makedirs("responses", exist_ok=True)
     generated = 0

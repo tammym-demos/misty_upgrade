@@ -937,6 +937,66 @@ class TestTTSCache(unittest.TestCase):
                     pass
 
 
+    def test_controller_phrases_in_prewarm_set(self):
+        """_CONTROLLER_PHRASES are included in _prewarm_tts_cache prewarm calls (#67).
+
+        Verifies _prewarm_tts_cache() attempts to cache/pin the controller phrases.
+        """
+        svc = self._svc
+
+        # Avoid depending on kokoro-onnx / soundfile during tests: pretend cached files already exist.
+        with unittest.mock.patch.object(svc, "_get_kokoro", return_value=object()), \
+             unittest.mock.patch.dict("sys.modules", {"soundfile": unittest.mock.MagicMock()}), \
+             unittest.mock.patch.object(svc.os.path, "exists", return_value=True), \
+             unittest.mock.patch.object(svc, "_tts_cache_put") as mock_put:
+            svc._prewarm_tts_cache()
+
+        calls_by_text = {call.args[0]: call for call in mock_put.call_args_list}
+        for phrase in svc._CONTROLLER_PHRASES:
+            self.assertIn(phrase, calls_by_text, f"Controller phrase '{phrase}' was not prewarmed")
+            self.assertTrue(
+                calls_by_text[phrase].kwargs.get("pinned", False),
+                f"Controller phrase '{phrase}' was not pinned",
+            )
+    def test_controller_phrases_are_pinned_on_cache_put(self):
+        """_CONTROLLER_PHRASES entries stored with pinned=True survive eviction (#67)."""
+        import tempfile
+        original_max = self._svc.TTS_CACHE_MAX
+        pinned_paths = []
+        f2 = None
+        try:
+            self._svc.TTS_CACHE_MAX = 1  # very small to force eviction pressure
+            for phrase in self._svc._CONTROLLER_PHRASES:
+                f = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                f.write(b"pinned controller phrase")
+                f.close()
+                pinned_paths.append((phrase, f.name))
+                self._svc._tts_cache_put(phrase, f.name, pinned=True)
+            # Add a non-pinned entry to force eviction
+            f2 = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            f2.write(b"evictable")
+            f2.close()
+            self._svc._tts_cache_put("evictable phrase", f2.name, pinned=False)
+            # All controller phrases must still be retrievable
+            for phrase, path in pinned_paths:
+                result = self._svc._tts_cache_get(phrase)
+                self.assertEqual(result, path, f"Pinned controller phrase '{phrase}' was evicted")
+        finally:
+            self._svc.TTS_CACHE_MAX = original_max
+            for _phrase, path in pinned_paths:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    # Best-effort cleanup in test teardown; file may already be removed.
+                    pass
+            if f2 is not None:
+                try:
+                    os.unlink(f2.name)
+                except OSError:
+                    # Best-effort cleanup in test teardown; file may already be removed.
+                    pass
+
+
 class TestLatencyConfig(unittest.TestCase):
     """Unit tests for latency-related configuration changes (#21)."""
 
