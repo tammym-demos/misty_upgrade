@@ -1,6 +1,6 @@
 ---
 name: issue-implementation-loop
-description: Use when asked to run or define an autonomous issue loop that opens PRs, requests Copilot review, merges, tags main, closes issues, and cleans up.
+description: Use when asked to run or define an autonomous issue loop that opens PRs, requests Copilot review, merges, tags main, verifies GitHub issue auto-close, and cleans up.
 ---
 
 # Issue Implementation Loop Skill
@@ -9,7 +9,7 @@ Use this skill when the user asks an agent to review GitHub issues, monitor issu
 
 This workflow is **both agent and skill**:
 
-- The **agent** is the autonomous executor. It reads issues, chooses ready work, edits files, runs commands, opens PRs, requests Copilot code review, merges verified PRs when allowed, tags `main`, updates and closes issues, and reports results.
+- The **agent** is the autonomous executor. It reads issues, chooses ready work, edits files, runs commands, opens PRs with GitHub closing keywords, requests Copilot code review, merges verified PRs when allowed, tags `main`, verifies issue auto-close, and reports results.
 - This **skill** is the reusable policy and runbook. It defines selection rules, guardrails, verification, metrics, and off-ramp behavior.
 
 ## Core rule
@@ -48,18 +48,18 @@ When this loop runs under `/fleet`, use parallelism only for independent issue w
 - Give every subagent a distinct issue number, acceptance criteria, branch name, and verification expectation.
 - Do not run multiple subagents on issues that likely touch the same files, runtime state, hardware path, or GitHub artifact.
 - If issue ownership, file overlap, branch conflicts, or PR conflicts appear, stop the affected subagents and record a coordination off-ramp.
-- Require each subagent to report the issue number, title, branch, PR, Copilot review status, merge/close status, main-branch tag, cleanup status, files changed, commands run, verification result, unavailable checks, and off-ramp reason when applicable.
+- Require each subagent to report the issue number, title, branch, PR, Copilot review status, merge/auto-close verification status, main-branch tag, cleanup status, files changed, commands run, verification result, unavailable checks, and off-ramp reason when applicable.
 
 ## Repository monitoring
 
-When asked to monitor issue and PR status, refresh repository state before selecting, assigning, merging, tagging, cleanup, or closing work:
+When asked to monitor issue and PR status, refresh repository state before selecting, assigning, merging, tagging, cleanup, or verifying auto-close:
 
 - Check current issue state, labels, assignees, comments, linked PRs, PR reviews, check runs, branch protection blockers, and existing feature branches.
 - Skip issues that are closed, blocked, deferred, assigned to unclear ownership, already being handled by an active branch, active worktree, `Agent claim` comment, or already linked to an in-flight PR unless the user explicitly asks to take over.
-- Re-check the selected issue and linked PR before merging, tagging, cleanup, or closing to ensure the scope, labels, ownership, reviews, and check status did not change during implementation.
+- Re-check the selected issue and linked PR before merging, tagging, cleanup, or auto-close verification to ensure the scope, labels, ownership, reviews, and check status did not change during implementation.
 - In fleet mode, the parent agent owns monitoring and assignment; subagents own only their assigned issue.
 
-Before starting work, leave an `Agent claim` comment on the issue with the branch name, worktree path when used, agent/session ID when available, and timestamp. Before merging or closing, refresh the issue and PR to confirm the claim is still current.
+Before starting work, leave an `Agent claim` comment on the issue with the branch name, worktree path when used, agent/session ID when available, and timestamp. Before merging or verifying closure, refresh the issue and PR to confirm the claim is still current.
 
 ## Permission and repository preflight
 
@@ -67,7 +67,7 @@ Before entering an autonomous loop, verify the current GitHub identity can perfo
 
 - `gh auth status` succeeds for the target repository.
 - The identity can push feature branches and tags.
-- The identity can open PRs, request Copilot review, merge PRs, and close issues.
+- The identity can open PRs, request Copilot review, merge PRs, and verify or explicitly close issues when GitHub auto-close does not complete.
 - The identity can delete merged remote branches, or repository branch auto-delete is enabled. If neither is true, continue the loop but report branch cleanup as unavailable after merge/tag.
 - Branch protection for `main` does not require human approval for autonomous issue loops. If current branch protection or the user explicitly requires owner approval, request that review and treat missing approval as a merge blocker.
 - Required status checks are configured and expected to run for PRs. Query `main` branch protection with the GitHub API/CLI and treat the returned contexts as the source of truth.
@@ -134,9 +134,9 @@ Cached tokens must be reported separately from ordinary input/output tokens beca
    PR-level required checks from `main` branch protection must also pass before merge. Query the required contexts at runtime instead of hardcoding check names.
    For cloud-safe issue-loop runs in this repository, treat verification that depends on Misty hardware, Foundry Local, or Windows-only audio/SAPI5 as unavailable and off-ramp the issue unless the issue already defines a credible cloud substitute.
 
-6. **Open, review, merge, close, or hand off**
+6. **Open, review, merge, auto-close, or hand off**
    - Push the issue-scoped feature branch and open a pull request against `main` for completed issue work.
-   - Link the issue from the PR body without closing keywords such as `closes`, `fixes`, or `resolves`; include the completed success-criteria checklist and commands run with verification results.
+   - Link the issue from the PR body with a GitHub closing keyword such as `Closes #123`, `Fixes #123`, or `Resolves #123`; include the completed success-criteria checklist and commands run with verification results. Use one closing-keyword line per linked issue so GitHub auto-closes issues when the PR merges.
    - Request Copilot code review on the PR, preferably with the review-request API: `gh api repos/:owner/:repo/pulls/<pull_number>/requested_reviewers -f reviewers[]='copilot-pull-request-reviewer[bot]'`; if the request fails, treat it as a blocker/off-ramp unless Copilot review is confirmed unsupported for the repository.
    - Do not require owner approval for autonomous issue loops unless current branch protection or the user explicitly requires it. If owner approval is required, request it and block merge until it is granted.
    - Monitor the PR until all required checks pass and Copilot code review is complete or explicitly unsupported.
@@ -146,24 +146,23 @@ Cached tokens must be reported separately from ordinary input/output tokens beca
    - Count Copilot review rounds that produce actionable findings. If two actionable rounds have been addressed and another actionable round would be required, stop and create/comment the human-review off-ramp instead of continuing inefficiently.
    - Record an AI usage checkpoint after PR creation and after each Copilot review round.
    - If a Copilot comment is unclear, incorrect, or not safely actionable, leave a PR comment explaining the disposition and continue only when no material risk remains.
-   - Before merging, verify the PR body links issues without closing keywords. If closing keywords are present, remove them; if they cannot be removed, add the `AI usage` issue comment before merge so auto-close cannot happen without usage data.
+   - Before merging or queueing auto-merge, add or verify the issue comment titled `AI usage` with the pre-run prediction, actual input tokens, output tokens, cache read tokens, cache write tokens, AIC/AI Credits or usage cost when available, and the prediction-vs-actual lesson for that issue. Then verify the PR body has the intended closing keywords. If closing keywords are missing, update the PR body before merge.
    - After all applicable tests/lints/checks pass and required code review completes, merge the PR into `main` only when repository policy, branch protection, and run authorization permit it. Use `gh pr merge --auto --merge --delete-branch` only after Copilot review is complete and any remaining checks are still pending; otherwise merge only after checks pass.
-   - If auto-merge is queued, poll the PR until `state=MERGED` before tagging, cleanup, or issue closure. If it does not merge within 30 minutes after all required checks pass, stop with a merge-timeout off-ramp.
+   - If auto-merge is queued, poll the PR until `state=MERGED` before tagging, cleanup, or auto-close verification. If it does not merge within 30 minutes after all required checks pass, stop with a merge-timeout off-ramp.
    - If merge is not permitted or cannot be completed, leave the issue open and report the ready PR, branch, or worktree plus the exact blocker.
    - After a successful merge, refresh `main`, verify the merge commit is present, then create and push a corresponding main-branch tag so the merged code can be correlated to the issue and PR.
    - Use a safe, lowercase tag name derived from the issue and PR, such as `issue-66-pr-78-laptop-recording-config`, or `pr-78-title-slug` when no single issue applies.
    - If the intended tag already exists, append the short merge SHA, for example `issue-66-pr-78-laptop-recording-config-68204b6`.
-   - Create the main-branch tag before explicitly closing the issue.
+   - Create the main-branch tag after merge even though GitHub may already have auto-closed the linked issue.
    - After the main-branch tag is pushed, remove associated worktrees and delete merged feature branches locally and remotely when permissions allow.
    - GitHub may auto-delete the remote branch at merge time; this is acceptable because the main merge commit remains available for tagging.
    - Never delete a dirty worktree or unmerged local branch.
    - Verify cleanup with `git worktree list --porcelain`, `git branch --merged main`, and `git branch --all --merged main`.
-   - Before closing or handing off the issue, add or verify an issue comment titled `AI usage` that reports the pre-run prediction, actual input tokens, output tokens, cache read tokens, cache write tokens, AIC/AI Credits or usage cost when available, and the prediction-vs-actual lesson for that issue.
-   - Include model breakdown, telemetry source or session IDs when available, subagent usage when applicable, and the issue/PR scope used for the usage query.
+   - The `AI usage` comment must include model breakdown, telemetry source or session IDs when available, subagent usage when applicable, and the issue/PR scope used for the usage query.
    - Use exact usage from available Copilot/session usage telemetry when available; if exact usage is unavailable, do not estimate. State which usage source was checked and that the metric was unavailable.
-   - Never close an issue without either an exact AI usage comment or an explicit AI usage unavailable comment.
-   - After merge, tag, and cleanup steps are complete, verify the issue is closed or close it explicitly with the AI usage closeout comment already present.
-   - Do not rely on PR closing keywords for issue closure; close explicitly after AI usage, merge, tag, and cleanup.
+   - Never merge a PR that will auto-close an issue without either an exact AI usage comment or an explicit AI usage unavailable comment already on the issue.
+   - After merge, tag, and cleanup steps are complete, verify GitHub auto-closed each linked issue from the PR closing keywords. If auto-close did not happen, close the issue explicitly with the AI usage closeout comment already present and report the fallback.
+   - Prefer PR closing keywords for issue closure; use explicit closure only as a fallback when GitHub auto-close does not complete.
    - Note any unavailable checks, residual risks, or manual validation needed.
 
 ## When to invoke `feature-planning`
@@ -231,7 +230,7 @@ Track these metrics for each loop run:
 - Pull request number and URL.
 - Copilot code review request and completion status.
 - Required check reporting and timeout status.
-- Merge and issue closure status.
+- Merge and issue auto-close verification status.
 - Main-branch tag name and push status after merge.
 - Worktree removal and merged branch deletion status after the main-branch tag is pushed.
 - Failures and retries.
@@ -253,10 +252,10 @@ Use these metrics to decide whether to continue, narrow scope, switch to `featur
 Report:
 
 - Issue number and title.
-- Branch or worktree, PR, Copilot review status, merge commit, main-branch tag, cleanup, or issue closure status, when available.
+- Branch or worktree, PR, Copilot review status, merge commit, main-branch tag, cleanup, or issue auto-close verification status, when available.
 - Success criteria completed.
 - Verification commands and results, including all applicable tests, lints, builds, and documentation checks.
 - AI usage issue update status, including prediction, actual input/output/cache read/cache write tokens, AIC/AI Credits or usage cost when available, model breakdown, telemetry source/session IDs, and prediction-vs-actual lesson when available.
-- Any off-ramp, unavailable check, unavailable Copilot review, unavailable merge/tag/close/worktree-cleanup/branch-cleanup step, or manual follow-up.
+- Any off-ramp, unavailable check, unavailable Copilot review, unavailable merge/tag/auto-close verification/worktree-cleanup/branch-cleanup step, or manual follow-up.
 
 Keep the response concise and distinguish completed work from planned or blocked work.
