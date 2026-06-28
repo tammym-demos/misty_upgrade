@@ -81,7 +81,11 @@ The Misty controller runs on the companion device and drives the robot entirely 
 - `LAPTOP_MISTY_RECORDING_MODE`: Misty recorder behavior during conversations (`fallback`, `tally`, or `off`)
 
 **Re-arm strategy**:
-After each conversation ends, `_rearm()` performs a fast re-arm: it resumes the laptop wake word listener and — if the WebSocket is still healthy — skips reconnection. If the WebSocket is unhealthy, a full reconnect is performed. A full Core+Sensory reboot is triggered proactively after `PROACTIVE_REBOOT_AFTER_CYCLES` (default: `5`) successful conversation cycles. Sensory-only reboots are **never used** — they permanently break the microphone until physical power cycle (#33).
+After each conversation ends, `_rearm()` behavior depends on the wake word mode:
+- **Laptop wake word mode** (`USE_LAPTOP_WAKE_WORD=true`): Fast re-arm — 2-second audio cooldown, then resumes the openWakeWord listener. If the WebSocket is still healthy, reconnection is skipped entirely. If the WebSocket is unhealthy, a full reconnect is performed before resuming.
+- **Misty keyphrase mode** (default): Full re-arm — 5-second audio cooldown to let the Snapdragon 410 release hardware resources, followed by a full WebSocket reconnect and keyphrase restart.
+
+In both modes, a full Core+Sensory reboot is triggered proactively after `PROACTIVE_REBOOT_AFTER_CYCLES` (default: `5`) successful conversation cycles. Sensory-only reboots are **never used** — they permanently break the microphone until physical power cycle (#33).
 
 ### 2. Windows Orchestration Service (Python/Flask)
 **Location**: `src/windows-orchestration/`
