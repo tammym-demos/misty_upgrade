@@ -2548,5 +2548,153 @@ class TestFaceRecognition(unittest.TestCase):
         self.assertIsNone(ctrl._recognized_face)
 
 
+class TestCanonicalDefaults(unittest.TestCase):
+    """Verify that config_defaults.py is the authoritative source of truth (#70).
+
+    These tests confirm that orchestration_service and misty_controller read
+    their defaults from config_defaults, ensuring no silent drift.
+    """
+
+    _svc = None
+    _ctrl_mod = None
+    _cfg = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import config_defaults
+            cls._cfg = config_defaults
+        except Exception as exc:
+            print(f"[TestCanonicalDefaults] Could not import config_defaults: {exc}")
+        try:
+            import orchestration_service
+            cls._svc = orchestration_service
+        except Exception as exc:
+            print(f"[TestCanonicalDefaults] Could not import orchestration_service: {exc}")
+        try:
+            import misty_controller as mc
+            cls._ctrl_mod = mc
+        except Exception as exc:
+            print(f"[TestCanonicalDefaults] Could not import misty_controller: {exc}")
+
+    def setUp(self):
+        if self._cfg is None:
+            self.skipTest("config_defaults could not be imported")
+
+    # ------------------------------------------------------------------
+    # config_defaults module structure
+    # ------------------------------------------------------------------
+
+    def test_config_defaults_exports_orchestration_values(self):
+        """config_defaults must export all orchestration service defaults."""
+        for attr in (
+            "FOUNDRY_API_TIMEOUT", "SERVICE_TIMEOUT",
+            "KOKORO_VOICE", "KOKORO_SPEED", "TTS_CACHE_MAX",
+            "MAX_USER_CHARS", "MAX_CONTEXT_CHARS",
+        ):
+            self.assertTrue(hasattr(self._cfg, attr), f"config_defaults missing: {attr}")
+
+    def test_config_defaults_exports_controller_values(self):
+        """config_defaults must export all misty_controller defaults."""
+        for attr in (
+            "MISTY_IP", "ORCHESTRATION_URL",
+            "RECORDING_DURATION_S", "FOLLOWUP_LISTEN_S", "FOLLOWUP_TIMEOUT_S",
+            "FOLLOWUP_MAX_TURNS", "WATCHDOG_IDLE_TIMEOUT_S", "WATCHDOG_ESCALATE_TIMEOUT_S",
+            "IDLE_TIMEOUT_S", "PROACTIVE_REBOOT_AFTER_CYCLES",
+            "PROACTIVE_REBOOT_AFTER_RECORDINGS", "LAPTOP_MISTY_RECORDING_MODE",
+            "LAPTOP_MISTY_TALLY_RECORDING_S", "FACE_RECOGNITION_TIMEOUT_S",
+        ):
+            self.assertTrue(hasattr(self._cfg, attr), f"config_defaults missing: {attr}")
+
+    # ------------------------------------------------------------------
+    # Orchestration service agrees with config_defaults
+    # ------------------------------------------------------------------
+
+    def test_orchestration_foundry_api_timeout_matches_defaults(self):
+        """orchestration_service FOUNDRY_API_TIMEOUT default == config_defaults."""
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        # When no env var is set the module should use config_defaults value.
+        self.assertAlmostEqual(self._svc.FOUNDRY_API_TIMEOUT, self._cfg.FOUNDRY_API_TIMEOUT)
+
+    def test_orchestration_service_timeout_matches_defaults(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self.assertAlmostEqual(self._svc.SERVICE_TIMEOUT, self._cfg.SERVICE_TIMEOUT)
+
+    def test_orchestration_kokoro_voice_matches_defaults(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self.assertEqual(self._svc.KOKORO_VOICE, self._cfg.KOKORO_VOICE)
+
+    def test_orchestration_kokoro_speed_matches_defaults(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self.assertAlmostEqual(self._svc.KOKORO_SPEED, self._cfg.KOKORO_SPEED)
+
+    def test_orchestration_max_user_chars_matches_defaults(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self.assertEqual(self._svc.MAX_USER_CHARS, self._cfg.MAX_USER_CHARS)
+
+    def test_orchestration_max_context_chars_matches_defaults(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self.assertEqual(self._svc.MAX_CONTEXT_CHARS, self._cfg.MAX_CONTEXT_CHARS)
+
+    def test_orchestration_tts_cache_max_matches_defaults(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self.assertEqual(self._svc.TTS_CACHE_MAX, self._cfg.TTS_CACHE_MAX)
+
+    # ------------------------------------------------------------------
+    # Controller agrees with config_defaults
+    # ------------------------------------------------------------------
+
+    def test_controller_followup_timeout_matches_defaults(self):
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+        self.assertAlmostEqual(self._ctrl_mod.FOLLOWUP_TIMEOUT_S, self._cfg.FOLLOWUP_TIMEOUT_S)
+
+    def test_controller_followup_max_turns_matches_defaults(self):
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+        self.assertEqual(self._ctrl_mod.FOLLOWUP_MAX_TURNS, self._cfg.FOLLOWUP_MAX_TURNS)
+
+    def test_controller_watchdog_idle_timeout_matches_defaults(self):
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+        self.assertAlmostEqual(self._ctrl_mod.WATCHDOG_IDLE_TIMEOUT_S, self._cfg.WATCHDOG_IDLE_TIMEOUT_S)
+
+    def test_controller_proactive_reboot_cycles_matches_defaults(self):
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+        self.assertEqual(self._ctrl_mod.PROACTIVE_REBOOT_AFTER_CYCLES, self._cfg.PROACTIVE_REBOOT_AFTER_CYCLES)
+
+    def test_controller_proactive_reboot_recordings_matches_defaults(self):
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+        self.assertEqual(self._ctrl_mod.PROACTIVE_REBOOT_AFTER_RECORDINGS, self._cfg.PROACTIVE_REBOOT_AFTER_RECORDINGS)
+
+    # ------------------------------------------------------------------
+    # Key default values are sane
+    # ------------------------------------------------------------------
+
+    def test_foundry_api_timeout_is_positive(self):
+        self.assertGreater(self._cfg.FOUNDRY_API_TIMEOUT, 0)
+
+    def test_service_timeout_exceeds_foundry_timeout(self):
+        """SERVICE_TIMEOUT must be longer than FOUNDRY_API_TIMEOUT."""
+        self.assertGreater(self._cfg.SERVICE_TIMEOUT, self._cfg.FOUNDRY_API_TIMEOUT)
+
+    def test_followup_timeout_allows_multiple_turns(self):
+        """FOLLOWUP_TIMEOUT_S should be long enough for multiple follow-up turns."""
+        min_useful = self._cfg.FOLLOWUP_LISTEN_S * 2
+        self.assertGreaterEqual(self._cfg.FOLLOWUP_TIMEOUT_S, min_useful)
+
+    def test_laptop_recording_mode_is_valid(self):
+        self.assertIn(self._cfg.LAPTOP_MISTY_RECORDING_MODE, ("fallback", "tally", "off"))
+
+
 if __name__ == "__main__":
     unittest.main()
