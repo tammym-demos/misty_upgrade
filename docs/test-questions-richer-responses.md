@@ -12,7 +12,7 @@ Updated for the richer responses changes in PR #45 and adaptive conversations (i
 | Follow-up window | 60s | 90s |
 | Follow-up turn cap | unlimited | 12 turns |
 | Conversation history | 4 messages (2 turns) | 8 messages (4 turns) |
-| Wake word (laptop mode) | "Hey Misty" on robot | "Hey Jarvis" on laptop mic |
+| Wake word | Misty built-in keyphrase | "Hey Misty" custom OpenWakeWord model on laptop mic |
 | Intent detection | None | Story/recipe/explain/continuation patterns |
 
 ---
@@ -22,9 +22,10 @@ Updated for the richer responses changes in PR #45 and adaptive conversations (i
 **Start the controller:**
 ```powershell
 cd src\windows-orchestration
+$env:OWW_CUSTOM_MODEL_PATH = "C:\path\to\hey_misty.onnx"
 python misty_controller.py
 ```
-Say **"Hey Jarvis"** near the laptop mic, then speak after the orange LED.
+Say **"Hey Misty"** near the laptop mic, then speak after the orange LED. Misty's built-in keyphrase path is unsupported; if the custom model path is missing, the controller should fail fast instead of falling back.
 
 
 ---
@@ -140,11 +141,11 @@ Run these as a continuous follow-up chain to test pipeline stability under the 9
 
 Tests unique to the laptop mic wake word mode:
 
-41. *(Walk across the room and say "Hey Jarvis" — test laptop mic range)*
-42. *(Say "Hey Jarvis" during Misty's response — self-wake prevention should block it)*
-43. *(Say "Hey Jarvis" immediately after conversation ends — should re-arm within 2s)*
+41. *(Walk across the room and say "Hey Misty" — test laptop mic range)*
+42. *(Say "Hey Misty" during Misty's response — self-wake prevention should block it)*
+43. *(Say "Hey Misty" immediately after conversation ends — should re-arm within 2s)*
 44. *(Play music near laptop — test false positive rate)*
-45. *(Say "Hey Jarvis" while facing away from laptop — test directional sensitivity)*
+45. *(Say "Hey Misty" while facing away from laptop — test directional sensitivity)*
 
 ---
 
@@ -157,10 +158,10 @@ Tests unique to the laptop mic wake word mode:
 | 🔵 Blue | Processing (STT → LLM → TTS) | ~2-5s |
 | 🟣 Purple | Playing response | Varies by response length |
 | 🩵 Cyan | Follow-up listening | Up to 90s / 12 turns |
-| 🟡 Yellow | Watchdog soft reset | ~5s |
+| 🟡 Yellow | Low battery warning / recovery notice | Varies |
 | 🔴 Red | Error | Check logs |
 
-**Response time**: ~2s for follow-ups, ~5s for first turn (TTS cold start)
+**Response time**: depends mostly on TTS generation; check `[Pipeline ...]` logs for STT/LLM/TTS breakdown
 **Response length (short)**: 1-2 sentences, ~35 words (max_tokens=60, truncation at 35 words)
 **Response length (summary/continuation)**: 2-3 sentences, ~40 words (max_tokens=80, truncation at 50 words)
 **Recording duration**: VAD-controlled — 6s minimum (RECORDING_DURATION_S), up to 15s for long utterances
@@ -171,7 +172,7 @@ Tests unique to the laptop mic wake word mode:
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| No response to wake word | Laptop mic issue or openWakeWord threshold | Check logs; verify `sounddevice` mic selection |
+| No response to wake word | Missing/incorrect custom "Hey Misty" model, laptop mic issue, or OpenWakeWord threshold | Check logs; verify `OWW_CUSTOM_MODEL_PATH` and `sounddevice` mic selection |
 | 44-byte recording (empty) | Mic or recording pipeline issue | Check `misty_controller.log` for recording errors |
 | Response too long/wordy | Brevity drift past 35 words | Post-truncation should catch this; check max_tokens=60 |
 | Response too short | Old behavior persisted | Verify running updated code; check system prompt |

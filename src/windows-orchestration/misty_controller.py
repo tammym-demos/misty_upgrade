@@ -2941,6 +2941,22 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
             snapshot = ctrl.get_hazard_snapshot()
             self._send_json(200, {"status": "ok", **snapshot})
 
+        elif self.path == "/api/shutdown":
+            ctrl = self.controller
+            logger.info("[Test API] Shutdown requested")
+            self._send_json(200, {"status": "ok", "message": "Controller shutdown requested"})
+
+            def _shutdown_after_response():
+                time.sleep(0.2)
+                ctrl._shutdown()
+                os._exit(0)
+
+            threading.Thread(
+                target=_shutdown_after_response,
+                name="api-shutdown",
+                daemon=True,
+            ).start()
+
         else:
             self._send_json(404, {"error": "not_found"})
 

@@ -1,6 +1,6 @@
 # Misty Test Questions
 
-Questions to ask Misty during testing. Say **"Hey Misty"** first, then ask your question after the beep. For follow-up questions, just speak — no wake word needed within the 60-second follow-up window.
+Questions to ask Misty during testing. In the supported path, say **"Hey Misty"** near the laptop microphone using the configured custom OpenWakeWord model, then ask your question after the cue. For follow-up questions, just speak — no wake word needed within the 90-second follow-up window.
 
 ## Quick Check (Single Turn)
 
@@ -76,7 +76,7 @@ Run these back-to-back as follow-ups to test pipeline stability:
 
 | Symptom | Likely Cause | Issue |
 |---------|-------------|-------|
-| No response to "Hey Misty" | Keyphrase silent failure — watchdog auto-recovers in ~3.5min, or reboot | #22 |
+| No response to "Hey Misty" | Laptop OpenWakeWord model/config issue — check `OWW_CUSTOM_MODEL_PATH`, microphone access, and controller logs | #72 |
 | Response cuts off your question | Recording window is 6s — speak promptly after beep | #20 |
 | Long pause before response | LLM/TTS latency | #21 |
 | Misty misheard your words | STT accuracy | #27 |
@@ -86,10 +86,10 @@ Run these back-to-back as follow-ups to test pipeline stability:
 
 ## Expected Behavior
 
-- **Green LED** = Ready, listening for "Hey Misty"
+- **Green LED** = Ready, laptop mic listening for the configured OpenWakeWord phrase
 - **Orange LED** = Recording your question
 - **Blue LED** = Processing (STT → LLM → TTS)
 - **Purple LED** = Playing response
-- **Response time**: ~2s for follow-ups, ~5s for first turn (TTS cold start)
-- **Response length**: ≤10 words (brief, conversational)
-- **Follow-up window**: 60 seconds after last response
+- **Response time**: depends mostly on TTS generation; check `[Pipeline ...]` logs for STT/LLM/TTS breakdown
+- **Response length**: short mode targets ~35 words / up to 3 sentences
+- **Follow-up window**: 90 seconds after last response, capped at 12 follow-up turns
