@@ -13,6 +13,8 @@ import json
 import time
 import os
 import threading
+import tempfile
+import types
 import pytest
 from io import BytesIO
 from types import SimpleNamespace
@@ -133,6 +135,116 @@ class TestLaptopMistyRecordingConfig(unittest.TestCase):
                 phase="initial recording",
                 misty_fallback_available=False,
             )
+
+class TestWakeWordConfiguration(unittest.TestCase):
+    """Unit tests for the supported laptop OpenWakeWord wake path."""
+
+    _controller_module = None
+    _listener_module = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import misty_controller  # noqa: PLC0415
+            import wake_word_listener  # noqa: PLC0415
+            cls._controller_module = misty_controller
+            cls._listener_module = wake_word_listener
+        except Exception as exc:  # pragma: no cover
+            cls._controller_module = None
+            cls._listener_module = None
+            print(f"[TestWakeWordConfiguration] Could not import modules: {exc}")
+
+    def test_controller_defaults_to_laptop_wake_word(self):
+        """The controller should default to the laptop wake-word path."""
+        if self._controller_module is None:
+            self.skipTest("misty_controller could not be imported")
+        self.assertTrue(self._controller_module.USE_LAPTOP_WAKE_WORD)
+
+    def test_missing_custom_model_configuration_fails_fast(self):
+        """Missing custom-model config should fail the listener instead of silently using Misty keyphrase."""
+        if self._listener_module is None:
+            self.skipTest("wake_word_listener could not be imported")
+
+        fake_openwakeword = types.ModuleType("openwakeword")
+        fake_model_module = types.ModuleType("openwakeword.model")
+
+        class FakeModel:
+            def __init__(self, *args, **kwargs):
+                self.models = {"fake": None}
+
+        fake_model_module.Model = FakeModel
+        fake_openwakeword.model = fake_model_module
+
+        with unittest.mock.patch.dict(
+            sys.modules,
+            {"openwakeword": fake_openwakeword, "openwakeword.model": fake_model_module},
+        ):
+            listener = self._listener_module.WakeWordListener(on_wake_word=lambda: None, custom_model_path="")
+            self.assertFalse(listener._init_model())
+
+    def test_explicit_custom_model_path_is_selected(self):
+        """Explicit model selection should use the configured custom model artifact."""
+        if self._listener_module is None:
+            self.skipTest("wake_word_listener could not be imported")
+
+        fake_openwakeword = types.ModuleType("openwakeword")
+        fake_model_module = types.ModuleType("openwakeword.model")
+
+        class FakeModel:
+            def __init__(self, *args, **kwargs):
+                self.models = {"fake": None}
+
+        fake_model_module.Model = FakeModel
+        fake_openwakeword.model = fake_model_module
+
+        with tempfile.NamedTemporaryFile(suffix=".onnx", delete=False) as handle:
+            model_path = handle.name
+
+        try:
+            with unittest.mock.patch.dict(
+                sys.modules,
+                {"openwakeword": fake_openwakeword, "openwakeword.model": fake_model_module},
+            ):
+                listener = self._listener_module.WakeWordListener(
+                    on_wake_word=lambda: None,
+                    custom_model_path=model_path,
+                )
+                self.assertTrue(listener._init_model())
+                self.assertEqual(list(listener._oww_model.models.keys()), ["fake"])
+        finally:
+            if os.path.exists(model_path):
+                os.remove(model_path)
+
+    def test_controller_raises_when_laptop_wake_word_startup_fails(self):
+        """Wake-word startup failures must not silently fall back to Misty keyphrase."""
+        if self._controller_module is None:
+            self.skipTest("misty_controller could not be imported")
+
+        fake_module = types.ModuleType("wake_word_listener")
+
+        class FakeWakeWordListener:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def start(self):
+                return False
+
+            def get_health(self):
+                return {"running": False, "model": "hey_misty", "threshold": 0.7, "custom_model_path": None}
+
+        fake_module.WakeWordListener = FakeWakeWordListener
+        fake_module.OWW_CUSTOM_MODEL_PATH = ""
+        fake_module.OWW_MODEL_NAME = "hey_misty"
+        fake_module.OWW_THRESHOLD = 0.7
+
+        ctrl = self._controller_module.MistyController()
+        with unittest.mock.patch.dict(sys.modules, {"wake_word_listener": fake_module}):
+            with self.assertRaisesRegex(RuntimeError, "Laptop wake-word startup failed"):
+                ctrl._start_laptop_wake_word()
+
+        self.assertEqual(ctrl._wake_word_source, "error")
+        self.assertIn("unsupported", ctrl._wake_word_config_error)
+
 
 class TestLaptopFastRearm(unittest.TestCase):
     """Unit tests for laptop wake-word re-arm behavior (#65)."""

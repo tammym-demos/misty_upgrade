@@ -1,8 +1,10 @@
-# Keyphrase Silent Failure — Debugging Guide
+# Keyphrase Silent Failure — Historical Rationale
 
 > **Issue**: [#22](https://github.com/tammym-demos/misty_upgrade/issues/22)
-> **Status**: Open — firmware-level issue partially mitigated, not fully resolved
-> **Last updated**: April 2026
+> **Status**: Historical reference only — Misty's built-in keyphrase path is no longer supported in this project
+> **Last updated**: 2026-06-28
+
+The supported wake path is now laptop-side OpenWakeWord with a custom "Hey Misty" model. This document remains as historical context for the firmware issue that motivated the wake-word switch, but the controller no longer treats Misty's built-in keyphrase as a supported operating mode.
 
 ## Symptom
 
@@ -61,11 +63,11 @@ After ~2 conversation cycles (each involving keyphrase detect → record → pla
 
 **Only known recovery**: Full Core+Sensory reboot (`POST /api/reboot {"Core": true, "SensoryServices": true}`), which takes ~60-90 seconds.
 
-## Current Mitigations
+## Historical Mitigations (unsupported path)
 
-### Proactive Reboot (Primary)
+### Proactive Reboot (Historical)
 
-Since the firmware-level failure is predictable (~2 cycles), the controller now reboots **before** failure occurs:
+Since the firmware-level failure is predictable (~2 cycles), the historical controller logic rebooted **before** failure occurred, but the supported path is now laptop OpenWakeWord. The remaining keyphrase-related stop/start calls are only used to release Misty audio resources during cleanup.
 
 1. Tracks successful conversation cycles (wake → response → rearm)
 2. After `PROACTIVE_REBOOT_AFTER_CYCLES` (default: 2) cycles, triggers proactive reboot

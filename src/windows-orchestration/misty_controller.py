@@ -245,8 +245,13 @@ class MistyController:
         self._watchdog_recovery_level = 0       # 0=none, 1=soft reset done, 2=sensory reboot done
         self._watchdog_recovery_time = 0.0      # when the last recovery attempt was made
 
-        # Laptop wake word listener (optional, #44)
+        # Laptop wake word listener (supported wake path)
         self._wake_word_listener = None
+        self._wake_word_source = "unsupported"
+        self._wake_word_model_name = None
+        self._wake_word_model_path = None
+        self._wake_word_threshold = None
+        self._wake_word_config_error = None
 
         # Proactive reboot — counts successful conversation cycles (wake→response→rearm)
         self._conversation_cycles = 0
@@ -1798,21 +1803,87 @@ class MistyController:
 
     # --- Laptop wake word listener (issue #44) ---
 
+    def _get_wake_word_status(self) -> dict:
+        """Return the active wake-word configuration for logs and status endpoints."""
+        if self._wake_word_listener:
+            health = self._wake_word_listener.get_health()
+            return {
+                "source": "laptop_openwakeword",
+                "model_name": health.get("model"),
+                "model_path": health.get("custom_model_path"),
+                "threshold": health.get("threshold"),
+                "active": bool(health.get("running")),
+                "error": None,
+            }
+
+        return {
+            "source": self._wake_word_source,
+            "model_name": self._wake_word_model_name,
+            "model_path": self._wake_word_model_path,
+            "threshold": self._wake_word_threshold,
+            "active": False,
+            "error": self._wake_word_config_error,
+        }
+
     def _start_laptop_wake_word(self):
         """Initialize and start the laptop-based wake word listener."""
+        self._wake_word_source = "laptop_openwakeword"
+        self._wake_word_model_name = None
+        self._wake_word_model_path = None
+        self._wake_word_threshold = None
+        self._wake_word_config_error = None
+
         try:
-            from wake_word_listener import WakeWordListener
+            from wake_word_listener import (
+                OWW_CUSTOM_MODEL_PATH,
+                OWW_MODEL_NAME,
+                OWW_THRESHOLD,
+                WakeWordListener,
+            )
+
             self._wake_word_listener = WakeWordListener(
                 on_wake_word=self._on_laptop_wake_word,
+                model_name=OWW_MODEL_NAME,
+                threshold=OWW_THRESHOLD,
+                custom_model_path=OWW_CUSTOM_MODEL_PATH,
             )
             if self._wake_word_listener.start():
-                logger.info("Laptop wake word listener active — Misty keyphrase is backup only")
+                health = self._wake_word_listener.get_health()
+                self._wake_word_source = "laptop_openwakeword"
+                self._wake_word_model_name = health.get("model")
+                self._wake_word_model_path = health.get("custom_model_path")
+                self._wake_word_threshold = health.get("threshold")
+                logger.info(
+                    "Laptop wake word listener active "
+                    f"(model={self._wake_word_model_name}, path={self._wake_word_model_path or 'default'}, "
+                    f"threshold={self._wake_word_threshold})"
+                )
             else:
-                logger.warning("Laptop wake word listener failed to start — using Misty keyphrase only")
                 self._wake_word_listener = None
+                self._wake_word_source = "error"
+                self._wake_word_config_error = (
+                    "Laptop wake-word startup failed. Misty built-in keyphrase is unsupported; "
+                    "check the laptop wake-word dependencies, microphone access, and OWW_CUSTOM_MODEL_PATH."
+                )
+                raise RuntimeError(self._wake_word_config_error)
         except ImportError as e:
-            logger.warning(f"Laptop wake word not available ({e}) — using Misty keyphrase only")
             self._wake_word_listener = None
+            self._wake_word_source = "error"
+            self._wake_word_config_error = (
+                f"Laptop wake word dependencies are unavailable ({e}). Install sounddevice and openwakeword, "
+                "then retry with a configured OWW_CUSTOM_MODEL_PATH."
+            )
+            raise RuntimeError(self._wake_word_config_error) from e
+        except RuntimeError:
+            raise
+        except Exception as e:
+            self._wake_word_listener = None
+            self._wake_word_source = "error"
+            self._wake_word_config_error = (
+                f"Laptop wake-word startup failed: {e}. Misty built-in keyphrase is unsupported; "
+                "check the laptop microphone and OWW_CUSTOM_MODEL_PATH."
+            )
+            raise RuntimeError(self._wake_word_config_error) from e
 
     def _on_laptop_wake_word(self):
         """Callback fired by laptop wake word listener on detection."""
@@ -2564,10 +2635,21 @@ class MistyController:
         )
         logger.info(f"  Idle timeout:  {IDLE_TIMEOUT_S}s")
         logger.info(f"  Watchdog:      soft={WATCHDOG_IDLE_TIMEOUT_S}s, escalate={WATCHDOG_ESCALATE_TIMEOUT_S}s")
-        logger.info(f"  Wake word:     {'laptop mic (openWakeWord)' if USE_LAPTOP_WAKE_WORD else 'Misty keyphrase (Snapdragon 410)'}")
+        wake_status = self._get_wake_word_status()
+        logger.info(
+            "  Wake word:     "
+            f"source={wake_status['source']} model={wake_status['model_name'] or 'unconfigured'} "
+            f"path={wake_status['model_path'] or 'n/a'} threshold={wake_status['threshold'] or 'n/a'}"
+        )
         logger.info(f"  Follow-up:     {FOLLOWUP_TIMEOUT_S}s window, max {FOLLOWUP_MAX_TURNS} turns")
         logger.info(f"  Proactive reboot: every {PROACTIVE_REBOOT_AFTER_CYCLES} conversations or {PROACTIVE_REBOOT_AFTER_RECORDINGS} recordings")
         logger.info("=" * 60)
+
+        if not USE_LAPTOP_WAKE_WORD:
+            raise RuntimeError(
+                "USE_LAPTOP_WAKE_WORD=false is not supported. Misty built-in keyphrase is unsupported; "
+                "set USE_LAPTOP_WAKE_WORD=true and configure laptop wake-word dependencies."
+            )
 
         # Pre-flight checks
         if not self.check_misty_health():
@@ -2664,12 +2746,18 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
         if self.path == "/api/status":
             ctrl = self.controller
             battery = ctrl.get_battery_snapshot()
+            wake_status = ctrl._get_wake_word_status()
             self._send_json(200, {
                 "state": ctrl.get_state().name,
                 "turn_id": ctrl.turn_id,
                 "conversation_cycles": ctrl._conversation_cycles,
                 "proactive_reboot_at": PROACTIVE_REBOOT_AFTER_CYCLES,
                 "laptop_wake_word": USE_LAPTOP_WAKE_WORD,
+                "wake_source": wake_status["source"],
+                "wake_model_name": wake_status["model_name"],
+                "wake_model_path": wake_status["model_path"],
+                "wake_threshold": wake_status["threshold"],
+                "wake_error": wake_status["error"],
                 "laptop_misty_recording_mode": LAPTOP_MISTY_RECORDING_MODE,
                 "laptop_misty_tally_recording_s": max(0.0, LAPTOP_MISTY_TALLY_RECORDING_S),
                 "battery_percent": round(battery.charge_percent * 100),
@@ -2860,4 +2948,8 @@ if __name__ == "__main__":
     api_thread.start()
     logger.info(f"Test API server on port {CONTROLLER_API_PORT}")
 
-    controller.start()
+    try:
+        controller.start()
+    except RuntimeError as exc:
+        logger.error(str(exc))
+        sys.exit(1)

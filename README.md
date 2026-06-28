@@ -35,7 +35,7 @@ Orchestration Service (Flask)
 Misty speakers + LED/display/movement
 ```
 
-The preferred mode is `USE_LAPTOP_WAKE_WORD=true`. In that mode, the laptop mic handles both wake word detection and STT recording. Misty's mic is not trusted for intelligence; by default it is used only to activate the robot tally light during recording and to keep fallback audio if laptop capture fails. Operators can reduce robot audio churn with `LAPTOP_MISTY_RECORDING_MODE=tally` for a short tally-light pulse, or `LAPTOP_MISTY_RECORDING_MODE=off` to avoid Misty-side recording entirely.
+The supported wake path is laptop-side OpenWakeWord with a custom "Hey Misty" model. `USE_LAPTOP_WAKE_WORD=true` is the required mode; Misty's built-in keyphrase engine is not a supported operating path and is only retained in code as a cleanup path for robot audio resources. The controller will fail fast with guidance if laptop wake-word dependencies, microphone access, or a configured `OWW_CUSTOM_MODEL_PATH` are unavailable. In laptop mode, the laptop mic handles both wake word detection and STT recording. Misty's mic is not trusted for intelligence; by default it is used only to activate the robot tally light during recording and to keep fallback audio if laptop capture fails. Operators can reduce robot audio churn with `LAPTOP_MISTY_RECORDING_MODE=tally` for a short tally-light pulse, or `LAPTOP_MISTY_RECORDING_MODE=off` to avoid Misty-side recording entirely.
 
 ---
 
@@ -46,7 +46,7 @@ Misty II's onboard hardware cannot reliably run modern inference workloads. The 
 Key lessons from testing:
 
 - Misty's on-robot JavaScript skill runtime is unreliable for this use case.
-- Misty's Snapdragon 410 keyphrase engine silently degrades after repeated audio cycles.
+- Misty's built-in keyphrase path is no longer supported; the historical firmware issue is documented in `docs\keyphrase-debugging.md` as rationale for the switch to laptop OpenWakeWord.
 - Misty's on-chip face detection/recognition pipeline is effectively non-functional.
 - Sensory-only reboot must not be used; full Core+Sensory reboot is the safe recovery path.
 - Laptop-side wake word, recording, STT, LLM, and TTS are the reliable path forward.
@@ -176,6 +176,10 @@ Common environment variables:
 |---|---:|---|
 | `MISTY_IP` | `10.0.0.44` | Misty robot IP address. |
 | `ORCHESTRATION_URL` | `http://10.0.0.58:5000` | URL for the Flask orchestration service. |
+| `USE_LAPTOP_WAKE_WORD` | `true` | Required wake-word mode; the controller will fail fast if laptop wake-word startup is unavailable. |
+| `OWW_CUSTOM_MODEL_PATH` | empty | Path to the custom "Hey Misty" OpenWakeWord model artifact. |
+| `OWW_MODEL_NAME` | `hey_misty` | Model label for the configured wake-word artifact. |
+| `OWW_THRESHOLD` | `0.7` | Confidence threshold for wake-word inference. |
 | `FOUNDRY_LOCAL_HOST` | auto-discovered | Optional Foundry Local base URL override. |
 | `FOUNDRY_API_TIMEOUT` | `10.0` | Per-request timeout for Foundry API calls. |
 | `SERVICE_TIMEOUT` | `15.0` | Overall service timeout setting. |
@@ -190,7 +194,7 @@ Common environment variables:
 | `LAPTOP_MISTY_RECORDING_MODE` | `fallback` | Misty recorder behavior during conversations: `fallback` keeps full Misty audio as a safe fallback, `tally` records only a short tally-light pulse, and `off` disables Misty-side recording. |
 | `LAPTOP_MISTY_TALLY_RECORDING_S` | `1.0` | Length of the tally-light-only Misty recording pulse when `LAPTOP_MISTY_RECORDING_MODE=tally`. |
 
-Copy `src\windows-orchestration\.env.example` to `.env` if you want persistent local settings for the orchestration service.
+Copy `src\windows-orchestration\.env.example` to `.env` if you want persistent local settings for the orchestration service. For the supported wake path, train or obtain a custom "Hey Misty" OpenWakeWord model artifact outside this repo, place it on the laptop at a path the controller can access, and set `OWW_CUSTOM_MODEL_PATH` to that path before launching the controller.
 
 If `LAPTOP_MISTY_RECORDING_MODE` is `tally` or `off` and laptop mic capture returns no usable audio, the controller raises a clear retryable error instead of silently falling back to Misty. Check the laptop microphone or switch back to `fallback` when robot-side backup audio is needed.
 
