@@ -2548,5 +2548,156 @@ class TestFaceRecognition(unittest.TestCase):
         self.assertIsNone(ctrl._recognized_face)
 
 
+class TestInlineAudioBytes(unittest.TestCase):
+    """Unit tests for the return_audio_bytes flag in /api/orchestrate (#69).
+
+    Verifies that when ``return_audio_bytes=true`` is included in the
+    multipart form data the orchestration response contains a base64-encoded
+    ``audioBytes`` field, and that existing clients that omit the flag receive
+    the same response shape as before.
+    """
+
+    _svc = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import orchestration_service
+            cls._svc = orchestration_service
+        except Exception as exc:
+            cls._svc = None
+            print(f"[TestInlineAudioBytes] Could not import orchestration_service: {exc}")
+
+    def setUp(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self._svc.conversation_history = []
+        self._svc._last_response_mode = "short"
+
+    # ------------------------------------------------------------------
+    # Helper: mock a complete pipeline and issue a POST to /api/orchestrate
+    # ------------------------------------------------------------------
+
+    def _post_orchestrate(self, extra_data: dict, wav_content: bytes = b"RIFF\x00\x00\x00\x00WAVEfmt "):
+        """POST a fake WAV to /api/orchestrate with the given extra form fields."""
+        import io
+        import tempfile
+        import os
+
+        svc = self._svc
+
+        # Write a minimal WAV file that text_to_speech would "generate"
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False, dir=".") as tmp:
+            tmp.write(wav_content)
+            tmp_path = tmp.name
+        tmp_filename = os.path.basename(tmp_path)
+
+        try:
+            tts_mock = {
+                "status": "ok",
+                "audio_uri": f"/api/audio/{tmp_filename}",
+                "audio_file": tmp_filename,
+                "tts_cached": False,
+            }
+
+            # Move the tmp file into the responses/ dir so _read_audio_bytes_b64 can find it
+            os.makedirs("responses", exist_ok=True)
+            dest_path = os.path.join("responses", tmp_filename)
+            if not os.path.exists(dest_path):
+                os.rename(tmp_path, dest_path)
+            else:
+                os.unlink(tmp_path)
+
+            with svc.app.test_client() as client:
+                with unittest.mock.patch.object(svc, "speech_to_text") as mock_stt, \
+                     unittest.mock.patch.object(svc, "language_model_inference") as mock_llm, \
+                     unittest.mock.patch.object(svc, "text_to_speech", return_value=tts_mock):
+                    mock_stt.return_value = {"status": "ok", "text": "hello"}
+                    mock_llm.return_value = {
+                        "status": "ok", "text": "Hi there",
+                        "llm_ms": 100, "mode": "short",
+                    }
+
+                    data = {"file": (io.BytesIO(b"RIFF\x24\x00\x00\x00WAVEfmt "), "audio.wav", "audio/wav")}
+                    data.update(extra_data)
+                    resp = client.post(
+                        "/api/orchestrate",
+                        data=data,
+                        content_type="multipart/form-data",
+                    )
+            return resp
+        finally:
+            # Cleanup
+            try:
+                os.unlink(dest_path)
+            except OSError:
+                pass
+
+    # ------------------------------------------------------------------
+    # Tests
+    # ------------------------------------------------------------------
+
+    def test_without_flag_no_audio_bytes_in_response(self):
+        """Omitting return_audio_bytes should not include audioBytes in the JSON."""
+        resp = self._post_orchestrate({})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data["status"], "ok")
+        self.assertIn("responseAudio", data)
+        self.assertNotIn("audioBytes", data)
+
+    def test_with_flag_false_no_audio_bytes_in_response(self):
+        """return_audio_bytes=false should behave identically to the default."""
+        resp = self._post_orchestrate({"return_audio_bytes": "false"})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertNotIn("audioBytes", data)
+
+    def test_with_flag_true_audio_bytes_present(self):
+        """return_audio_bytes=true must include a non-empty audioBytes field."""
+        resp = self._post_orchestrate({"return_audio_bytes": "true"})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertEqual(data["status"], "ok")
+        self.assertIn("audioBytes", data)
+        self.assertIsNotNone(data["audioBytes"])
+        self.assertGreater(len(data["audioBytes"]), 0)
+
+    def test_with_flag_true_audio_bytes_decodes_to_original(self):
+        """The base64 audioBytes field must decode back to the original WAV bytes."""
+        import base64 as b64mod
+        wav_content = b"RIFF\x24\x00\x00\x00WAVEfmt fake-wav-content"
+        resp = self._post_orchestrate({"return_audio_bytes": "true"}, wav_content=wav_content)
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        decoded = b64mod.b64decode(data["audioBytes"])
+        self.assertEqual(decoded, wav_content)
+
+    def test_response_audio_uri_still_present_with_flag(self):
+        """responseAudio URI must still be included alongside audioBytes for compatibility."""
+        resp = self._post_orchestrate({"return_audio_bytes": "true"})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.get_json()
+        self.assertIn("responseAudio", data)
+        self.assertTrue(data["responseAudio"].startswith("/api/audio/"))
+
+    def test_read_audio_bytes_b64_path_traversal_rejected(self):
+        """_read_audio_bytes_b64 must reject filenames with path traversal sequences."""
+        svc = self._svc
+        for bad_name in ["../secret.wav", "foo/bar.wav", "foo\\bar.wav", "..\\secret.wav"]:
+            result = svc._read_audio_bytes_b64(bad_name)
+            self.assertIsNone(result, f"Expected None for unsafe filename: {bad_name!r}")
+
+    def test_read_audio_bytes_b64_missing_file_returns_none(self):
+        """_read_audio_bytes_b64 returns None gracefully when the file does not exist."""
+        result = self._svc._read_audio_bytes_b64("nonexistent_response_00000.wav")
+        self.assertIsNone(result)
+
+    def test_read_audio_bytes_b64_empty_filename_returns_none(self):
+        """_read_audio_bytes_b64 returns None for empty or None filenames."""
+        self.assertIsNone(self._svc._read_audio_bytes_b64(""))
+        self.assertIsNone(self._svc._read_audio_bytes_b64(None))
+
+
 if __name__ == "__main__":
     unittest.main()

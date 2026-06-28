@@ -2095,7 +2095,8 @@ class MistyController:
         # Processing state already set by caller — just send to orchestration
 
         # Send to orchestration service (include speaker_name from face recognition if available)
-        form_data = {}
+        # Request inline audio bytes to avoid a second GET round trip (#69)
+        form_data = {"return_audio_bytes": "true"}
         if speaker_name:
             form_data["speaker_name"] = speaker_name
         response = requests.post(
@@ -2128,23 +2129,36 @@ class MistyController:
             logger.info(f"[Turn {turn}] MOVEMENT: '{user_text}' -> {movement.get('command')} "
                          f"ack='{ack_text}' ({pipeline_ms}ms)")
 
-            # Download and play acknowledgment audio (speak first, then move)
+            # Retrieve and play acknowledgment audio (speak first, then move)
+            # Prefer inline bytes (#69); fall back to GET if not provided.
             audio_file = result.get("audio_file")
             if audio_file:
-                audio_url = f"{ORCHESTRATION_URL}/api/audio/{audio_file}"
-                try:
-                    audio_resp = requests.get(audio_url, timeout=10.0)
-                    audio_resp.raise_for_status()
-                    response_wav = audio_resp.content
-                    logger.info(f"[Turn {turn}] Downloaded movement ack audio: {len(response_wav)} bytes")
-
-                    self.set_state(State.PLAYING)
-                    self.set_led(148, 0, 211)  # purple = speaking
-                    self.display_image("e_EcstacyHilarious.jpg")
-                    play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
-                    time.sleep(play_duration + 1.0)
-                except Exception as e:
-                    logger.warning(f"[Turn {turn}] Movement ack audio failed: {e}")
+                response_wav = None
+                audio_bytes_b64 = result.get("audioBytes")
+                if audio_bytes_b64:
+                    try:
+                        response_wav = base64.b64decode(audio_bytes_b64)
+                        logger.info(f"[Turn {turn}] Inline movement ack audio: {len(response_wav)} bytes")
+                    except Exception as e:
+                        logger.warning(f"[Turn {turn}] Failed to decode inline movement ack audio: {e}")
+                if response_wav is None:
+                    audio_url = f"{ORCHESTRATION_URL}/api/audio/{audio_file}"
+                    try:
+                        audio_resp = requests.get(audio_url, timeout=10.0)
+                        audio_resp.raise_for_status()
+                        response_wav = audio_resp.content
+                        logger.info(f"[Turn {turn}] Downloaded movement ack audio: {len(response_wav)} bytes")
+                    except Exception as e:
+                        logger.warning(f"[Turn {turn}] Movement ack audio failed: {e}")
+                if response_wav:
+                    try:
+                        self.set_state(State.PLAYING)
+                        self.set_led(148, 0, 211)  # purple = speaking
+                        self.display_image("e_EcstacyHilarious.jpg")
+                        play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
+                        time.sleep(play_duration + 1.0)
+                    except Exception as e:
+                        logger.warning(f"[Turn {turn}] Movement ack playback failed: {e}")
 
             return {"movement": movement, "had_speech": True}
 
@@ -2158,15 +2172,26 @@ class MistyController:
         if result.get("ttsFallback"):
             logger.warning(f"[Turn {turn}] WARNING: TTS FALLBACK was used")
 
-        # Download response audio
-        if not audio_uri:
+        # Retrieve response audio — prefer inline bytes (#69), fall back to GET
+        if not audio_uri and not result.get("audioBytes"):
             raise RuntimeError("No response audio URI")
 
-        audio_url = f"{ORCHESTRATION_URL}{audio_uri}"
-        audio_resp = requests.get(audio_url, timeout=10.0)
-        audio_resp.raise_for_status()
-        response_wav = audio_resp.content
-        logger.info(f"[Turn {turn}] Downloaded response audio: {len(response_wav)} bytes")
+        response_wav = None
+        audio_bytes_b64 = result.get("audioBytes")
+        if audio_bytes_b64:
+            try:
+                response_wav = base64.b64decode(audio_bytes_b64)
+                logger.info(f"[Turn {turn}] Inline response audio: {len(response_wav)} bytes")
+            except Exception as e:
+                logger.warning(f"[Turn {turn}] Failed to decode inline audio, falling back to GET: {e}")
+        if response_wav is None:
+            if not audio_uri:
+                raise RuntimeError("No response audio URI and inline audio decode failed")
+            audio_url = f"{ORCHESTRATION_URL}{audio_uri}"
+            audio_resp = requests.get(audio_url, timeout=10.0)
+            audio_resp.raise_for_status()
+            response_wav = audio_resp.content
+            logger.info(f"[Turn {turn}] Downloaded response audio: {len(response_wav)} bytes")
 
         # Upload to Misty and play — animated, looking at user
         self.set_state(State.PLAYING)
