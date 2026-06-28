@@ -988,10 +988,11 @@ class TestTTSCache(unittest.TestCase):
                 except OSError:
                     # Best-effort cleanup in test teardown; file may already be removed.
                     pass
-            try:
-                os.unlink(f2.name)
-            except OSError:
-                pass
+            if f2 is not None:
+                try:
+                    os.unlink(f2.name)
+                except OSError:
+                    pass
 
 
 class TestLatencyConfig(unittest.TestCase):
