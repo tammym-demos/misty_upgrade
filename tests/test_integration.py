@@ -13,6 +13,7 @@ import json
 import time
 import os
 import threading
+import pytest
 from io import BytesIO
 from types import SimpleNamespace
 from urllib.parse import urlparse, urlunparse
@@ -241,6 +242,7 @@ class TestLaptopFastRearm(unittest.TestCase):
         ws.close.assert_called_once()
         ctrl._connect_ws.assert_called_once()
 
+@pytest.mark.live
 class TestWindowsOrchestration(unittest.TestCase):
     """Test Windows orchestration service."""
     
@@ -299,6 +301,7 @@ class TestWindowsOrchestration(unittest.TestCase):
         data = response.json()
         self.assertEqual(data.get("error"), "text_too_long")
 
+@pytest.mark.live
 class TestMistyConnectivity(unittest.TestCase):
     """Test Misty robot connectivity."""
     
@@ -320,6 +323,7 @@ class TestMistyConnectivity(unittest.TestCase):
         except requests.exceptions.RequestException as e:
             self.fail(f"Misty skill endpoint unreachable: {e}")
 
+@pytest.mark.live
 class TestFoundryLocalIntegration(unittest.TestCase):
     """Test Foundry Local endpoints."""
 
@@ -362,6 +366,7 @@ class TestFoundryLocalIntegration(unittest.TestCase):
         except requests.exceptions.RequestException as e:
             self.fail(f"Foundry Local chat endpoint failed: {e}")
 
+@pytest.mark.live
 class TestLatencySLO(unittest.TestCase):
     """Validate latency SLO compliance."""
     
@@ -395,6 +400,7 @@ class TestFallbackBehavior(unittest.TestCase):
         """Verify recovery from model load failures."""
         pass
 
+@pytest.mark.live
 class TestVerificationChecklist(unittest.TestCase):
     """Map to verification items from plan."""
     
