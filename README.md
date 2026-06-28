@@ -133,6 +133,27 @@ plans\                         # Historical planning prompts and notes
 
 Run these from the Windows companion device.
 
+One-command local startup/shutdown is available through the repo-local npm CLI:
+
+```powershell
+# Start Foundry Local, load Phi-3.5-mini, the orchestration service, and the Misty controller
+npx . start
+
+# Check service status
+npx . status
+
+# Gracefully stop the controller, release Misty audio/LED resources, and stop owned services
+npx . stop
+```
+
+The CLI reads `src\windows-orchestration\.env` when present. Startup loads `Phi-3.5-mini-instruct-openvino-gpu:2` into Foundry Local with a 1-hour TTL before starting the controller, so the first chat does not pay model-load latency. Before starting the controller, it checks Misty's REST API at `http://<MISTY_IP>/api/device`. If the configured IP is stale, it scans local private IPv4 `/24` networks for Misty's device API, stores the discovered IP and broadcast/reverse-DNS name in `.misty-services.json`, and reuses that address next time. You can override the common runtime settings inline:
+
+```powershell
+npx . start --misty-ip 10.0.0.44 --orchestration-url http://10.0.0.58:5000
+```
+
+Manual startup is still supported:
+
 ```powershell
 # 1. Start Foundry Local
 python -m pip install foundry-local
@@ -338,7 +359,6 @@ For unattended physical testing, see `tests\autonomous_test_harness.py`.
 - `docs\ADR-002-non-blocking-audio-pattern.md` - Laptop-mic callback/queue/worker pattern.
 - `docs\lessons-learned.md` - Operational findings from real hardware testing.
 - `docs\keyphrase-debugging.md` - Keyphrase failure history and recovery notes (historical reference).
-- `docs\design-animated-face-expressions.md` - State-driven animated face design (proposed, #73; no BMO assets).
 
 ---
 

@@ -4,6 +4,8 @@
 
 # Logs
 *.log
+logs/services/
+.misty-services.json
 
 # Generated response audio
 src/windows-orchestration/responses/
