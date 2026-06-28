@@ -338,6 +338,7 @@ For unattended physical testing, see `tests\autonomous_test_harness.py`.
 - `docs\ADR-002-non-blocking-audio-pattern.md` - Laptop-mic callback/queue/worker pattern.
 - `docs\lessons-learned.md` - Operational findings from real hardware testing.
 - `docs\keyphrase-debugging.md` - Keyphrase failure history and recovery notes (historical reference).
+- `docs\design-animated-face-expressions.md` - State-driven animated face design (proposed, #73; no BMO assets).
 
 ---
 
