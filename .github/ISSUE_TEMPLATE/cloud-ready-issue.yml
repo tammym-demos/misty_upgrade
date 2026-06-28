@@ -1,0 +1,95 @@
+name: Cloud-ready issue
+description: Create an issue intended for Copilot/cloud-agent execution.
+title: "[Cloud-ready] "
+labels:
+  - cloud-ready
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for work that Copilot can execute in the cloud with minimal local babysitting.
+
+        Cloud-ready issues must have clear acceptance criteria and a verification path that does not depend on Misty hardware, Foundry Local, Windows-only audio/SAPI5, or other unavailable local services.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Describe the user-visible outcome or repository improvement.
+      placeholder: What should change, and why?
+    validations:
+      required: true
+  - type: textarea
+    id: current-state
+    attributes:
+      label: Current state
+      description: Link related files, issues, docs, or behavior that explain the starting point.
+      placeholder: What exists today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposed-approach
+    attributes:
+      label: Proposed approach
+      description: Describe the intended implementation path or leave enough direction for Copilot to choose a narrow approach.
+      placeholder: What should Copilot change?
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance-criteria
+    attributes:
+      label: Acceptance criteria
+      description: Use a checklist so the cloud agent can verify completion.
+      value: |
+        - [ ]
+        - [ ]
+        - [ ]
+    validations:
+      required: true
+  - type: textarea
+    id: cloud-verification
+    attributes:
+      label: Cloud verification plan
+      description: List checks that can run from GitHub/Copilot cloud without live Misty hardware or local services.
+      placeholder: |
+        - git diff --check
+        - python -m py_compile <changed .py files>
+        - python -m pytest <targeted selector>
+    validations:
+      required: true
+  - type: dropdown
+    id: change-type
+    attributes:
+      label: Expected change type
+      options:
+        - Documentation
+        - Repository policy or automation
+        - Python source or tests
+        - Research or checklist update
+        - Other cloud-verifiable work
+    validations:
+      required: true
+  - type: checkboxes
+    id: cloud-ready-confirmation
+    attributes:
+      label: Cloud-ready confirmation
+      options:
+        - label: Acceptance criteria are clear and testable.
+          required: true
+        - label: Verification can be completed without Misty hardware, Foundry Local, Windows-only audio/SAPI5, or unavailable local services.
+          required: true
+        - label: Product, safety, privacy, and architecture decisions needed for this issue are already captured here.
+          required: true
+        - label: The work is scoped to one focused PR and should not overlap active issue branches or PRs.
+          required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: Dependencies or blockers
+      description: Note related issues, required decisions, or known blockers. Write "None" if there are none.
+      placeholder: None
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        After creating the issue, add exactly one priority label: `priority: high`, `priority: medium`, or `priority: low`.

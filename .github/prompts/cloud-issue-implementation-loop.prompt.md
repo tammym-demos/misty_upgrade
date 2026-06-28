@@ -6,7 +6,7 @@ description: Run the cloud-safe issue implementation loop for all ready reposito
 
 Use `.github/agents/issue-implementation-loop.md`.
 
-Work through all open issues that can be safely executed in the cloud. Select only issues with clear acceptance criteria and a credible non-hardware verification path.
+Work through open issues labeled `cloud-ready` that can be safely executed in the cloud. Select only issues with clear acceptance criteria and a credible non-hardware verification path.
 
 Prefer documentation, repository policy/automation, and other work that can be verified entirely from the cloud runner.
 

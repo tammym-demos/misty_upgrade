@@ -24,6 +24,7 @@ If an issue is vague, missing acceptance criteria, likely duplicated, blocked, o
 
 For this repository, a cloud-safe issue must have both:
 
+- the `cloud-ready` label when selected during an open-ended cloud run;
 - clear acceptance or success criteria; and
 - a credible verification path that does not depend on Misty hardware, Foundry Local, Windows-only audio/TTS behavior, or other unavailable local services.
 
@@ -88,6 +89,7 @@ Cached tokens must be reported separately from ordinary input/output tokens beca
 1. **Review candidate issues**
    - List open issues in the current repository.
    - Exclude closed issues, issues assigned to someone else when ownership is unclear, and issues explicitly marked blocked or deferred.
+   - For open-ended cloud runs, review only issues labeled `cloud-ready`. User-identified issue lists may include unlabeled issues, but unlabeled issues must still satisfy the cloud-safe filter before implementation.
    - Prefer issues with clear `## Acceptance criteria`, `## Success criteria`, or an equivalent checklist.
    - Exclude issues whose required verification depends on Misty hardware, Foundry Local, Windows-only audio/SAPI5, or another unavailable local runtime.
 
