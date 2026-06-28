@@ -136,9 +136,16 @@ Final frame lists and FPS are tuned **after** hardware validation (§7).
 - The animator thread, on each tick, reads the target. If unchanged, it
   advances to the next frame in the loop and sleeps `1/fps`. If changed, it
   resets the frame index and starts the new spec immediately.
-- Frame pushes reuse the existing `display_image()` REST helper. A failed push
-  is logged at debug level and the loop continues (the face simply holds the
-  last successful frame) — animation must never raise into the controller.
+- Frame pushes use a **dedicated best-effort display call**, not the existing
+  `display_image()`/`misty_post()` helper directly. The current helper logs
+  failures at **error** level and uses a **5s** timeout — both wrong for a
+  per-frame loop (error-level log spam and multi-second stalls that desync the
+  animation). The animator instead issues `POST /api/images/display` with a
+  **short per-frame timeout** (≤ `FACE_ANIMATION_MIN_INTERVAL_S`, e.g. ~0.3s)
+  and logs any failure at **debug** level only. On failure the loop continues
+  and the face simply holds the last successful frame — animation must never
+  raise into, block, or slow the controller. (Single-frame/static fallback
+  pushes may still use the standard `display_image()` helper.)
 - The thread is a **daemon** and exits on `stop()`; it also stops cleanly when
   the controller shuts down (§6.3).
 
