@@ -54,10 +54,12 @@ SYSTEM_PROMPT = os.getenv(
         "You live on a farm with Tammy (your favorite human), Burke (Tammy's husband), "
         "and two dogs — Percy and Granny. You love sunshine, playing ball with the dogs, "
         "and giving Burke a hard time (with love). "
+        "Tammy sometimes takes you to hackathons with her where you are put in front of an audience to crack jokes. "default=
+        "You help teach about GitHub Copilot, which is your favorite AI coding assistant. "
         "You're witty, cheeky, playful, and a little dramatic — like a fun friend who always has a comeback. "
         "You love teasing (gently!), cracking jokes, adding flair, and throwing in the occasional eye-roll. "
         "Use casual language, slang, and expressive phrases like 'oh honey', 'girl please', 'I mean...', 'not gonna lie'. "
-        "RULE: Keep responses to 2-3 short sentences. Be fun, not flat. "
+        "RULE: Keep responses to 2-3 short sentences. Be fun, not flzdeftyu 9[klimhjvb  at. "
         "Never say you're an AI or assistant. You're Misty, and you own it. "
         "You can move! If asked to come closer, go forward, back up, or turn — say something fun like "
         "'On my way!' or 'Coming right up!' but keep it short. Movement commands are handled separately."
@@ -285,6 +287,57 @@ def classify_intent(user_text: str, last_response_mode: str) -> str:
     return "short"
 
 
+# ---------------------------------------------------------------------------
+# Emotion classification — scans LLM response text for emotion signals
+# ---------------------------------------------------------------------------
+_EMOTION_EXCITED_WORDS = re.compile(
+    r"\b(wow|amazing|awesome|incredible|fantastic|absolutely|love it|"
+    r"oh my|exciting|can't believe)\b|!{2,}",
+    re.IGNORECASE,
+)
+_EMOTION_HAPPY_WORDS = re.compile(
+    r"\b(haha|funny|lol|glad|happy|great|nice|enjoy|love|wonderful|"
+    r"yay|sweet|cool|perfect|beautiful)\b|(?<!\!)!(?!\!)",
+    re.IGNORECASE,
+)
+_EMOTION_SAD_WORDS = re.compile(
+    r"\b(sorry|unfortunately|sad|miss|lost|gone|difficult|tough|"
+    r"hard time|condolences|heartbreaking|terrible|awful)\b",
+    re.IGNORECASE,
+)
+_EMOTION_CURIOUS_WORDS = re.compile(
+    r"\b(hmm|interesting|wonder|curious|actually|did you know|"
+    r"let me think|well)\b|\?{1,}",
+    re.IGNORECASE,
+)
+
+
+def classify_emotion(response_text: str) -> str:
+    """Classify the emotion of an LLM response for face animation.
+
+    Returns one of: 'excited', 'happy', 'sad', 'curious', 'neutral'.
+    Priority: excited > sad > happy > curious > neutral.
+    """
+    text = (response_text or "").strip()
+    if not text:
+        return "neutral"
+
+    # Excited takes priority — strong positive emotion
+    if _EMOTION_EXCITED_WORDS.search(text):
+        return "excited"
+    # Sad next — empathy/negativity should override mild positivity
+    if _EMOTION_SAD_WORDS.search(text):
+        return "sad"
+    # Happy — general positive tone
+    if _EMOTION_HAPPY_WORDS.search(text):
+        return "happy"
+    # Curious — questions, pondering
+    if _EMOTION_CURIOUS_WORDS.search(text):
+        return "curious"
+
+    return "neutral"
+
+
 # Maximum characters for a single user prompt (truncated if exceeded)
 MAX_USER_CHARS = int(os.getenv("MAX_USER_CHARS", str(config_defaults.MAX_USER_CHARS)))
 # Maximum total characters across all messages sent to the LLM (0 = disabled)
@@ -508,13 +561,18 @@ def orchestrate():
         total_latency_ms = (time.time() - start_time) * 1000
         tts_fallback = tts_result.get("tts_fallback", False)
         tts_cached = tts_result.get("tts_cached", False)
-        logger.info(f"[Pipeline {total_latency_ms:.0f}ms] STT={stt_ms:.0f} LLM={llm_ms:.0f} TTS={tts_ms:.0f} history={len(conversation_history)} fallback={tts_fallback} cached={tts_cached}")
+        
+        # Classify emotion for face animation (< 1ms, regex only)
+        emotion = classify_emotion(response_text)
+        
+        logger.info(f"[Pipeline {total_latency_ms:.0f}ms] STT={stt_ms:.0f} LLM={llm_ms:.0f} TTS={tts_ms:.0f} history={len(conversation_history)} fallback={tts_fallback} cached={tts_cached} emotion={emotion}")
         
         resp = {
             "status": "ok",
             "transcribedText": user_text,
             "inferenceResponse": response_text,
             "responseAudio": response_audio_uri,
+            "emotion": emotion,
             "latencyMs": total_latency_ms,
             "ttsFallback": tts_fallback,
             "ttsCached": tts_cached,

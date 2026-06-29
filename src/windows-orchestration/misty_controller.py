@@ -26,6 +26,9 @@ import threading
 import requests
 import websocket
 
+from dotenv import load_dotenv
+load_dotenv()  # Load .env before any os.getenv() calls
+
 from enum import Enum
 from dataclasses import dataclass
 from datetime import datetime
@@ -608,7 +611,7 @@ class MistyController:
 
         # Visual feedback — orange LED + adventurous face
         self.set_led(255, 165, 0)  # orange = moving
-        self.display_image("e_Joy2.jpg")
+        self.display_image("face_talking_excited.gif")
 
         try:
             if command in ("forward", "backward"):
@@ -673,7 +676,7 @@ class MistyController:
             if response.status_code == 200 and len(response.content) > 100:
                 self.set_state(State.PLAYING)
                 self.set_led(255, 255, 0)  # yellow = warning
-                self.display_image("e_Sadness.jpg")
+                self.display_image("face_talking_sad.gif")
                 play_duration = self.upload_and_play_audio(response.content, RESPONSE_FILENAME)
                 time.sleep(play_duration + 1.0)
         except Exception as e:
@@ -1446,7 +1449,7 @@ class MistyController:
         self.misty_post("/api/audio/keyphrase/stop")
         self.misty_post("/api/skills/cancel")
         self.set_led(0, 0, 0)
-        self.display_image("e_Sleeping.jpg")
+        self.display_image("face_idle.gif")
         logger.info("Charging mode active — keyphrase off, LED off, display sleeping")
 
     def exit_charging_mode(self):
@@ -1455,14 +1458,14 @@ class MistyController:
         if self._wake_word_listener:
             self._wake_word_listener.resume()
             self.set_led(0, 255, 0)
-            self.display_image("e_DefaultContent.jpg")
+            self.display_image("face_idle.gif")
             self.last_activity_time = time.time()
             self._is_dimmed = False
             self.set_state(State.IDLE)
             logger.info("Exited charging mode — resumed laptop wake word listener")
         elif self.start_keyphrase(force_restart=True):
             self.set_led(0, 255, 0)
-            self.display_image("e_DefaultContent.jpg")
+            self.display_image("face_idle.gif")
             self.last_activity_time = time.time()
             self._is_dimmed = False
             self.set_state(State.IDLE)
@@ -1668,7 +1671,7 @@ class MistyController:
             # Explicitly stop keyphrase to ensure mic is free
             self.misty_post("/api/audio/keyphrase/stop")
             self.set_led(0, 255, 0)
-            self.display_image("e_DefaultContent.jpg")
+            self.display_image("face_idle.gif")
             if current_state in (State.REARMING, State.REBOOTING):
                 self.last_activity_time = time.time()
                 self.set_state(State.IDLE)
@@ -1679,7 +1682,7 @@ class MistyController:
                 self.set_state(State.IDLE)
         elif self.start_keyphrase(force_restart=True):
             self.set_led(0, 255, 0)
-            self.display_image("e_DefaultContent.jpg")
+            self.display_image("face_idle.gif")
             if current_state in (State.REARMING, State.REBOOTING):
                 # Re-arm or post-reboot reconnect — no grace period, go straight to IDLE
                 self.last_activity_time = time.time()
@@ -1750,7 +1753,7 @@ class MistyController:
             if self._is_dimmed and self.get_state() == State.IDLE:
                 self._is_dimmed = False
                 self.set_led(0, 255, 0)
-                self.display_image("e_DefaultContent.jpg")
+                self.display_image("face_idle.gif")
                 logger.info("Restored from idle-dim on wake word")
 
             if self.get_state() == State.IDLE and time.time() >= self.ready_time:
@@ -1924,7 +1927,7 @@ class MistyController:
         if self._is_dimmed and self.get_state() == State.IDLE:
             self._is_dimmed = False
             self.set_led(0, 255, 0)
-            self.display_image("e_DefaultContent.jpg")
+            self.display_image("face_idle.gif")
             logger.info("Restored from idle-dim on laptop wake word")
 
         if self.get_state() == State.IDLE and time.time() >= self.ready_time:
@@ -2019,7 +2022,7 @@ class MistyController:
         except Exception as e:
             logger.error(f"[Turn {turn}] Error: {e}", exc_info=True)
             self.set_led(255, 0, 0)  # red = error
-            self.display_image("e_Sadness.jpg")
+            self.display_image("face_talking_sad.gif")
             time.sleep(2)
 
         finally:
@@ -2035,7 +2038,7 @@ class MistyController:
         # 1. Visual feedback — listening attentively
         self.set_state(State.RECORDING)
         self.set_led(255, 140, 0)  # orange
-        self.display_image("e_Admiration.jpg")  # wide-eyed, attentive
+        self.display_image("face_listening.png")  # wide-eyed, attentive
         self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # look up slightly — eye contact
 
         # Start face recognition concurrently with recording (#16)
@@ -2148,7 +2151,7 @@ class MistyController:
         # 3. Retrieve recorded audio — wondering face + thinking sound
         self.set_state(State.PROCESSING)
         self.set_led(0, 0, 255)  # blue = processing
-        self.display_image("e_Contempt.jpg")  # one eyebrow raised — "hmm, let me think..."
+        self.display_image("face_processing.gif")  # one eyebrow raised — "hmm, let me think..."
         self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)  # tilt head — pondering
 
         # Play thinking phrase so the user knows Misty heard them
@@ -2257,7 +2260,7 @@ class MistyController:
                     try:
                         self.set_state(State.PLAYING)
                         self.set_led(148, 0, 211)  # purple = speaking
-                        self.display_image("e_EcstacyHilarious.jpg")
+                        self.display_image("face_talking_happy.gif")
                         play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
                         time.sleep(play_duration + 1.0)
                     except Exception as e:
@@ -2298,9 +2301,11 @@ class MistyController:
             logger.info(f"[Turn {turn}] Downloaded response audio: {len(response_wav)} bytes")
 
         # Upload to Misty and play — animated, looking at user
+        emotion = result.get("emotion", "neutral")
+        talking_face = f"face_talking_{emotion}.gif"
         self.set_state(State.PLAYING)
         self.set_led(148, 0, 211)  # purple = speaking
-        self.display_image("e_EcstacyHilarious.jpg")  # big expressive face
+        self.display_image(talking_face)
         self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # face forward — eye contact
 
         play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
@@ -2316,7 +2321,7 @@ class MistyController:
         """Listen briefly for follow-up speech. Returns True if speech was detected and responded to."""
         self.set_state(State.LISTENING)
         self.set_led(0, 200, 200)  # cyan = listening for follow-up
-        self.display_image("e_Joy.jpg")  # warm, expectant — "go on..."
+        self.display_image("face_listening.png")  # warm, expectant — "go on..."
         self.move_head(pitch=-10, roll=-3, yaw=-10, velocity=40)  # slight head tilt — attentive
 
         # Record a short clip — use VAD if available
@@ -2388,7 +2393,7 @@ class MistyController:
         # Show thinking face while processing follow-up
         self.set_state(State.PROCESSING)
         self.set_led(0, 0, 255)  # blue = processing
-        self.display_image("e_Contempt.jpg")  # wondering face
+        self.display_image("face_processing.gif")  # wondering face
         self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)
 
         # Send through the full pipeline — orchestration returns empty_stt error
@@ -2456,9 +2461,11 @@ class MistyController:
             logger.info(f"[Turn {turn}] Follow-up audio: {len(response_wav)} bytes")
 
             # Play the response
+            emotion = result.get("emotion", "neutral")
+            talking_face = f"face_talking_{emotion}.gif"
             self.set_state(State.PLAYING)
             self.set_led(148, 0, 211)  # purple = speaking
-            self.display_image("e_EcstacyHilarious.jpg")  # animated speaking face
+            self.display_image(talking_face)
             self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # face forward
 
             play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
@@ -2503,7 +2510,7 @@ class MistyController:
 
                 self.set_led(0, 255, 0)
 
-                self.display_image("e_DefaultContent.jpg")
+                self.display_image("face_idle.gif")
 
                 self.last_activity_time = time.time()
 
@@ -2580,7 +2587,7 @@ class MistyController:
 
         # Announce the reboot to the user
         self.set_led(255, 200, 0)  # yellow = maintenance
-        self.display_image("e_ContentLeft.jpg")  # calm face
+        self.display_image("face_idle.gif")  # calm face
         self._play_reboot_announcement()
 
         # Stop all audio before reboot
@@ -2661,7 +2668,8 @@ class MistyController:
             logger.warning(f"Proactive reboot: TTS unavailable (status={response.status_code})")
             logger.warning(f"Proactive reboot: announcement failed: {e}")
 
-            f"{'laptop_openwakeword (required)' if USE_LAPTOP_WAKE_WORD else 'unsupported (USE_LAPTOP_WAKE_WORD=false)'}"
+            f"{'laptop_openwakeword (required)' if USE_LAPTOP_WAKE_WORD else 'unsupported (USE_LAPTOP_WAKE_WORD=false)'}"
+
             self.misty_post("/api/audio/play", {"FileName": "s_Awe2.wav"})
         except Exception as e:
             logger.debug(f"Proactive reboot: built-in fallback sound failed: {e}")
