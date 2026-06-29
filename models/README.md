@@ -10,12 +10,12 @@ phrase "Hey Misty" spoken into the companion laptop's microphone. It is used by 
 
 | Property | Value |
 |----------|-------|
-| Framework | openWakeWord 0.6.0 (ONNX runtime) |
+| Framework | openWakeWord (ONNX runtime) |
 | Architecture | DNN (128-dim, 1 block) |
 | Input shape | (1, 16, 96) — 16 frames × 96-dim audio embeddings |
 | Output | Single sigmoid score (0.0–1.0) |
 | Size | ~14 KB |
-| Training data | Synthetic TTS (Kokoro) — 54 voices × multiple speeds |
+| Training data | Synthetic TTS (Kokoro) — 23 voices × multiple speeds |
 | Positive samples | 3,450 (345 raw × 10 augmentations) |
 | Negative samples | 33,550 (3,335 raw × 10 augmentations + 200 silence) |
 | Validation accuracy | 99.7% |
@@ -27,7 +27,7 @@ phrase "Hey Misty" spoken into the companion laptop's microphone. It is used by 
 Set the following in `src/windows-orchestration/.env`:
 
 ```env
-OWW_CUSTOM_MODEL_PATH=C:\Users\tmcclell\Documents\Source\misty-upgrade\models\hey_misty.onnx
+OWW_CUSTOM_MODEL_PATH=C:\path\to\misty_upgrade\models\hey_misty.onnx
 OWW_MODEL_NAME=hey_misty
 OWW_THRESHOLD=0.7
 ```
@@ -47,10 +47,10 @@ Adjust based on your environment's background noise level.
 To retrain (e.g., after adjusting phrases or adding voices):
 
 ```powershell
-# Requires: torch, openwakeword, kokoro-onnx, scipy, numpy
+# Requires: torch, openwakeword, kokoro-onnx, scipy, numpy, tqdm
 # First time install:
 #   pip install torch --index-url https://download.pytorch.org/whl/cpu
-#   pip install openwakeword torchinfo torchmetrics onnxscript
+#   pip install openwakeword torchinfo torchmetrics onnxscript tqdm
 
 $env:PYTHONIOENCODING = "utf-8"
 python tools/train_hey_misty.py
@@ -72,7 +72,7 @@ To regenerate clips from scratch, delete `models/_training_work/` before running
 
 Edit `tools/train_hey_misty.py` to:
 
-- **Add voices**: Extend the `VOICES` list (Kokoro has 54 voices)
+- **Add voices**: Extend the `VOICES` list (Kokoro has ~54 voices; the script defaults to a 23-voice subset)
 - **Change speeds**: Adjust `SPEEDS` for fast/slow speaker simulation
 - **Add negative phrases**: Add similar-sounding phrases to `NEGATIVE_PHRASES`
 - **Increase training steps**: Change `TRAINING_STEPS` (default: 15000)

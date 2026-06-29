@@ -5,7 +5,7 @@ Uses Kokoro TTS to generate diverse synthetic training data, then trains
 an openWakeWord-compatible DNN and exports it as ONNX.
 
 Prerequisites:
-    pip install torch openwakeword kokoro-onnx scipy numpy
+    pip install torch openwakeword kokoro-onnx scipy numpy tqdm
 
 Usage:
     python tools/train_hey_misty.py
@@ -14,13 +14,9 @@ Output:
     models/hey_misty.onnx — ready for OWW_CUSTOM_MODEL_PATH
 """
 
-import os
-import sys
 import time
 import copy
-import shutil
 import logging
-import tempfile
 import hashlib
 from pathlib import Path
 
@@ -117,6 +113,13 @@ LEARNING_RATE = 0.001
 def generate_clips_kokoro(phrases: list[str], output_dir: Path, label: str) -> int:
     """Generate TTS clips for all phrase×voice×speed combinations."""
     import kokoro_onnx
+
+    if not KOKORO_MODEL.exists() or not KOKORO_VOICES.exists():
+        raise FileNotFoundError(
+            "Kokoro model files not found. Download them from:\n"
+            "  https://github.com/thewh1teagle/kokoro-onnx/releases\n"
+            f"Expected:\n  {KOKORO_MODEL}\n  {KOKORO_VOICES}"
+        )
 
     kokoro = kokoro_onnx.Kokoro(str(KOKORO_MODEL), str(KOKORO_VOICES))
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -234,19 +237,23 @@ def generate_silence_clips(n: int, target_len: int) -> list[np.ndarray]:
     return clips
 
 
-def compute_features(clips: list[np.ndarray]) -> np.ndarray:
-    """Compute openWakeWord features for a batch of clips."""
+def compute_features(clips: list[np.ndarray], chunk_size: int = 500) -> np.ndarray:
+    """Compute openWakeWord features for a list of clips, processing in chunks to limit RAM use."""
     from openwakeword.utils import AudioFeatures
 
     F = AudioFeatures(device='cpu')
+    all_features = []
 
-    # Stack clips into a batch
-    batch = np.vstack([c[np.newaxis, :] for c in clips])
-    logger.info(f"Computing features for {len(clips)} clips (batch shape: {batch.shape})...")
+    logger.info(f"Computing features for {len(clips)} clips in chunks of {chunk_size}...")
+    for start in tqdm(range(0, len(clips), chunk_size), desc="Feature extraction"):
+        chunk = clips[start:start + chunk_size]
+        batch = np.vstack([c[np.newaxis, :] for c in chunk])
+        features = F.embed_clips(batch, batch_size=32)
+        all_features.append(features)
 
-    features = F.embed_clips(batch, batch_size=32)
-    logger.info(f"Features shape: {features.shape}")
-    return features
+    result = np.concatenate(all_features, axis=0)
+    logger.info(f"Features shape: {result.shape}")
+    return result
 
 
 class WakeWordDNN(nn.Module):
@@ -343,13 +350,13 @@ def train_model(
         x_batch = X_train[batch_idx]
         y_batch = Y_train[batch_idx]
 
-        # Compute class weights (oversample minority class in loss)
+        # Compute class weights (upweight minority class in loss)
         n_pos = (y_batch == 1).sum().item()
         n_neg = (y_batch == 0).sum().item()
         weights = torch.ones_like(y_batch)
         if n_pos > 0 and n_neg > 0:
-            neg_weight = max(n_pos / n_neg, 1.0)
-            weights[y_batch == 0] = neg_weight
+            pos_weight = max(n_neg / n_pos, 1.0)
+            weights[y_batch == 1] = pos_weight
 
         optimizer.zero_grad()
         preds = model(x_batch).squeeze()
