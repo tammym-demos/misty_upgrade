@@ -1,0 +1,3 @@
+# Training work directory — generated clips and intermediate files
+# Regenerate with: python tools/train_hey_misty.py
+_training_work/

@@ -1,6 +1,8 @@
 # Model files (large binaries)
 *.onnx
 *.bin
+# Exception: trained wake word model (small, ~14KB)
+!models/hey_misty.onnx
 
 # Logs
 *.log
