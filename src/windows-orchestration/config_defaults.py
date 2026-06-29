@@ -39,8 +39,8 @@ MAX_CONTEXT_CHARS: int = 5000
 # ---------------------------------------------------------------------------
 
 # Robot connection
-MISTY_IP: str = "10.0.0.44"
-ORCHESTRATION_URL: str = "http://10.0.0.58:5000"
+MISTY_IP: str = "10.0.0.23"
+ORCHESTRATION_URL: str = "http://localhost:5000"
 
 # Audio recording
 RECORDING_DURATION_S: float = 6.0
