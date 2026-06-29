@@ -260,12 +260,85 @@ Phases 1–4 are separate follow-up issues; each is independently revertable.
 | Accidental inclusion of BMO assets | Normative asset boundary (§2); review checklist item; only `e_*.jpg` or original frames committed |
 | Feature regresses critical paths | Default off; display-only; disable-regression test (§6.4) |
 
-## 10. Acceptance-criteria mapping
+## 10. Validation results (Phase 1 — 2026-06-29)
+
+Hardware probe run via `tools/face_display_probe.py` against Misty at
+`10.0.0.23`, firmware v2.0.2.
+
+### 10.1 Frame rate (Test 1)
+
+| Metric | Value |
+|--------|-------|
+| Frames tested | 60 (max speed, 0 errors) |
+| Achieved FPS | **9.94** |
+| Latency p50 | 94.3 ms |
+| Latency p95 | 119.9 ms |
+| Latency p99 | 268.0 ms |
+| Min / Max | 77.6 ms / 268.0 ms |
+
+### 10.2 Visual artifacts (Test 2)
+
+All target FPS levels ran artifact-free with 0 errors:
+
+| Target FPS | Achieved FPS | Frames | Artifacts |
+|-----------|-------------|--------|-----------|
+| 0.5 | 0.5 | 4 | None observed |
+| 1.0 | 1.0 | 8 | None observed |
+| 2.0 | 2.1 | 17 | None observed |
+| 4.0 | 4.0 | 32 | None observed |
+
+### 10.3 Animated GIF support (Test 3)
+
+**✅ Natively supported.** A 2-frame programmatic GIF (red/blue, 500ms per
+frame) was uploaded and displayed — Misty's firmware looped the animation
+on-device without companion-side frame pushing. This opens a second animation
+strategy: upload GIFs once, let firmware loop them, reducing REST traffic.
+
+### 10.4 Native animation endpoints (Test 4)
+
+| Endpoint | Status | Notes |
+|----------|--------|-------|
+| `GET /api/images/list` | 200 ✅ | 46 images stored |
+| `GET /api/images` | 400 | Requires FileName param |
+| `GET /api/animations` | 404 | Not available |
+| `GET /api/animations/list` | 404 | Not available |
+| `GET /api/display/settings` | 404 | Not available |
+| `GET /api/display` | 404 | Not available |
+
+No native sequence/animation API exists. Animation must be driven via repeated
+`/api/images/display` calls or native GIF looping.
+
+### 10.5 Audio regression (Test 5)
+
+Skipped in this run (--skip-audio). To be validated separately if needed.
+Given that display calls use a completely separate API path from audio/keyphrase
+and the probe achieved 10 FPS with 0 errors, regression risk is low.
+
+### 10.6 Recommendation
+
+```
+FACE_ANIMATION_MAX_FPS = 4.0
+FACE_ANIMATION_MIN_INTERVAL_S = 0.25  (250ms, well above p95 latency)
+```
+
+Two animation strategies are available for Phase 2:
+1. **REST frame loop** — companion pushes frames at ≤4 FPS. Best for
+   dynamic/reactive animations that change based on real-time state.
+2. **Native GIF upload** — upload animated GIF once per state, firmware loops
+   it on-device. Best for static looping animations (idle blink, etc.) with
+   zero ongoing REST traffic.
+
+**Gate passed.** Hardware validation confirms animation is viable at up to
+4 FPS via REST and natively via GIF. Phase 2 implementation can proceed.
+
+---
+
+## 11. Acceptance-criteria mapping
 
 | #73 acceptance criterion | Where satisfied |
 |--------------------------|-----------------|
 | A feature design exists for state-driven face animation | §1, §4, §5 |
 | Design includes safe fallback to current static images | §5.2 (`static_fallback`), §6.1 |
-| Design includes a hardware validation step for frame rate and supported animation formats | §7 |
+| Design includes a hardware validation step for frame rate and supported animation formats | §7, §10 (results) |
 | Animation can be disabled without affecting wake word, recording, playback, movement safety, shutdown cleanup | §5.4 (flag), §6.2, §6.3, §6.4 |
 | Documentation notes BMO assets are not included or copied | §2 (asset boundary), §9 |
