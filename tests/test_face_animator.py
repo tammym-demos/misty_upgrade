@@ -289,11 +289,19 @@ class TestDefaultAnimationMap:
             )
 
     def test_all_initial_specs_are_single_frame(self):
-        """Phase 2 requirement: initial specs match today's single-image behavior."""
+        """Phase 3: active states should be multi-frame, others single-frame."""
+        multi_frame_states = {"IDLE", "RECORDING", "PROCESSING", "PLAYING", "LISTENING", "REBOOTING", "CHARGING"}
+        single_frame_states = {"DISCONNECTED", "MOVING", "REARMING", "ERROR"}
+
         for state_key, spec in DEFAULT_ANIMATION_MAP.items():
-            assert spec.is_single_frame, (
-                f"State {state_key} should be single-frame in Phase 2 (got {len(spec.frames)} frames)"
-            )
+            if state_key in multi_frame_states:
+                assert not spec.is_single_frame, (
+                    f"State {state_key} should be multi-frame in Phase 3"
+                )
+            elif state_key in single_frame_states:
+                assert spec.is_single_frame, (
+                    f"State {state_key} should remain single-frame"
+                )
 
 
 class TestDisableRegression:
