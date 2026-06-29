@@ -67,6 +67,11 @@ LAPTOP_MISTY_TALLY_RECORDING_S = float(os.getenv("LAPTOP_MISTY_TALLY_RECORDING_S
 USE_FACE_RECOGNITION = os.getenv("USE_FACE_RECOGNITION", "").lower() in ("1", "true", "yes")
 FACE_RECOGNITION_TIMEOUT_S = float(os.getenv("FACE_RECOGNITION_TIMEOUT_S", str(config_defaults.FACE_RECOGNITION_TIMEOUT_S)))
 
+# Face animation (#73) — state-driven animated expressions
+USE_FACE_ANIMATION = os.getenv("USE_FACE_ANIMATION", "").lower() in ("1", "true", "yes")
+FACE_ANIMATION_MAX_FPS = float(os.getenv("FACE_ANIMATION_MAX_FPS", str(config_defaults.FACE_ANIMATION_MAX_FPS)))
+FACE_ANIMATION_MIN_INTERVAL_S = float(os.getenv("FACE_ANIMATION_MIN_INTERVAL_S", str(config_defaults.FACE_ANIMATION_MIN_INTERVAL_S)))
+
 # Keyphrase watchdog — detects silent failures and auto-recovers
 WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", str(config_defaults.WATCHDOG_IDLE_TIMEOUT_S)))  # 90s after rearm with no wake event
 WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", str(config_defaults.WATCHDOG_ESCALATE_TIMEOUT_S)))  # 60s after recovery attempt
@@ -267,6 +272,18 @@ class MistyController:
         self._face_event_name: str | None = None  # WebSocket event name for face recognition
         self._trained_faces: list[str] = []  # cached list of trained face IDs
 
+        # Face animation (#73) — state-driven animated expressions
+        self._face_animator = None
+        if USE_FACE_ANIMATION:
+            from face_animator import FaceAnimator
+            self._face_animator = FaceAnimator(
+                misty_base_url=MISTY_BASE,
+                enabled=True,
+                max_fps=FACE_ANIMATION_MAX_FPS,
+                min_interval_s=FACE_ANIMATION_MIN_INTERVAL_S,
+            )
+            self._face_animator.start()
+
     # --- State transitions ---
 
     def set_state(self, new_state: State):
@@ -275,6 +292,8 @@ class MistyController:
             self.state = new_state
         if old != new_state:
             logger.info(f"State: {old.value} -> {new_state.value}")
+            if self._face_animator:
+                self._face_animator.set_state(new_state)
 
     def try_set_state(self, expected: State, new_state: State) -> bool:
         """Atomic compare-and-swap for state transitions. Returns True if successful."""
@@ -283,6 +302,8 @@ class MistyController:
                 old = self.state
                 self.state = new_state
                 logger.info(f"State: {old.value} -> {new_state.value}")
+                if self._face_animator:
+                    self._face_animator.set_state(new_state)
                 return True
             return False
 
@@ -1458,6 +1479,9 @@ class MistyController:
             return  # Already shut down
         logger.info("Shutting down...")
         self.running = False
+        # Stop face animator first (§6.3 — before existing cleanup sequence)
+        if self._face_animator:
+            self._face_animator.stop()
         # Stop laptop wake word listener
         if self._wake_word_listener:
             self._wake_word_listener.stop()
