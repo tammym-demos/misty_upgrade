@@ -710,7 +710,7 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  console.error(error.message);
+main().catch(() => {
+  console.error("Command failed. Re-run with safe diagnostics if needed.");
   process.exitCode = 1;
 });
