@@ -65,32 +65,74 @@ class AnimationSpec:
         return len(self.frames) <= 1
 
 
-# Default animation specs — single-frame to match today's behavior.
-# Multi-frame animations will be added in Phase 3 after tuning.
+# Default animation specs — multi-frame for active states (Phase 3).
+# States that benefit from animation use 2-4 frame loops at validated FPS.
+# States that should remain calm/static keep single-frame specs.
 DEFAULT_ANIMATION_MAP: dict[str, AnimationSpec] = {
     "DISCONNECTED": AnimationSpec(
         frames=("e_Sadness.jpg",),
         static_fallback="e_Sadness.jpg",
     ),
     "IDLE": AnimationSpec(
-        frames=("e_DefaultContent.jpg",),
+        # Slow content eye-shift — Misty looks alive while waiting
+        frames=(
+            "e_DefaultContent.jpg",
+            "e_DefaultContent.jpg",  # hold center longer
+            "e_ContentLeft.jpg",
+            "e_DefaultContent.jpg",
+            "e_DefaultContent.jpg",  # hold center longer
+            "e_ContentRight.jpg",
+        ),
         fps=0.5,
+        loop=True,
         static_fallback="e_DefaultContent.jpg",
     ),
     "RECORDING": AnimationSpec(
-        frames=("e_Admiration.jpg",),
+        # Wide-eyed attentive — slight blink cycle while listening to speech
+        frames=(
+            "e_Admiration.jpg",
+            "e_Admiration.jpg",
+            "e_SystemBlinkLarge.jpg",
+            "e_Admiration.jpg",
+        ),
+        fps=1.0,
+        loop=True,
         static_fallback="e_Admiration.jpg",
     ),
     "PROCESSING": AnimationSpec(
-        frames=("e_Contempt.jpg",),
+        # Thinking — eyebrow shift suggesting pondering
+        frames=(
+            "e_Contempt.jpg",
+            "e_ContentLeft.jpg",
+            "e_Contempt.jpg",
+            "e_ContentRight.jpg",
+        ),
+        fps=1.0,
+        loop=True,
         static_fallback="e_Contempt.jpg",
     ),
     "PLAYING": AnimationSpec(
-        frames=("e_EcstacyHilarious.jpg",),
+        # Expressive speaking — animated joyful expressions
+        frames=(
+            "e_EcstacyHilarious.jpg",
+            "e_Joy.jpg",
+            "e_EcstacyHilarious.jpg",
+            "e_JoyGoofy.jpg",
+        ),
+        fps=2.0,
+        loop=True,
         static_fallback="e_EcstacyHilarious.jpg",
     ),
     "LISTENING": AnimationSpec(
-        frames=("e_Joy.jpg",),
+        # Warm, attentive — subtle shifts showing engagement
+        frames=(
+            "e_Joy.jpg",
+            "e_Joy.jpg",
+            "e_Admiration.jpg",
+            "e_Joy.jpg",
+        ),
+        fps=0.75,
+        loop=True,
         static_fallback="e_Joy.jpg",
     ),
     "MOVING": AnimationSpec(
@@ -102,11 +144,26 @@ DEFAULT_ANIMATION_MAP: dict[str, AnimationSpec] = {
         static_fallback="e_DefaultContent.jpg",
     ),
     "REBOOTING": AnimationSpec(
-        frames=("e_ContentLeft.jpg",),
+        # Sleepy transition — going to sleep for reboot
+        frames=(
+            "e_Sleepy.jpg",
+            "e_Sleepy2.jpg",
+            "e_SleepingZZZ.jpg",
+        ),
+        fps=0.5,
+        loop=True,
         static_fallback="e_ContentLeft.jpg",
     ),
     "CHARGING": AnimationSpec(
-        frames=("e_Sleeping.jpg",),
+        # Gentle sleeping cycle
+        frames=(
+            "e_Sleeping.jpg",
+            "e_SleepingZZZ.jpg",
+            "e_Sleeping.jpg",
+            "e_Sleepy4.jpg",
+        ),
+        fps=0.3,
+        loop=True,
         static_fallback="e_Sleeping.jpg",
     ),
     "ERROR": AnimationSpec(
