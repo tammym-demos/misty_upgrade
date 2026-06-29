@@ -6,6 +6,31 @@ The project is designed for portable developer demos: local Wi-Fi, no cloud infe
 
 ---
 
+## One-Command Start
+
+Run these from the Windows companion device. One-command local startup/shutdown is available through the repo-local npm CLI:
+
+```powershell
+# Start Foundry Local, load Phi-3.5-mini, the orchestration service, and the Misty controller
+npx . start
+
+# Check service status
+npx . status
+
+# Gracefully stop the controller, release Misty audio/LED resources, and stop owned services
+npx . stop
+```
+
+The CLI reads `src\windows-orchestration\.env` when present. Startup loads `Phi-3.5-mini-instruct-openvino-gpu:2` into Foundry Local with a 1-hour TTL before starting the controller, so the first chat does not pay model-load latency. Before starting the controller, it checks Misty's REST API at `http://<MISTY_IP>/api/device`. If the configured IP is stale, it scans local private IPv4 `/24` networks for Misty's device API, stores the discovered IP and broadcast/reverse-DNS name in `.misty-services.json`, and reuses that address next time. Override common settings inline:
+
+```powershell
+npx . start --misty-ip 10.0.0.44 --orchestration-url http://10.0.0.58:5000
+```
+
+Manual startup is also supported — see [Quick Start](#quick-start).
+
+---
+
 ## Current Architecture
 
 This is a **two-device system**:
@@ -131,28 +156,7 @@ plans\                         # Historical planning prompts and notes
 
 ## Quick Start
 
-Run these from the Windows companion device.
-
-One-command local startup/shutdown is available through the repo-local npm CLI:
-
-```powershell
-# Start Foundry Local, load Phi-3.5-mini, the orchestration service, and the Misty controller
-npx . start
-
-# Check service status
-npx . status
-
-# Gracefully stop the controller, release Misty audio/LED resources, and stop owned services
-npx . stop
-```
-
-The CLI reads `src\windows-orchestration\.env` when present. Startup loads `Phi-3.5-mini-instruct-openvino-gpu:2` into Foundry Local with a 1-hour TTL before starting the controller, so the first chat does not pay model-load latency. Before starting the controller, it checks Misty's REST API at `http://<MISTY_IP>/api/device`. If the configured IP is stale, it scans local private IPv4 `/24` networks for Misty's device API, stores the discovered IP and broadcast/reverse-DNS name in `.misty-services.json`, and reuses that address next time. You can override the common runtime settings inline:
-
-```powershell
-npx . start --misty-ip 10.0.0.44 --orchestration-url http://10.0.0.58:5000
-```
-
-Manual startup is still supported:
+Run these from the Windows companion device. For the fastest path use the [one-command CLI](#one-command-start). Manual startup:
 
 ```powershell
 # 1. Start Foundry Local
