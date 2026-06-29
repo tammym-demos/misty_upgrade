@@ -67,3 +67,8 @@ LAPTOP_MISTY_TALLY_RECORDING_S: float = 1.0
 
 # Face recognition (issue #16)
 FACE_RECOGNITION_TIMEOUT_S: float = 3.0
+
+# Face animation (issue #73, Phase 2)
+USE_FACE_ANIMATION: bool = False
+FACE_ANIMATION_MAX_FPS: float = 4.0
+FACE_ANIMATION_MIN_INTERVAL_S: float = 0.25
