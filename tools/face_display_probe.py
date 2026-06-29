@@ -10,7 +10,7 @@ Tests performed:
   2. Visual artifact check — runs at 0.5, 1, 2, 4 FPS for operator confirmation
   3. Animated GIF support — uploads a tiny programmatic GIF
   4. Native animation endpoints — probes for sequence/list APIs on v2.0.2
-  5. Audio regression — confirms rapid display calls don't degrade keyphrase/mic
+  5. Audio regression — legacy best-effort check of Misty's built-in keyphrase path; supported wake path is laptop-side OpenWakeWord
 
 Prerequisites:
     pip install requests Pillow
@@ -138,12 +138,15 @@ class MistyDisplayProbe:
         resp.raise_for_status()
         return latency
 
+    def _warn_non_fatal(self, context: str, exc: Exception):
+        print(f"  WARNING: non-fatal {context}: {exc}")
+
     def _restore_default(self):
         """Restore Misty's face to default expression."""
         try:
             self._display(DEFAULT_FACE)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._warn_non_fatal("restoring default face", exc)
 
     def check_connectivity(self) -> bool:
         """Verify Misty is reachable."""
@@ -175,12 +178,15 @@ class MistyDisplayProbe:
                     print(f"  Frame {i} error: {e}")
         t_end = time.perf_counter()
 
-        result.duration_s = round(t_end - t_start, 3)
+        raw_duration_s = t_end - t_start
+        result.duration_s = round(raw_duration_s, 3)
         result.errors = errors
 
         if latencies:
             latencies_ms = [l * 1000 for l in latencies]
-            result.achieved_fps = round(len(latencies) / result.duration_s, 2)
+            result.achieved_fps = (
+                round(len(latencies) / raw_duration_s, 2) if raw_duration_s > 0 else 0.0
+            )
             result.latency_p50_ms = round(statistics.median(latencies_ms), 1)
             result.latency_p95_ms = round(
                 sorted(latencies_ms)[int(len(latencies_ms) * 0.95)], 1
@@ -330,8 +336,8 @@ class MistyDisplayProbe:
                 json={"FileName": "probe_test_anim.gif"},
                 timeout=self.timeout,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            self._warn_non_fatal("cleaning up probe GIF", exc)
         self._restore_default()
         return result
 
@@ -377,8 +383,8 @@ class MistyDisplayProbe:
                                 r.notes += f" — {len(result_data)} items"
                             elif isinstance(result_data, dict):
                                 r.notes += f" — keys: {list(result_data.keys())[:5]}"
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        self._warn_non_fatal("parsing endpoint response as JSON", exc)
 
             except Exception as e:
                 r = EndpointProbeResult(
@@ -402,7 +408,8 @@ class MistyDisplayProbe:
         "Hey Misty" during the test and confirming the event arrives.
         """
         print(f"\n[Test 5] Audio regression check ({duration_s}s)...")
-        print("  Starting keyphrase recognition...")
+        print("  Legacy built-in keyphrase check (best-effort/unsupported in this repo)...")
+        print("  The supported wake-word path is laptop-side OpenWakeWord with a custom 'Hey Misty' model.")
         result = AudioRegressionResult(tested=True)
 
         # Start keyphrase
@@ -411,8 +418,8 @@ class MistyDisplayProbe:
                 f"{self.base_url}/audio/keyphrase/start",
                 timeout=self.timeout,
             )
-        except Exception as e:
-            result.notes = f"Could not start keyphrase: {e}"
+        except Exception as exc:
+            result.notes = f"Could not start legacy built-in keyphrase check: {exc}"
             result.tested = False
             print(f"  SKIPPED: {result.notes}")
             return result
@@ -421,23 +428,27 @@ class MistyDisplayProbe:
 
         # Run display loop at ~2 FPS for the duration
         print(f"  Running display loop at ~2 FPS for {duration_s}s...")
-        print("  Say 'Hey Misty' during this time to test keyphrase detection.")
+        print("  If you want to observe the supported wake path, say 'Hey Misty' near the laptop mic.")
         interval = 0.5  # 2 FPS
         frames_sent = 0
+        loop_index = 0
         t_start = time.perf_counter()
+        next_due = t_start + interval
 
         while (time.perf_counter() - t_start) < duration_s:
-            face = BUILTIN_FACES[frames_sent % len(BUILTIN_FACES)]
+            now = time.perf_counter()
+            if now < next_due:
+                time.sleep(max(0.0, next_due - now))
+                continue
+
+            face = BUILTIN_FACES[loop_index % len(BUILTIN_FACES)]
             try:
                 self._display(face, timeout=2.0)
                 frames_sent += 1
-            except Exception:
-                pass
-            elapsed = time.perf_counter() - t_start
-            next_time = (frames_sent) * interval
-            sleep_time = next_time - elapsed
-            if sleep_time > 0:
-                time.sleep(sleep_time)
+            except Exception as exc:
+                self._warn_non_fatal("sending display frame during audio regression loop", exc)
+            loop_index += 1
+            next_due = max(next_due + interval, now + interval)
 
         result.display_calls_during = frames_sent
 
@@ -447,14 +458,14 @@ class MistyDisplayProbe:
                 f"{self.base_url}/audio/keyphrase/stop",
                 timeout=self.timeout,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            self._warn_non_fatal("stopping legacy built-in keyphrase", exc)
 
         result.notes = (
-            f"Sent {frames_sent} display calls over {duration_s}s (~2 FPS). "
-            "Manual verification required: say 'Hey Misty' during the test "
-            "and confirm the robot responds. If keyphrase worked during display "
-            "loop, no regression detected."
+            f"Sent {frames_sent} successful display calls over {duration_s}s (~2 FPS). "
+            "This was a legacy, best-effort check of Misty's built-in keyphrase endpoint "
+            "(unsupported in this repo). The supported wake-word path is laptop-side "
+            "OpenWakeWord with a custom 'Hey Misty' model; this probe does not validate that path."
         )
         print(f"  Done. {result.notes}")
         self._restore_default()
@@ -473,7 +484,7 @@ def main():
     parser.add_argument(
         "--skip-audio",
         action="store_true",
-        help="Skip the audio regression test (Test 5)",
+        help="Skip the legacy best-effort audio regression probe (Test 5)",
     )
     parser.add_argument(
         "--frames",
@@ -523,6 +534,7 @@ def main():
     # Test 5: Audio regression
     if args.skip_audio:
         print("\n[Test 5] Audio regression — SKIPPED (--skip-audio)")
+        print("  Legacy built-in keyphrase validation is best-effort/unsupported in this repo; the supported wake path is laptop-side OpenWakeWord.")
         results.audio_regression = AudioRegressionResult(
             tested=False, notes="Skipped via --skip-audio flag"
         )
@@ -543,6 +555,9 @@ def main():
         )
     else:
         results.recommendation = "Could not determine sustainable FPS — too many errors."
+
+    if results.audio_regression and not results.audio_regression.tested:
+        results.recommendation += " Audio regression gate not executed; this is a partial pass."
 
     # Output summary
     print("\n" + "=" * 60)

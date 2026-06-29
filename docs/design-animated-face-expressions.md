@@ -310,26 +310,33 @@ No native sequence/animation API exists. Animation must be driven via repeated
 
 ### 10.5 Audio regression (Test 5)
 
-Skipped in this run (--skip-audio). To be validated separately if needed.
-Given that display calls use a completely separate API path from audio/keyphrase
-and the probe achieved 10 FPS with 0 errors, regression risk is low.
+   Skipped in this run (--skip-audio). The probe attempted a legacy, best-effort
+   check of Misty's built-in keyphrase endpoint, but that path is unsupported in
+   this repository. The supported wake-word path remains laptop-side OpenWakeWord
+   with a custom "Hey Misty" model.
 
-### 10.6 Recommendation
+   Because Test 5 was not executed in this run, the audio regression gate should be
+   recorded as a partial pass rather than a full pass. The display-validation
+   results remain useful for the REST/GIF animation work, but they do not by
+   themselves confirm the unsupported on-robot keyphrase path.
 
-```
-FACE_ANIMATION_MAX_FPS = 4.0
-FACE_ANIMATION_MIN_INTERVAL_S = 0.25  (250ms, well above p95 latency)
-```
+   ### 10.6 Recommendation
 
-Two animation strategies are available for Phase 2:
-1. **REST frame loop** — companion pushes frames at ≤4 FPS. Best for
+   ```
+   FACE_ANIMATION_MAX_FPS = 4.0
+   FACE_ANIMATION_MIN_INTERVAL_S = 0.25  (250ms, well above p95 latency)
+   ```
+
+   Two animation strategies are available for Phase 2:
+   1. **REST frame loop** — companion pushes frames at ≤4 FPS. Best for
    dynamic/reactive animations that change based on real-time state.
-2. **Native GIF upload** — upload animated GIF once per state, firmware loops
+   2. **Native GIF upload** — upload animated GIF once per state, firmware loops
    it on-device. Best for static looping animations (idle blink, etc.) with
    zero ongoing REST traffic.
 
-**Gate passed.** Hardware validation confirms animation is viable at up to
-4 FPS via REST and natively via GIF. Phase 2 implementation can proceed.
+   **Partial pass.** Hardware validation confirms animation is viable at up to
+   4 FPS via REST and natively via GIF, but the audio regression gate remains
+   incomplete until Test 5 is executed and validated separately.
 
 ---
 
