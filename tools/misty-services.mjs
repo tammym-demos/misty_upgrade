@@ -470,7 +470,7 @@ async function pingMisty(env, state, options) {
     if (discovered) {
       env.MISTY_IP = discovered.ipAddress;
       state.misty = discovered;
-      console.log(`Misty robot: reachable at ${discovered.ipAddress} (${discovered.broadcastName})`);
+      console.log("Misty robot: reachable");
       return;
     }
 
