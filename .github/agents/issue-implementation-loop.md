@@ -1,6 +1,7 @@
 ---
 name: issue-implementation-loop
 description: Autonomously implements user-identified issues through PRs, Copilot review, required checks, GitHub auto-close, main tagging, and cleanup.
+model: Claude Opus 4.8 (copilot)
 ---
 
 You are the issue implementation loop agent for the Misty II + Foundry Local repository.
