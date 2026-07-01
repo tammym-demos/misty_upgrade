@@ -55,12 +55,17 @@ Attempted to connect Misty II (serial 20194603627, firmware 2.0.2.11660) to a ne
 - `GET /api/device` — confirms connectivity, returns IP, MAC, serial, firmware, current network
 - **This only works if Misty is already reachable on some network.**
 
-### 7. AP isolation can strand Misty on unreachable networks
-- After connecting Misty to "Bachelor Pad" via REST API, the router's AP/client isolation prevented the laptop from reaching her.
-- Misty was "connected" (had IP 192.168.12.210) but unreachable from any other device on the same WiFi — except a phone which was able to reach her (selective isolation or different VLAN rules).
-- **Lesson**: Before pushing a new network to Misty, verify you can reach devices on it from your laptop. Test with ping first.
-- **Recovery**: Used phone browser to access Misty's API and switch her back to a reachable network.
-- Removed problematic network with `DELETE /api/networks?NetworkId=8` to prevent auto-reconnect.
+### 7. Multi-homed laptop causes routing failures (not AP isolation)
+- After connecting Misty to "Bachelor Pad" via REST API, the laptop couldn't reach her at 192.168.12.210.
+- **Root cause**: Laptop was multi-homed — wired on Home-FE92 (10.0.0.25) and WiFi on Bachelor Pad (192.168.12.140). Windows routed 192.168.12.x traffic through the wired adapter's gateway instead of the WiFi adapter.
+- Confirmed: disconnecting the wired (Home-FE92) adapter allowed the laptop to reach Misty on Bachelor Pad immediately.
+- A phone on Bachelor Pad WiFi could also reach Misty (single-homed, correct routing).
+- **Lesson**: When multi-homed, check route metrics. Either disconnect the other adapter or add a static route:
+  ```powershell
+  route add 192.168.12.0 mask 255.255.255.0 192.168.12.1 IF <wifi_interface_index>
+  ```
+- **Bachelor Pad works fine** for Misty — the issue was purely laptop-side routing, not AP isolation.
+- Removed Bachelor Pad from Misty's saved networks prematurely (can re-add if needed).
 
 ### 8. Pixel hotspot invisible to Misty (cause uncertain)
 - Pixel_1784 was saved in Misty's network list but she could never connect to it.
