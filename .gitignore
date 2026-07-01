@@ -17,6 +17,10 @@ __pycache__/
 *.pyc
 .env
 
+# Credential stores (encrypted WiFi passwords, discovery cache)
+*.enc
+misty_ip.json
+
 # OS
 Thumbs.db
 .DS_Store

@@ -35,12 +35,37 @@ from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 import config_defaults  # canonical source for all shared default values (see config_defaults.py)
+from misty_discovery import discover_misty, get_misty_ip
+
+logger = logging.getLogger("misty_controller")
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-MISTY_IP = os.getenv("MISTY_IP", config_defaults.MISTY_IP)
+
+def _resolve_misty_ip() -> str:
+    """Resolve Misty's IP: env var → cached discovery → live network scan → default."""
+    env_ip = os.getenv("MISTY_IP")
+    if env_ip:
+        return env_ip
+    # Try reading the last cached discovery (fast, no network)
+    cached = get_misty_ip()
+    if cached:
+        logger.info(f"Using cached Misty IP from discovery: {cached}")
+        return cached
+    # Attempt live network scan
+    logger.info("MISTY_IP not set — scanning network for Misty...")
+    found = discover_misty()
+    if found:
+        logger.info(f"Misty auto-discovered at: {found}")
+        return found
+    # Fall back to config default
+    logger.warning(f"Misty not found on network, falling back to default: {config_defaults.MISTY_IP}")
+    return config_defaults.MISTY_IP
+
+
+MISTY_IP = _resolve_misty_ip()
 MISTY_BASE = f"http://{MISTY_IP}"
 MISTY_WS = f"ws://{MISTY_IP}/pubsub"
 ORCHESTRATION_URL = os.getenv("ORCHESTRATION_URL", config_defaults.ORCHESTRATION_URL)
