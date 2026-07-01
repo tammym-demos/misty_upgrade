@@ -192,14 +192,14 @@ async def scan_for_misty(timeout: float = 10.0) -> list[dict]:
             misty_devices.append({
                 "address": device.address,
                 "name": device.name,
-                "rssi": device.rssi if hasattr(device, 'rssi') else None,
+                "rssi": getattr(device, 'rssi', None),
                 "reason": reason,
             })
-            print(f"  *** MISTY FOUND: {device.address}  {device.name}  RSSI={device.rssi}  ({reason})")
+            print(f"  *** MISTY FOUND: {device.address}  {device.name}  RSSI={getattr(device, 'rssi', '?')}  ({reason})")
         else:
             # Show all devices for debugging
             if device.name:
-                print(f"      {device.address}  {device.name}  RSSI={device.rssi}")
+                print(f"      {device.address}  {device.name}  RSSI={getattr(device, 'rssi', '?')}")
     
     if not misty_devices:
         print("\n  No Misty BLE devices found.")

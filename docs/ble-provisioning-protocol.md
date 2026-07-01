@@ -1,6 +1,8 @@
 # BLE WiFi Provisioning Protocol — Misty II (Reverse Engineering)
 
-## Status: IN PROGRESS (Phase 1 complete, Phase 2 ready for hardware testing)
+## Status: BLOCKED — Pairing/encryption required (2026-07-01)
+
+**Summary**: The BLE provisioning characteristic accepts write data at the GATT level but the ESP32 firmware silently discards all writes. Strong evidence indicates the firmware requires a **bonded/encrypted BLE connection** before processing WiFi credentials. Pairing attempts are acknowledged (Misty beeps) but always rejected.
 
 ## Known BLE Interface
 
@@ -10,8 +12,11 @@
 | Device Name | Last 5 digits of serial (e.g., "03627") |
 | Service UUID | `1562c132-3a0d-4f39-9e67-a9a632e8d6aa` |
 | Write Characteristic | `3ee51024-7fdd-4d37-95aa-0a4b0e2d4f34` (write-without-response) |
-| Read Characteristic | `418f52ab-10c6-42a6-9590-58cccb818f64` (returns `\x00\x00\x00` at rest) |
-| BLE Address | Changes between sessions (not pinnable) |
+| Read Characteristic | `418f52ab-10c6-42a6-9590-58cccb818f64` (returns `\x00\x00\x00` always) |
+| BLE Address | Changes between sessions (rotates: seen `57:CA:00:43:1D:D4`, `5E:19:98:09:B8:7A`, `40:03:4D:CD:95:A0`) |
+| Manufacturer ID | `0xFFEE` (custom, not Espressif) |
+| Manufacturer Data | 12 bytes, static per session (e.g., `f3cebb7fa69bedcd7971beb6`) |
+| MTU | 517 bytes |
 | Firmware | 2.0.2.11660 |
 
 ## APK Decompilation Findings (Phase 1)
@@ -48,52 +53,39 @@
 - The BLE service uses **custom UUIDs** (not standard ESP-IDF provisioning)
 - This rules out standard `wifi_prov_mgr` protobuf protocol
 
-## Protocol Hypotheses
+## Hardware Testing Results (2026-07-01)
 
-Based on decompilation analysis and community research:
+### What Was Tested
+- **40+ payload formats** including JSON (multiple key styles), length-prefixed binary, null/newline/pipe/comma-separated, command-prefixed, TLV, UTF-16LE, Base64, chunked writes, 2-step writes, ESP-IDF sequences, and more.
+- **Write-without-response** and **write-with-response** (both accepted without error).
+- **Writing to read characteristic** (accepted, no effect).
+- **Rapid polling** of read characteristic after writes (never changes).
+- **Extended connection** (30+ seconds connected, polling every 5s — no change).
+- **Notification subscription** (read characteristic does not support notify/indicate).
+- **BLE pairing** via Windows Settings and programmatically (Misty beeps acknowledging request, then rejects pairing).
+- **Manufacturer data** (12 bytes at manufacturer ID 0xFFEE, static per session) tested as XOR key, prepended token, session handshake, and hash seed — no effect.
+- **App identification** handshake writes (MistyCompanion, version string) — no effect.
+- **Fake SSID** write to rule out "already connected" filtering — no effect.
 
-| # | Format | Payload Example | Confidence |
-|---|--------|----------------|------------|
-| 0 | JSON lowercase | `{"ssid":"X","password":"Y"}` | Medium |
-| 1 | JSON PascalCase | `{"Ssid":"X","Password":"Y"}` | Medium-High |
-| 2 | JSON + securityType | `{"ssid":"X","password":"Y","securityType":"wpa2"}` | Medium |
-| 3 | JSON PascalCase + Security | `{"Ssid":"X","Password":"Y","SecurityType":"WPA2"}` | Medium |
-| 4 | Length-prefixed binary | `[len1][ssid][len2][pass]` | Medium |
-| 5 | Null-separated | `SSID\0PASSWORD\0` | Low (tested, failed) |
-| 6 | Newline-separated | `SSID\nPASSWORD` | Low (tested, failed) |
-| 7 | Command + payload | `\x01[len][ssid][len][pass]` | Low |
-| 8 | TLV encoding | `\x01[len][ssid]\x02[len][pass]\x03\x01\x03` | Low |
+### Key Observations
+1. **Misty BEEPS** when pairing is attempted → firmware IS processing BLE events
+2. **Pairing always fails** → Misty rejects all pairing modes (Just Works, None, default)
+3. **Writes accepted at GATT level** → no write errors, but application layer ignores them
+4. **Read characteristic permanently `000000`** → no status feedback over BLE
+5. **No physical response** to any write → no LED, sound, movement, or display change
+6. **BLE advertising continues** after all write attempts → WiFi never connects
 
-### Why prior JSON attempts may have failed:
-1. **Wrong key names** — REST API uses `Ssid`/`Password` (PascalCase), prior test used lowercase
-2. **Missing fields** — might need `SecurityType`, `NetworkId`, or other metadata
-3. **MTU issue** — payload may exceed BLE MTU and need chunking
-4. **Handshake required** — may need to read/subscribe before writing
-5. **Notification vs polling** — status may come via notify, not read
+### Conclusion
+The BLE WiFi provisioning on firmware 2.0.2.11660 **requires an encrypted/bonded connection** that only the original companion app could establish. Without bonding, all writes are silently discarded at the application layer. The pairing mechanism used by the app is unknown (possibly a custom PIN scheme or Android-specific "Just Works" implementation that Windows cannot replicate).
 
-## Testing Strategy
+## Next Steps (Priority Order)
 
-Use `misty_ble_provision.py` to systematically test:
+1. **[HIGH] UART serial adapter** — Order USB-to-UART (CP2102/FTDI, 3.3V TTL) for the SERIAL header on Misty's back panel. This is the guaranteed provisioning path.
+2. **[MEDIUM] Sideload companion APK** — Install `com.mistyrobotics.Companion` v1.2.59 on an Android device, pair successfully, then use nRF Connect or Wireshark BLE sniffer to capture the pairing/provisioning traffic.
+3. **[LOW] Micro-USB data cable** — Test if Misty's back USB port provides serial console with a proper micro-USB data cable (not USB-C adapter).
+4. **[LOW] Pre-provision via REST API** — When Misty is on a known network, push additional SSIDs via `python misty_wifi.py add "SSID" "password"` so she auto-connects at other locations.
 
-```bash
-# 1. Discover all characteristics (may reveal additional ones)
-python misty_ble_provision.py discover --address XX:XX:XX:XX:XX:XX
 
-# 2. Test with notification subscription (catches async responses)
-python misty_ble_provision.py notify "SSID" "password" --format 1
-
-# 3. Brute-force all formats
-python misty_ble_provision.py test-formats "SSID" "password"
-```
-
-## Next Steps
-
-1. [ ] Hardware test: Run `discover` to confirm all characteristics (may have missed some)
-2. [ ] Hardware test: Subscribe to notifications before writing
-3. [ ] Hardware test: Try PascalCase JSON format (highest confidence)
-4. [ ] Hardware test: Run full format sweep
-5. [ ] If all fail: Use nRF Connect BLE sniffer to capture traffic from a working provisioning session (if companion app can be sideloaded on Android)
-6. [ ] If all fail: Try UART serial path as alternative
 
 ## Related Files
 
