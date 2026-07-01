@@ -62,12 +62,13 @@ Attempted to connect Misty II (serial 20194603627, firmware 2.0.2.11660) to a ne
 - **Recovery**: Used phone browser to access Misty's API and switch her back to a reachable network.
 - Removed problematic network with `DELETE /api/networks?NetworkId=8` to prevent auto-reconnect.
 
-### 8. Pixel hotspot invisible to Misty (5GHz default)
+### 8. Pixel hotspot invisible to Misty (cause uncertain)
 - Pixel_1784 was saved in Misty's network list but she could never connect to it.
-- WiFi scan (`GET /api/networks/scan`) does NOT show Pixel_1784 at all.
-- **Root cause**: Modern Pixel phones default their hotspot to 5GHz. Misty only supports 2.4GHz.
-- **Fix**: Change Pixel hotspot to "2.4 GHz" or "Compatibility mode" in Settings > Hotspot > AP band.
+- WiFi scan (`GET /api/networks/scan`) does NOT show Pixel_1784 even when hotspot is active and set to dual-band (2.4 + 5GHz).
+- **Root cause TBD** — hotspot was confirmed active and broadcasting on 2.4GHz. Needs further testing.
+- Possible causes: hotspot channel conflict, hidden SSID mode, or Misty firmware quirk with certain hotspot implementations.
 - Note: Misty had two duplicate Pixel_1784 entries (NetworkId 3 with password, NetworkId 7 without) — clean up duplicates when possible.
+- **Action**: Test again with hotspot active and Misty in range; try fresh `networks/create` with correct credentials.
 
 ## What Works (confirmed)
 | Method | Status |
