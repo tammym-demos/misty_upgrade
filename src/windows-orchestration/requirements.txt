@@ -17,3 +17,5 @@ websocket-client
 # Wake word detection: laptop mic + openWakeWord (issue #44)
 sounddevice
 openwakeword
+# BLE provisioning: WiFi setup over Bluetooth (issue #111)
+bleak
