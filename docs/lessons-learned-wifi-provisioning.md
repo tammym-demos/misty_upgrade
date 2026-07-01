@@ -115,7 +115,7 @@ Attempted to connect Misty II (serial 20194603627, firmware 2.0.2.11660) to a ne
 6. **Build travel provisioning script** combining REST API + UART serial fallback
 
 ## Hardware Needed
-- [ ] USB-to-UART adapter (3.3V TTL, CP2102 or FTDI) — for SERIAL header
+- [x] USB-to-UART adapter (3.3V TTL, CP2102 or FTDI) — for SERIAL header (**ordered, in shipping**)
 - [ ] Micro-USB data cable — to test USB port serial
 - [ ] (Optional) Jumper wires — for SERIAL header if adapter doesn't have pin headers
 
