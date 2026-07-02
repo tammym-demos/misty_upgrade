@@ -47,31 +47,6 @@ MISTY_READ_UUID = "418f52ab-10c6-42a6-9590-58cccb818f64"
 MISTY_SERIAL_SUFFIX = "03627"  # From serial 20194603627
 
 
-def _masked_password(password: str) -> str:
-    """Return a fixed-width redaction for log output."""
-    return "*" * len(password)
-
-
-def _redact_payload(payload: bytes, password: str) -> bytes:
-    """Replace password bytes in payload previews before logging."""
-    if not password:
-        return payload
-    return payload.replace(password.encode("utf-8"), b"*" * len(password))
-
-
-def _payload_hex(payload: bytes, password: str, limit: Optional[int] = None) -> str:
-    """Return a hex preview with any password bytes redacted."""
-    redacted = _redact_payload(payload, password)
-    if limit is not None and len(redacted) > limit:
-        return f"{redacted[:limit].hex()}..."
-    return redacted.hex()
-
-
-def _payload_text(payload: bytes, password: str) -> str:
-    """Return a decoded text preview with any password bytes redacted."""
-    return _redact_payload(payload, password).decode("utf-8", errors="replace")
-
-
 def build_payload_formats(ssid: str, password: str) -> list[tuple[str, bytes]]:
     """Generate all candidate payload formats for WiFi provisioning.
     
@@ -328,8 +303,7 @@ async def provision_wifi(address: str, ssid: str, password: str,
         
         for desc, payload in formats:
             print(f"\n  Trying format: {desc}")
-            print(f"    Payload ({len(payload)} bytes): {_payload_hex(payload, password)}")
-            print(f"    As text: {_payload_text(payload, password)}")
+            print(f"    Payload length: {len(payload)} bytes (contents redacted)")
             
             try:
                 # Write payload (without response, matching characteristic properties)
@@ -364,7 +338,7 @@ async def provision_wifi(address: str, ssid: str, password: str,
         
         # For 2-write protocol: if format was "SSID only", send password next
         if format_index == 12:  # SSID-only format
-            print(f"\n  Sending password as second write ({_masked_password(password)})...")
+            print(f"\n  Sending password as second write (redacted)...")
             pass_bytes = password.encode("utf-8")
             try:
                 await client.write_gatt_char(MISTY_WRITE_UUID, pass_bytes, response=False)
@@ -390,7 +364,7 @@ async def test_all_formats(address: str, ssid: str, password: str,
     print(f"\nConnecting to {address} for format testing...")
     print(f"  Testing {len(formats)} payload formats with {delay}s delay between each")
     print(f"  SSID: {ssid}")
-    print(f"  Password: {_masked_password(password)}")
+    print("  Password: [redacted]")
     print()
     
     async with BleakClient(address) as client:
@@ -412,7 +386,7 @@ async def test_all_formats(address: str, ssid: str, password: str,
         
         for i, (desc, payload) in enumerate(formats):
             print(f"  [{i:2d}/{len(formats)}] {desc}")
-            print(f"       Payload ({len(payload)}B): {_payload_hex(payload, password, limit=40)}")
+            print(f"       Payload length: {len(payload)} bytes")
             
             try:
                 await client.write_gatt_char(MISTY_WRITE_UUID, payload, response=False)
@@ -431,7 +405,7 @@ async def test_all_formats(address: str, ssid: str, password: str,
                 if changed and changed != "?":
                     print(f"\n  *** FORMAT {i} TRIGGERED A RESPONSE! ***")
                     print(f"  *** Format: {desc}")
-                    print(f"  *** Payload: {_payload_text(payload, password)}")
+                    print("  *** Payload: [redacted]")
                     print(f"  *** New status: {status.hex()}")
                     
                     # Wait longer and check again
@@ -494,7 +468,7 @@ async def provision_with_notifications(address: str, ssid: str, password: str,
         
         # Write credentials
         print(f"\n  Writing format [{format_index}]: {desc}")
-        print(f"    Payload: {_payload_hex(payload, password)}")
+        print(f"    Payload length: {len(payload)} bytes (contents redacted)")
         
         try:
             await client.write_gatt_char(MISTY_WRITE_UUID, payload, response=False)
@@ -588,14 +562,14 @@ Examples:
         return
     
     if args.command == "list-formats":
-        formats = build_payload_formats(args.ssid, args.password)
+        formats = build_payload_formats(args.ssid, "REDACTED")
         print(f"Available payload formats ({len(formats)}):")
-        print(f"  (Example with SSID='{args.ssid}', password='{_masked_password(args.password)}')")
+        print(f"  (Example with SSID='{args.ssid}', password='REDACTED')")
         print()
         for i, (desc, payload) in enumerate(formats):
             print(f"  [{i:2d}] {desc}")
-            print(f"       Hex: {_payload_hex(payload, args.password)}")
-            print(f"       Txt: {_payload_text(payload, args.password)}")
+            print(f"       Hex: {payload.hex()}")
+            print(f"       Txt: {payload.decode('utf-8', errors='replace')}")
             print()
         return
     
