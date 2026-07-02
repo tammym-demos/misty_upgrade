@@ -27,7 +27,11 @@ try:
 except ImportError:
     requests = None
 
-from PIL import Image, ImageDraw
+try:
+    from PIL import Image, ImageDraw
+except ImportError:
+    Image = None
+    ImageDraw = None
 
 
 # --- Constants ---
@@ -303,6 +307,9 @@ def upload_to_misty(misty_ip, filename, data, is_gif=False):
 
 def generate_all(assets_dir: Path, misty_ip: str = None, upload: bool = False):
     """Generate all face assets and optionally upload to Misty."""
+    if Image is None or ImageDraw is None:
+        raise SystemExit("ERROR: Pillow not installed. Run: pip install Pillow")
+
     assets_dir.mkdir(parents=True, exist_ok=True)
 
     print("Generating face assets...")
@@ -361,4 +368,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

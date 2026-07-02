@@ -1,7 +1,7 @@
 # Lessons Learned — Misty II WiFi Provisioning (2026-06-30, updated 2026-07-01)
 
 ## Context
-Attempted to connect Misty II (serial 20194603627, firmware 2.0.2.11660) to a new WiFi network (Pixel hotspot) after her primary network (Home-FE92 / 10.0.0.x) became unstable.
+Attempted to connect Misty II (serial redacted, firmware 2.0.2.11660) to a new WiFi network (phone hotspot) after her primary home network became unstable.
 
 ## Key Findings
 
@@ -16,7 +16,7 @@ Attempted to connect Misty II (serial 20194603627, firmware 2.0.2.11660) to a ne
 - This is the guaranteed serial console path for `set_wifi` commands.
 
 ### 3. BLE provisioning requires bonded/encrypted connection (BLOCKED)
-- Holding **chin capacitive sensor** triggers BLE advertising (device name = last 5 digits of serial: "03627").
+- Holding **chin capacitive sensor** triggers BLE advertising (device name = last 5 digits of serial).
 - BLE address **rotates every advertising session** (observed 3 different addresses: `57:CA:00:43:1D:D4`, `74:64:FE:9B:00:5C`, `5E:19:98:09:B8:7A`, `54:48:4A:95:CF:90`).
 - Manufacturer data: ID `0xFFEE`, 12 bytes static per session.
 - MTU negotiated to 517 bytes.
@@ -56,23 +56,23 @@ Attempted to connect Misty II (serial 20194603627, firmware 2.0.2.11660) to a ne
 - **This only works if Misty is already reachable on some network.**
 
 ### 7. Multi-homed laptop causes routing failures (not AP isolation)
-- After connecting Misty to "Bachelor Pad" via REST API, the laptop couldn't reach her at 192.168.12.210.
-- **Root cause**: Laptop was multi-homed — wired on Home-FE92 (10.0.0.25) and WiFi on Bachelor Pad (192.168.12.140). Windows routed 192.168.12.x traffic through the wired adapter's gateway instead of the WiFi adapter.
-- Confirmed: disconnecting the wired (Home-FE92) adapter allowed the laptop to reach Misty on Bachelor Pad immediately.
-- A phone on Bachelor Pad WiFi could also reach Misty (single-homed, correct routing).
+- After connecting Misty to a secondary WiFi network via REST API, the laptop couldn't reach her on the new subnet.
+- **Root cause**: Laptop was multi-homed — wired on the home network and on WiFi at the same time. Windows routed traffic for the secondary subnet through the wrong interface.
+- Confirmed: disconnecting the wired adapter allowed the laptop to reach Misty on the secondary WiFi immediately.
+- A phone on the same WiFi could also reach Misty (single-homed, correct routing).
 - **Lesson**: When multi-homed, check route metrics. Either disconnect the other adapter or add a static route:
   ```powershell
-  route add 192.168.12.0 mask 255.255.255.0 192.168.12.1 IF <wifi_interface_index>
+  route add <wifi_subnet> mask <subnet_mask> <wifi_gateway> IF <wifi_interface_index>
   ```
-- **Bachelor Pad works fine** for Misty — the issue was purely laptop-side routing, not AP isolation.
-- Removed Bachelor Pad from Misty's saved networks prematurely (can re-add if needed).
+- The secondary WiFi works fine for Misty — the issue was purely laptop-side routing, not AP isolation.
+- Removed that network from Misty's saved networks prematurely (can re-add if needed).
 
-### 8. Pixel hotspot invisible to Misty (cause uncertain)
-- Pixel_1784 was saved in Misty's network list but she could never connect to it.
-- WiFi scan (`GET /api/networks/scan`) does NOT show Pixel_1784 even when hotspot is active and set to dual-band (2.4 + 5GHz).
+### 8. Travel hotspot invisible to Misty (cause uncertain)
+- The phone hotspot was saved in Misty's network list but she could never connect to it.
+- WiFi scan (`GET /api/networks/scan`) does NOT show the hotspot even when it is active and set to dual-band (2.4 + 5GHz).
 - **Root cause TBD** — hotspot was confirmed active and broadcasting on 2.4GHz. Needs further testing.
 - Possible causes: hotspot channel conflict, hidden SSID mode, or Misty firmware quirk with certain hotspot implementations.
-- Note: Misty had two duplicate Pixel_1784 entries (NetworkId 3 with password, NetworkId 7 without) — clean up duplicates when possible.
+- Note: Misty had duplicate hotspot entries — clean up duplicates when possible.
 - **Action**: Test again with hotspot active and Misty in range; try fresh `networks/create` with correct credentials.
 
 ## What Works (confirmed)
@@ -102,7 +102,7 @@ Attempted to connect Misty II (serial 20194603627, firmware 2.0.2.11660) to a ne
 ### Immediate (before next trip)
 1. **Pre-provision WiFi via REST API** — while Misty is on a known network, push your phone hotspot SSID (set to 2.4GHz!):
    ```
-   python misty_wifi.py add "Pixel_1784" "password" --ip 10.0.0.23
+   python misty_wifi.py add "TravelHotspot" "password" --ip <misty-ip>
    ```
 2. **Set Pixel hotspot to 2.4GHz** — Settings > Hotspot > AP band > "2.4 GHz" or "Compatibility mode."
 3. **Get a USB-to-UART adapter** (CP2102 or FTDI breakout, 3.3V TTL) — ~$5 on Amazon. Keep in travel kit as nuclear option.
@@ -128,4 +128,4 @@ Attempted to connect Misty II (serial 20194603627, firmware 2.0.2.11660) to a ne
 - `src/windows-orchestration/misty_discovery.py` — Auto-discovers Misty on local subnets, caches IP
 - `src/windows-orchestration/misty_wifi.py` — WiFi management CLI (add/list/connect/scan/push-all)
 - `src/windows-orchestration/misty_ip.json` — Cached discovery result (gitignored)
-- `src/windows-orchestration/misty_wifi_networks.json.enc` — Encrypted credential store (gitignored)
+- `src/windows-orchestration/misty_wifi_networks.json.enc` — Obfuscated credential store (gitignored)
