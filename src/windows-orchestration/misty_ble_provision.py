@@ -569,7 +569,7 @@ Examples:
         for i, (desc, payload) in enumerate(formats):
             print(f"  [{i:2d}] {desc}")
             print(f"       Hex: {payload.hex()}")
-            print(f"       Txt: {payload.decode('utf-8', errors='replace')}")
+            print("       Txt: [REDACTED - may contain sensitive data]")
             print()
         return
     
