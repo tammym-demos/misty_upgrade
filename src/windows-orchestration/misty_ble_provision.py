@@ -47,115 +47,52 @@ MISTY_READ_UUID = "418f52ab-10c6-42a6-9590-58cccb818f64"
 MISTY_SERIAL_SUFFIX = "03627"  # From serial 20194603627
 
 
-def build_payload_formats(ssid: str, password: str) -> list[tuple[str, bytes]]:
-    """Generate all candidate payload formats for WiFi provisioning.
-    
-    Returns list of (description, payload_bytes) tuples.
-    Based on analysis of Misty companion app (Xamarin/.NET, Plugin.BluetoothLE)
-    and common ESP32 BLE provisioning patterns.
+FORMAT_DESCRIPTIONS = [
+    "JSON lowercase keys",
+    "JSON PascalCase keys",
+    "JSON with securityType WPA2",
+    "JSON PascalCase + SecurityType",
+    "Length-prefixed binary (1-byte lengths)",
+    "Length-prefixed binary (2-byte LE lengths)",
+    "Null-separated (SSID\\0PASS\\0)",
+    "Newline-separated (SSID\\nPASS)",
+    "Pipe-separated (SSID|PASS)",
+    "Comma-separated (SSID,PASS,WPA2)",
+    "Command byte 0x01 + null-separated",
+    "Command 0x01 + length-prefixed",
+    "SSID only (step 1 of 2-write protocol)",
+    "JSON with NetworkId",
+    "TLV format (tag:1=SSID, tag:2=PASS)",
+]
+
+
+def build_payload_formats(ssid: str, password: str) -> list[bytes]:
+    """Generate candidate payload bytes for WiFi provisioning.
+
+    The human-readable format names are kept separately in FORMAT_DESCRIPTIONS so
+    CLI logging can avoid tainting safe output with password-bearing payload data.
     """
-    formats = []
-    
-    # Format 1: JSON with lowercase keys (most commonly referenced)
-    formats.append((
-        "JSON lowercase keys",
-        json.dumps({"ssid": ssid, "password": password}).encode("utf-8")
-    ))
-    
-    # Format 2: JSON with PascalCase keys (matches Misty REST API convention)
-    formats.append((
-        "JSON PascalCase keys",
-        json.dumps({"Ssid": ssid, "Password": password}).encode("utf-8")
-    ))
-    
-    # Format 3: JSON with security type field
-    formats.append((
-        "JSON with securityType WPA2",
-        json.dumps({"ssid": ssid, "password": password, "securityType": "wpa2"}).encode("utf-8")
-    ))
-    
-    # Format 4: JSON PascalCase with security type (matching REST API style)
-    formats.append((
-        "JSON PascalCase + SecurityType",
-        json.dumps({"Ssid": ssid, "Password": password, "SecurityType": "WPA2"}).encode("utf-8")
-    ))
-    
-    # Format 5: Length-prefixed binary (common ESP32 custom protocol)
-    # [ssid_len:1][ssid][pass_len:1][password]
     ssid_bytes = ssid.encode("utf-8")
     pass_bytes = password.encode("utf-8")
-    formats.append((
-        "Length-prefixed binary (1-byte lengths)",
-        struct.pack("B", len(ssid_bytes)) + ssid_bytes +
-        struct.pack("B", len(pass_bytes)) + pass_bytes
-    ))
-    
-    # Format 6: Length-prefixed with 2-byte LE lengths
-    formats.append((
-        "Length-prefixed binary (2-byte LE lengths)",
-        struct.pack("<H", len(ssid_bytes)) + ssid_bytes +
-        struct.pack("<H", len(pass_bytes)) + pass_bytes
-    ))
-    
-    # Format 7: Null-separated (SSID\0PASSWORD\0)
-    formats.append((
-        "Null-separated (SSID\\0PASS\\0)",
-        ssid_bytes + b"\x00" + pass_bytes + b"\x00"
-    ))
-    
-    # Format 8: Newline-separated
-    formats.append((
-        "Newline-separated (SSID\\nPASS)",
-        ssid_bytes + b"\n" + pass_bytes
-    ))
-    
-    # Format 9: Pipe-separated
-    formats.append((
-        "Pipe-separated (SSID|PASS)",
-        ssid_bytes + b"|" + pass_bytes
-    ))
-    
-    # Format 10: Comma-separated with security type
-    formats.append((
-        "Comma-separated (SSID,PASS,WPA2)",
-        ssid_bytes + b"," + pass_bytes + b",WPA2"
-    ))
-    
-    # Format 11: Command-prefixed (0x01 = set wifi)
-    formats.append((
-        "Command byte 0x01 + null-separated",
-        b"\x01" + ssid_bytes + b"\x00" + pass_bytes + b"\x00"
-    ))
-    
-    # Format 12: Command byte + length-prefixed
-    formats.append((
-        "Command 0x01 + length-prefixed",
-        b"\x01" + struct.pack("B", len(ssid_bytes)) + ssid_bytes +
-        struct.pack("B", len(pass_bytes)) + pass_bytes
-    ))
-    
-    # Format 13: Just SSID first (two-step: write SSID, then password separately)
-    formats.append((
-        "SSID only (step 1 of 2-write protocol)",
-        ssid_bytes
-    ))
-    
-    # Format 14: JSON with networkId field
-    formats.append((
-        "JSON with NetworkId",
-        json.dumps({"NetworkId": 0, "Ssid": ssid, "Password": password}).encode("utf-8")
-    ))
-    
-    # Format 15: Protobuf-like TLV (Tag-Length-Value)
-    # Tag 1 = SSID, Tag 2 = Password, Tag 3 = Security
-    formats.append((
-        "TLV format (tag:1=SSID, tag:2=PASS)",
+    return [
+        json.dumps({"ssid": ssid, "password": password}).encode("utf-8"),
+        json.dumps({"Ssid": ssid, "Password": password}).encode("utf-8"),
+        json.dumps({"ssid": ssid, "password": password, "securityType": "wpa2"}).encode("utf-8"),
+        json.dumps({"Ssid": ssid, "Password": password, "SecurityType": "WPA2"}).encode("utf-8"),
+        struct.pack("B", len(ssid_bytes)) + ssid_bytes + struct.pack("B", len(pass_bytes)) + pass_bytes,
+        struct.pack("<H", len(ssid_bytes)) + ssid_bytes + struct.pack("<H", len(pass_bytes)) + pass_bytes,
+        ssid_bytes + b"\x00" + pass_bytes + b"\x00",
+        ssid_bytes + b"\n" + pass_bytes,
+        ssid_bytes + b"|" + pass_bytes,
+        ssid_bytes + b"," + pass_bytes + b",WPA2",
+        b"\x01" + ssid_bytes + b"\x00" + pass_bytes + b"\x00",
+        b"\x01" + struct.pack("B", len(ssid_bytes)) + ssid_bytes + struct.pack("B", len(pass_bytes)) + pass_bytes,
+        ssid_bytes,
+        json.dumps({"NetworkId": 0, "Ssid": ssid, "Password": password}).encode("utf-8"),
         b"\x01" + struct.pack("B", len(ssid_bytes)) + ssid_bytes +
         b"\x02" + struct.pack("B", len(pass_bytes)) + pass_bytes +
-        b"\x03\x01\x03"  # security type = 3 (WPA2)
-    ))
-    
-    return formats
+        b"\x03\x01\x03",
+    ]
 
 
 async def scan_for_misty(timeout: float = 10.0) -> list[dict]:
@@ -274,16 +211,16 @@ async def provision_wifi(address: str, ssid: str, password: str,
     If format_index is specified, uses only that format.
     Otherwise tries format 1 (JSON lowercase) by default.
     """
-    formats = build_payload_formats(ssid, password)
+    payloads = build_payload_formats(ssid, password)
     
     if format_index is not None:
-        if format_index >= len(formats):
-            print(f"ERROR: Format index {format_index} out of range (0-{len(formats)-1})")
+        if format_index >= len(payloads):
+            print(f"ERROR: Format index {format_index} out of range (0-{len(payloads)-1})")
             return False
-        formats = [formats[format_index]]
+        indexes = [format_index]
     else:
         # Default to format 0 (JSON lowercase)
-        formats = [formats[0]]
+        indexes = [0]
     
     print(f"\nConnecting to {address}...")
     
@@ -301,8 +238,10 @@ async def provision_wifi(address: str, ssid: str, password: str,
         except Exception as e:
             print(f"  Initial read error: {e}")
         
-        for desc, payload in formats:
-            print(f"\n  Trying format: {desc}")
+        for current_index in indexes:
+            payload = payloads[current_index]
+            desc = FORMAT_DESCRIPTIONS[current_index]
+            print(f"\n  Trying format [{current_index}]: {desc}")
             print(f"    Payload length: {len(payload)} bytes (contents redacted)")
             
             try:
@@ -359,10 +298,10 @@ async def test_all_formats(address: str, ssid: str, password: str,
     WARNING: This sends real WiFi credentials. Use a test network if possible.
     The robot may connect to WiFi mid-test if a format works.
     """
-    formats = build_payload_formats(ssid, password)
+    payloads = build_payload_formats(ssid, password)
     
     print(f"\nConnecting to {address} for format testing...")
-    print(f"  Testing {len(formats)} payload formats with {delay}s delay between each")
+    print(f"  Testing {len(payloads)} payload formats with {delay}s delay between each")
     print(f"  SSID: {ssid}")
     print("  Password: [redacted]")
     print()
@@ -384,8 +323,9 @@ async def test_all_formats(address: str, ssid: str, password: str,
         
         print()
         
-        for i, (desc, payload) in enumerate(formats):
-            print(f"  [{i:2d}/{len(formats)}] {desc}")
+        for i, payload in enumerate(payloads):
+            desc = FORMAT_DESCRIPTIONS[i]
+            print(f"  [{i:2d}/{len(payloads)}] {desc}")
             print(f"       Payload length: {len(payload)} bytes")
             
             try:
@@ -433,8 +373,9 @@ async def provision_with_notifications(address: str, ssid: str, password: str,
     Some BLE protocols require subscribing to notifications to receive
     status updates rather than polling via read.
     """
-    formats = build_payload_formats(ssid, password)
-    desc, payload = formats[format_index]
+    payloads = build_payload_formats(ssid, password)
+    desc = FORMAT_DESCRIPTIONS[format_index]
+    payload = payloads[format_index]
     
     notifications = []
     
@@ -562,11 +503,12 @@ Examples:
         return
     
     if args.command == "list-formats":
-        formats = build_payload_formats(args.ssid, "REDACTED")
-        print(f"Available payload formats ({len(formats)}):")
+        payloads = build_payload_formats(args.ssid, "REDACTED")
+        print(f"Available payload formats ({len(payloads)}):")
         print(f"  (Example with SSID='{args.ssid}', password='REDACTED')")
         print()
-        for i, (desc, payload) in enumerate(formats):
+        for i, payload in enumerate(payloads):
+            desc = FORMAT_DESCRIPTIONS[i]
             print(f"  [{i:2d}] {desc}")
             print(f"       Hex: {payload.hex()}")
             print("       Txt: [REDACTED - may contain sensitive data]")
