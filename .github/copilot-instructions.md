@@ -59,7 +59,7 @@ Live tests require services/hardware and are marked `live` in `pytest.ini`.
 
 ## Runtime conventions
 
-- Model stack: chat `Phi-3.5-mini-instruct-openvino-gpu:2`, STT `openai-whisper-tiny-generic-cpu:3`, TTS Kokoro-ONNX primary with pyttsx3 fallback.
+- Model stack: chat `Phi-3.5-mini-instruct-generic-cpu:2`, STT `openai-whisper-tiny-generic-cpu:3`, TTS Kokoro-ONNX primary with pyttsx3 fallback.
 - Keep only `phi-3.5-mini` loaded in Foundry during normal operation; unload stray models such as `phi-4-mini`.
 - Latency logs use `[Pipeline Xms] STT=X LLM=X TTS=X history=N fallback=F cached=C`.
 - LED scheme: green ready/recording cue, orange wake/prep, blue processing, purple playback, cyan follow-up listening, yellow warning/recovery, off charging, red error.

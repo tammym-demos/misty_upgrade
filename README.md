@@ -21,11 +21,15 @@ npx . status
 npx . stop
 ```
 
-The CLI reads `src\windows-orchestration\.env` when present. Startup loads `Phi-3.5-mini-instruct-openvino-gpu:2` into Foundry Local with a 1-hour TTL before starting the controller, so the first chat does not pay model-load latency. Before starting the controller, it checks Misty's REST API at `http://<MISTY_IP>/api/device`. If the configured IP is stale, it scans local private IPv4 `/24` networks for Misty's device API, stores the discovered IP and broadcast/reverse-DNS name in `.misty-services.json`, and reuses that address next time. Override common settings inline:
+The CLI reads `src\windows-orchestration\.env` when present. Startup loads `Phi-3.5-mini-instruct-generic-cpu:2` into Foundry Local with a 1-hour TTL before starting the controller, so the first chat does not pay model-load latency. Before starting the controller, it checks Misty's REST API at `http://<MISTY_IP>/api/device`. If the configured IP is stale, it scans local private IPv4 `/24` networks for Misty's device API, stores the discovered IP and broadcast/reverse-DNS name in `.misty-services.json`, and reuses that address next time. Override common settings inline:
 
 ```powershell
 npx . start --misty-ip 10.0.0.44 --orchestration-url http://10.0.0.58:5000
 ```
+
+On a new computer, `npx . start` runs a prerequisite preflight before launching services. It checks Python, the Python packages in `src\windows-orchestration\requirements.txt`, and the Foundry Local CLI. When a required install can be handled safely, the CLI prompts before running it. Use `--yes` for unattended installs or `--no-install` to fail fast with the exact install command.
+
+On Windows ARM64 machines, use a Windows x64 Python runtime for the orchestration service. `faster-whisper` depends on `ctranslate2`, which does not publish Windows ARM64 pip wheels, so the native ARM64 Python installer will fail during dependency installation. If a side-by-side user install exists at `$env:LOCALAPPDATA\Programs\Python\Python312-x64\python.exe`, `npx . start` selects it automatically.
 
 Manual startup is also supported — see [Quick Start](#quick-start).
 
@@ -115,7 +119,7 @@ Movement adds a guarded `MOVING` state with battery, bump, hazard, and sensor fr
 |---|---|---|
 | Wake word | openWakeWord | Runs on the laptop mic via `sounddevice`. |
 | STT | faster-whisper / whisper-tiny | Runs in-process in `orchestration_service.py`; not served by Foundry Local. |
-| Chat | Phi-3.5-mini | Served by Foundry Local using full model ID `Phi-3.5-mini-instruct-openvino-gpu:2`. |
+| Chat | Phi-3.5-mini | Served by Foundry Local using full model ID `Phi-3.5-mini-instruct-generic-cpu:2`. |
 | TTS | Kokoro-ONNX | Primary offline neural TTS, in-process in the orchestration service. |
 | TTS fallback | pyttsx3 / Windows SAPI5 | Used when Kokoro is unavailable. |
 

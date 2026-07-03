@@ -201,13 +201,13 @@ foundry service ps
 # Expected output:
 # Models running in service:
 #     Alias                          Model ID
-# 🟢  phi-3.5-mini                   Phi-3.5-mini-instruct-openvino-gpu:2
+# 🟢  phi-3.5-mini                   Phi-3.5-mini-instruct-generic-cpu:2
 
 # Check the full model catalog (replace PORT with the actual port)
 Invoke-RestMethod -Uri http://localhost:PORT/openai/models
 
 # Returns a plain JSON array of model ID strings, e.g.:
-# ["openai-whisper-tiny-generic-cpu:3", "Phi-3.5-mini-instruct-openvino-gpu:2"]
+# ["openai-whisper-tiny-generic-cpu:3", "Phi-3.5-mini-instruct-generic-cpu:2"]
 #
 # NOTE: Kokoro TTS will NOT appear here — it runs in-process in the
 # orchestration service, not through Foundry Local.

@@ -32,7 +32,7 @@ Misty cannot run inference: Snapdragon 820 + 410, 2 GB RAM, final firmware, degr
 
 | Role | Model / implementation | Notes |
 |---|---|---|
-| Chat | `Phi-3.5-mini-instruct-openvino-gpu:2` | Foundry Local, alias `phi-3.5-mini`. |
+| Chat | `Phi-3.5-mini-instruct-generic-cpu:2` | Foundry Local, alias `phi-3.5-mini`. |
 | STT | `openai-whisper-tiny-generic-cpu:3` | faster-whisper in-process, not Foundry REST. |
 | TTS | Kokoro-ONNX | Primary offline neural TTS. |
 | TTS fallback | pyttsx3 / SAPI5 | Windows fallback only. |
