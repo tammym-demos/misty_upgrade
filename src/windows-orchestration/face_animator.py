@@ -65,110 +65,60 @@ class AnimationSpec:
         return len(self.frames) <= 1
 
 
-# Default animation specs — multi-frame for active states (Phase 3).
-# States that benefit from animation use 2-4 frame loops at validated FPS.
-# States that should remain calm/static keep single-frame specs.
+# Default animation specs — custom face assets with firmware-native GIF looping.
+# GIFs loop on-device with zero REST traffic. Single-frame specs suffice because
+# the firmware handles animation internally once the GIF is displayed.
 DEFAULT_ANIMATION_MAP: dict[str, AnimationSpec] = {
     "DISCONNECTED": AnimationSpec(
-        frames=("e_Sadness.jpg",),
-        static_fallback="e_Sadness.jpg",
+        frames=("face_talking_sad.gif",),
+        static_fallback="face_talking_sad.gif",
     ),
     "IDLE": AnimationSpec(
-        # Slow content eye-shift — Misty looks alive while waiting
-        frames=(
-            "e_DefaultContent.jpg",
-            "e_DefaultContent.jpg",  # hold center longer
-            "e_ContentLeft.jpg",
-            "e_DefaultContent.jpg",
-            "e_DefaultContent.jpg",  # hold center longer
-            "e_ContentRight.jpg",
-        ),
-        fps=0.5,
-        loop=True,
-        static_fallback="e_DefaultContent.jpg",
+        # Custom idle GIF — blink + eye shift, firmware loops natively
+        frames=("face_idle.gif",),
+        static_fallback="face_idle.gif",
     ),
     "RECORDING": AnimationSpec(
-        # Wide-eyed attentive — slight blink cycle while listening to speech
-        frames=(
-            "e_Admiration.jpg",
-            "e_Admiration.jpg",
-            "e_SystemBlinkLarge.jpg",
-            "e_Admiration.jpg",
-        ),
-        fps=1.0,
-        loop=True,
-        static_fallback="e_Admiration.jpg",
+        # Attentive listening face — wide eyes, slightly open mouth
+        frames=("face_listening.png",),
+        static_fallback="face_listening.png",
     ),
     "PROCESSING": AnimationSpec(
-        # Thinking — eyebrow shift suggesting pondering
-        frames=(
-            "e_Contempt.jpg",
-            "e_ContentLeft.jpg",
-            "e_Contempt.jpg",
-            "e_ContentRight.jpg",
-        ),
-        fps=1.0,
-        loop=True,
-        static_fallback="e_Contempt.jpg",
+        # Thinking eyes GIF — eyes shift side to side
+        frames=("face_processing.gif",),
+        static_fallback="face_processing.gif",
     ),
     "PLAYING": AnimationSpec(
-        # Expressive speaking — animated joyful expressions
-        frames=(
-            "e_EcstacyHilarious.jpg",
-            "e_Joy.jpg",
-            "e_EcstacyHilarious.jpg",
-            "e_JoyGoofy.jpg",
-        ),
-        fps=2.0,
-        loop=True,
-        static_fallback="e_EcstacyHilarious.jpg",
+        # Talking — default neutral, controller can override with emotion variant
+        frames=("face_talking_neutral.gif",),
+        static_fallback="face_talking_neutral.gif",
     ),
     "LISTENING": AnimationSpec(
-        # Warm, attentive — subtle shifts showing engagement
-        frames=(
-            "e_Joy.jpg",
-            "e_Joy.jpg",
-            "e_Admiration.jpg",
-            "e_Joy.jpg",
-        ),
-        fps=0.75,
-        loop=True,
-        static_fallback="e_Joy.jpg",
+        # Follow-up listening — same attentive face
+        frames=("face_listening.png",),
+        static_fallback="face_listening.png",
     ),
     "MOVING": AnimationSpec(
-        frames=("e_Joy2.jpg",),
-        static_fallback="e_Joy2.jpg",
+        frames=("face_talking_excited.gif",),
+        static_fallback="face_talking_excited.gif",
     ),
     "REARMING": AnimationSpec(
-        frames=("e_DefaultContent.jpg",),
-        static_fallback="e_DefaultContent.jpg",
+        frames=("face_idle.gif",),
+        static_fallback="face_idle.gif",
     ),
     "REBOOTING": AnimationSpec(
-        # Sleepy transition — going to sleep for reboot
-        frames=(
-            "e_Sleepy.jpg",
-            "e_Sleepy2.jpg",
-            "e_SleepingZZZ.jpg",
-        ),
-        fps=0.5,
-        loop=True,
-        static_fallback="e_ContentLeft.jpg",
+        # Sad face during reboot — she's going to sleep
+        frames=("face_talking_sad.gif",),
+        static_fallback="face_talking_sad.gif",
     ),
     "CHARGING": AnimationSpec(
-        # Gentle sleeping cycle
-        frames=(
-            "e_Sleeping.jpg",
-            "e_SleepingZZZ.jpg",
-            "e_Sleeping.jpg",
-            "e_Sleepy4.jpg",
-        ),
-        fps=0.3,
-        loop=True,
-        static_fallback="e_Sleeping.jpg",
+        # Idle face while charging
+        frames=("face_idle.gif",),
+        static_fallback="face_idle.gif",
     ),
     "ERROR": AnimationSpec(
-        frames=("e_Sadness.jpg",),
-        static_fallback="e_Sadness.jpg",
+        frames=("face_talking_sad.gif",),
+        static_fallback="face_talking_sad.gif",
     ),
 }
 

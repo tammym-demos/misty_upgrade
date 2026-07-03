@@ -5,7 +5,7 @@ Uses Kokoro TTS to generate diverse synthetic training data, then trains
 an openWakeWord-compatible DNN and exports it as ONNX.
 
 Prerequisites:
-    pip install torch openwakeword kokoro-onnx scipy numpy tqdm
+    pip install torch openwakeword kokoro-onnx scipy numpy tqdm onnx
 
 Usage:
     python tools/train_hey_misty.py
@@ -409,6 +409,22 @@ def export_onnx(model: nn.Module, input_shape: tuple, output_path: Path):
         output_names=["hey_misty"],
         dynamic_axes={"input": {0: "batch_size"}},
     )
+
+    # Ensure weights are embedded inline (not in a separate .data file).
+    # Newer PyTorch versions may use external data format by default, which
+    # splits the model into .onnx + .onnx.data files. Our model is tiny
+    # (~14KB) so we always inline it for simpler distribution.
+    try:
+        import onnx
+    except ImportError as exc:
+        raise SystemExit("ERROR: onnx not installed. Run: pip install onnx") from exc
+    onnx_model = onnx.load(str(output_path), load_external_data=True)
+    onnx.save_model(onnx_model, str(output_path), save_as_external_data=False)
+    # Clean up any stray .data file from the initial export
+    data_file = output_path.with_suffix(".onnx.data")
+    if data_file.exists():
+        data_file.unlink()
+
     logger.info(f"Exported ONNX model to {output_path} ({output_path.stat().st_size / 1024:.1f} KB)")
 
 

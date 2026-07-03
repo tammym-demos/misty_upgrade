@@ -58,7 +58,7 @@ class TestFaceAnimatorDisabled:
         # Should push the static fallback image
         mock_post.assert_called_with(
             "http://10.0.0.23/api/images/display",
-            json={"FileName": "e_DefaultContent.jpg", "Alpha": 1},
+            json={"FileName": "face_idle.gif", "Alpha": 1},
             timeout=pytest.approx(0.75, abs=0.1),
         )
         animator.stop()
@@ -92,8 +92,8 @@ class TestFaceAnimatorDisabled:
         # Should have pushed two different images
         calls = mock_post.call_args_list
         filenames = [c.kwargs["json"]["FileName"] for c in calls]
-        assert "e_DefaultContent.jpg" in filenames
-        assert "e_Contempt.jpg" in filenames
+        assert "face_idle.gif" in filenames
+        assert "face_processing.gif" in filenames
         animator.stop()
 
 
@@ -154,8 +154,8 @@ class TestFaceAnimatorEnabled:
         # Verify both states' images were pushed
         calls = mock_post.call_args_list
         filenames = [c.kwargs["json"]["FileName"] for c in calls]
-        assert "e_DefaultContent.jpg" in filenames
-        assert "e_Contempt.jpg" in filenames
+        assert "face_idle.gif" in filenames
+        assert "face_processing.gif" in filenames
         animator.stop()
 
     @patch("face_animator.requests.post")
@@ -289,19 +289,12 @@ class TestDefaultAnimationMap:
             )
 
     def test_all_initial_specs_are_single_frame(self):
-        """Phase 3: active states should be multi-frame, others single-frame."""
-        multi_frame_states = {"IDLE", "RECORDING", "PROCESSING", "PLAYING", "LISTENING", "REBOOTING", "CHARGING"}
-        single_frame_states = {"DISCONNECTED", "MOVING", "REARMING", "ERROR"}
-
+        """With firmware-native GIF looping, all specs are single-frame
+        (one GIF/PNG pushed, firmware handles animation)."""
         for state_key, spec in DEFAULT_ANIMATION_MAP.items():
-            if state_key in multi_frame_states:
-                assert not spec.is_single_frame, (
-                    f"State {state_key} should be multi-frame in Phase 3"
-                )
-            elif state_key in single_frame_states:
-                assert spec.is_single_frame, (
-                    f"State {state_key} should remain single-frame"
-                )
+            assert spec.is_single_frame, (
+                f"State {state_key} should be single-frame (firmware loops GIFs)"
+            )
 
 
 class TestDisableRegression:
@@ -330,12 +323,12 @@ class TestDisableRegression:
         filenames = [c.kwargs["json"]["FileName"] for c in calls]
 
         expected = [
-            "e_DefaultContent.jpg",  # IDLE
-            "e_Admiration.jpg",      # RECORDING
-            "e_Contempt.jpg",        # PROCESSING
-            "e_EcstacyHilarious.jpg",  # PLAYING
-            "e_Joy.jpg",             # LISTENING
-            "e_DefaultContent.jpg",  # IDLE (back)
+            "face_idle.gif",              # IDLE
+            "face_listening.png",         # RECORDING
+            "face_processing.gif",        # PROCESSING
+            "face_talking_neutral.gif",   # PLAYING
+            "face_listening.png",         # LISTENING
+            "face_idle.gif",              # IDLE (back)
         ]
         assert filenames == expected
         animator.stop()

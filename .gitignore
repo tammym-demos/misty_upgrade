@@ -11,6 +11,8 @@ logs/services/
 
 # Generated response audio
 src/windows-orchestration/responses/
+src/windows-orchestration/misty_ip.json
+src/windows-orchestration/misty_wifi_networks.json.enc
 
 # Python
 __pycache__/
