@@ -246,10 +246,26 @@ class FaceAnimator:
 
         When False, the animator resolves frames to built-in firmware faces
         (e_*.jpg) instead of the custom face_* assets. Typically set once at
-        startup after the controller verifies/uploads the custom assets.
+        startup after the controller verifies/uploads the custom assets. If the
+        availability changes while a frame is being shown, the current frame is
+        refreshed so the display reflects the new source immediately.
         """
         with self._lock:
+            if self._custom_faces_available == bool(available):
+                return  # no change
             self._custom_faces_available = bool(available)
+            active_state = self._target_state
+
+        if active_state is None:
+            return  # nothing displayed yet
+
+        if not self._enabled:
+            frame = self._resolve_single_frame(active_state)
+            if frame:
+                self._push_frame(frame)
+            return
+
+        self._state_changed.set()
 
     def start(self):
         """Start the animation thread."""

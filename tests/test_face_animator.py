@@ -490,3 +490,37 @@ class TestFaceAnimatorBuiltinFallback:
             assert emotion in BUILTIN_EMOTION_FALLBACK, (
                 f"Emotion {emotion} missing from BUILTIN_EMOTION_FALLBACK"
             )
+
+    @patch("face_animator.requests.post")
+    def test_availability_change_refreshes_current_frame(self, mock_post):
+        """Toggling custom-face availability refreshes the displayed frame."""
+        mock_post.return_value = MagicMock(status_code=200)
+        animator = FaceAnimator("http://10.0.0.23", enabled=False)
+        animator.start()
+
+        animator.set_state("IDLE")
+        time.sleep(0.1)
+        # Now custom assets become unavailable — frame should refresh to builtin
+        animator.set_custom_faces_available(False)
+        time.sleep(0.1)
+
+        filenames = [c.kwargs["json"]["FileName"] for c in mock_post.call_args_list]
+        assert "face_idle.gif" in filenames
+        assert BUILTIN_FALLBACK_MAP["IDLE"] in filenames
+        animator.stop()
+
+    @patch("face_animator.requests.post")
+    def test_availability_no_change_no_extra_push(self, mock_post):
+        """Setting the same availability value does not push a new frame."""
+        mock_post.return_value = MagicMock(status_code=200)
+        animator = FaceAnimator("http://10.0.0.23", enabled=False)
+        animator.start()
+
+        animator.set_state("IDLE")
+        time.sleep(0.1)
+        count_before = mock_post.call_count
+        animator.set_custom_faces_available(True)  # already True (default)
+        time.sleep(0.1)
+
+        assert mock_post.call_count == count_before
+        animator.stop()
