@@ -78,21 +78,10 @@ FACE_ANIMATION_MIN_INTERVAL_S = float(os.getenv("FACE_ANIMATION_MIN_INTERVAL_S",
 # Custom face assets uploaded to Misty at startup (#110). These are the
 # Pillow-generated faces referenced by FaceAnimator / display flows. They are
 # uploaded idempotently at startup; if any are unavailable, the animator falls
-# back to built-in firmware faces.
-FACE_ASSETS_DIR = os.getenv(
-    "FACE_ASSETS_DIR",
-    os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "assets")),
-)
-REQUIRED_FACE_ASSETS = (
-    "face_idle.gif",
-    "face_listening.png",
-    "face_processing.gif",
-    "face_talking_neutral.gif",
-    "face_talking_happy.gif",
-    "face_talking_excited.gif",
-    "face_talking_sad.gif",
-    "face_talking_curious.gif",
-)
+# back to built-in firmware faces. Defaults come from config_defaults (single
+# source of truth); FACE_ASSETS_DIR remains env-overridable.
+FACE_ASSETS_DIR = os.getenv("FACE_ASSETS_DIR", config_defaults.FACE_ASSETS_DIR)
+REQUIRED_FACE_ASSETS = config_defaults.REQUIRED_FACE_ASSETS
 
 # Keyphrase watchdog — detects silent failures and auto-recovers
 WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", str(config_defaults.WATCHDOG_IDLE_TIMEOUT_S)))  # 90s after rearm with no wake event
@@ -2410,7 +2399,6 @@ class MistyController:
 
         # Upload to Misty and play — animated, looking at user
         emotion = result.get("emotion", "neutral")
-        talking_face = f"face_talking_{emotion}.gif"
         # Route emotion through the animator so it selects the matching talking
         # face (and applies built-in fallback if custom assets are unavailable).
         if self._face_animator:
@@ -2418,7 +2406,8 @@ class MistyController:
         self.set_state(State.PLAYING)
         self.set_led(148, 0, 211)  # purple = speaking
         if not self._face_animator:
-            self.display_image(talking_face)
+            from face_animator import talking_face_for_emotion  # noqa: PLC0415
+            self.display_image(talking_face_for_emotion(emotion))
         self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # face forward — eye contact
 
         play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
@@ -2575,13 +2564,13 @@ class MistyController:
 
             # Play the response
             emotion = result.get("emotion", "neutral")
-            talking_face = f"face_talking_{emotion}.gif"
             if self._face_animator:
                 self._face_animator.set_emotion(emotion)
             self.set_state(State.PLAYING)
             self.set_led(148, 0, 211)  # purple = speaking
             if not self._face_animator:
-                self.display_image(talking_face)
+                from face_animator import talking_face_for_emotion  # noqa: PLC0415
+                self.display_image(talking_face_for_emotion(emotion))
             self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # face forward
 
             play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
