@@ -522,6 +522,7 @@ def orchestrate():
                 "movement": movement,
                 "user_text": user_text,
                 "response_text": ack_text,
+                "emotion": "excited",
                 "pipeline_ms": round(total_ms),
                 "tts_cached": tts_result.get("tts_cached", False),
             }

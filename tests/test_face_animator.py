@@ -17,7 +17,16 @@ import pytest
 # Add source directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration"))
 
-from face_animator import FaceAnimator, AnimationSpec, DEFAULT_ANIMATION_MAP
+from face_animator import (
+    FaceAnimator,
+    AnimationSpec,
+    DEFAULT_ANIMATION_MAP,
+    VALID_EMOTIONS,
+    DEFAULT_EMOTION,
+    talking_face_for_emotion,
+    BUILTIN_FALLBACK_MAP,
+    BUILTIN_EMOTION_FALLBACK,
+)
 
 
 class TestAnimationSpec:
@@ -332,3 +341,152 @@ class TestDisableRegression:
         ]
         assert filenames == expected
         animator.stop()
+
+
+class TestTalkingFaceForEmotion:
+    """Unit tests for the emotion → talking-face filename helper (#110)."""
+
+    def test_valid_emotions_map_to_expected_files(self):
+        for emotion in VALID_EMOTIONS:
+            assert talking_face_for_emotion(emotion) == f"face_talking_{emotion}.gif"
+
+    def test_unknown_emotion_falls_back_to_neutral(self):
+        assert talking_face_for_emotion("furious") == "face_talking_neutral.gif"
+        assert talking_face_for_emotion("") == "face_talking_neutral.gif"
+        assert talking_face_for_emotion(None) == "face_talking_neutral.gif"
+
+    def test_emotion_is_case_insensitive(self):
+        assert talking_face_for_emotion("HAPPY") == "face_talking_happy.gif"
+
+
+class TestFaceAnimatorEmotionSelection:
+    """Tests for emotion-driven PLAYING face selection (#110)."""
+
+    def test_default_emotion_is_neutral(self):
+        animator = FaceAnimator("http://10.0.0.23", enabled=False)
+        assert animator.emotion == DEFAULT_EMOTION
+
+    @patch("face_animator.requests.post")
+    def test_set_emotion_before_playing_selects_variant(self, mock_post):
+        mock_post.return_value = MagicMock(status_code=200)
+        animator = FaceAnimator("http://10.0.0.23", enabled=False)
+        animator.start()
+
+        animator.set_emotion("happy")
+        animator.set_state("PLAYING")
+        time.sleep(0.1)
+
+        filenames = [c.kwargs["json"]["FileName"] for c in mock_post.call_args_list]
+        assert "face_talking_happy.gif" in filenames
+        assert "face_talking_neutral.gif" not in filenames
+        animator.stop()
+
+    @patch("face_animator.requests.post")
+    def test_set_state_with_emotion_arg(self, mock_post):
+        mock_post.return_value = MagicMock(status_code=200)
+        animator = FaceAnimator("http://10.0.0.23", enabled=False)
+        animator.start()
+
+        animator.set_state("PLAYING", emotion="sad")
+        time.sleep(0.1)
+
+        filenames = [c.kwargs["json"]["FileName"] for c in mock_post.call_args_list]
+        assert "face_talking_sad.gif" in filenames
+        animator.stop()
+
+    @patch("face_animator.requests.post")
+    def test_emotion_change_while_playing_refreshes_face(self, mock_post):
+        """Changing emotion during PLAYING pushes the new talking face."""
+        mock_post.return_value = MagicMock(status_code=200)
+        animator = FaceAnimator("http://10.0.0.23", enabled=False)
+        animator.start()
+
+        animator.set_state("PLAYING", emotion="neutral")
+        time.sleep(0.1)
+        animator.set_emotion("excited")
+        time.sleep(0.1)
+
+        filenames = [c.kwargs["json"]["FileName"] for c in mock_post.call_args_list]
+        assert "face_talking_neutral.gif" in filenames
+        assert "face_talking_excited.gif" in filenames
+        animator.stop()
+
+    @patch("face_animator.requests.post")
+    def test_invalid_emotion_coerced_to_neutral(self, mock_post):
+        mock_post.return_value = MagicMock(status_code=200)
+        animator = FaceAnimator("http://10.0.0.23", enabled=False)
+        animator.start()
+
+        animator.set_emotion("furious")
+        animator.set_state("PLAYING")
+        time.sleep(0.1)
+
+        assert animator.emotion == "neutral"
+        filenames = [c.kwargs["json"]["FileName"] for c in mock_post.call_args_list]
+        assert "face_talking_neutral.gif" in filenames
+        animator.stop()
+
+    @patch("face_animator.requests.post")
+    def test_emotion_does_not_affect_non_playing_states(self, mock_post):
+        """A non-PLAYING state ignores emotion and uses its own asset."""
+        mock_post.return_value = MagicMock(status_code=200)
+        animator = FaceAnimator("http://10.0.0.23", enabled=False)
+        animator.start()
+
+        animator.set_emotion("happy")
+        animator.set_state("IDLE")
+        time.sleep(0.1)
+
+        filenames = [c.kwargs["json"]["FileName"] for c in mock_post.call_args_list]
+        assert filenames == ["face_idle.gif"]
+        animator.stop()
+
+
+class TestFaceAnimatorBuiltinFallback:
+    """Tests for built-in firmware fallback when custom assets unavailable (#110)."""
+
+    def test_default_custom_faces_available(self):
+        animator = FaceAnimator("http://10.0.0.23", enabled=False)
+        assert animator.custom_faces_available is True
+
+    @patch("face_animator.requests.post")
+    def test_fallback_uses_builtin_for_states(self, mock_post):
+        mock_post.return_value = MagicMock(status_code=200)
+        animator = FaceAnimator("http://10.0.0.23", enabled=False)
+        animator.set_custom_faces_available(False)
+        animator.start()
+
+        animator.set_state("IDLE")
+        time.sleep(0.1)
+
+        filenames = [c.kwargs["json"]["FileName"] for c in mock_post.call_args_list]
+        assert filenames == [BUILTIN_FALLBACK_MAP["IDLE"]]
+        assert not filenames[0].startswith("face_")
+        animator.stop()
+
+    @patch("face_animator.requests.post")
+    def test_fallback_uses_builtin_emotion_for_playing(self, mock_post):
+        mock_post.return_value = MagicMock(status_code=200)
+        animator = FaceAnimator("http://10.0.0.23", enabled=False)
+        animator.set_custom_faces_available(False)
+        animator.start()
+
+        animator.set_state("PLAYING", emotion="sad")
+        time.sleep(0.1)
+
+        filenames = [c.kwargs["json"]["FileName"] for c in mock_post.call_args_list]
+        assert filenames == [BUILTIN_EMOTION_FALLBACK["sad"]]
+        animator.stop()
+
+    def test_builtin_maps_cover_all_states(self):
+        from face_animator import AnimationState
+        for state in AnimationState:
+            assert state.value in BUILTIN_FALLBACK_MAP, (
+                f"State {state.value} missing from BUILTIN_FALLBACK_MAP"
+            )
+
+    def test_builtin_emotion_map_covers_all_emotions(self):
+        for emotion in VALID_EMOTIONS:
+            assert emotion in BUILTIN_EMOTION_FALLBACK, (
+                f"Emotion {emotion} missing from BUILTIN_EMOTION_FALLBACK"
+            )

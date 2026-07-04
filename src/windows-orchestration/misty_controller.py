@@ -75,6 +75,25 @@ USE_FACE_ANIMATION = os.getenv("USE_FACE_ANIMATION", "").lower() in ("1", "true"
 FACE_ANIMATION_MAX_FPS = float(os.getenv("FACE_ANIMATION_MAX_FPS", str(config_defaults.FACE_ANIMATION_MAX_FPS)))
 FACE_ANIMATION_MIN_INTERVAL_S = float(os.getenv("FACE_ANIMATION_MIN_INTERVAL_S", str(config_defaults.FACE_ANIMATION_MIN_INTERVAL_S)))
 
+# Custom face assets uploaded to Misty at startup (#110). These are the
+# Pillow-generated faces referenced by FaceAnimator / display flows. They are
+# uploaded idempotently at startup; if any are unavailable, the animator falls
+# back to built-in firmware faces.
+FACE_ASSETS_DIR = os.getenv(
+    "FACE_ASSETS_DIR",
+    os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "assets")),
+)
+REQUIRED_FACE_ASSETS = (
+    "face_idle.gif",
+    "face_listening.png",
+    "face_processing.gif",
+    "face_talking_neutral.gif",
+    "face_talking_happy.gif",
+    "face_talking_excited.gif",
+    "face_talking_sad.gif",
+    "face_talking_curious.gif",
+)
+
 # Keyphrase watchdog — detects silent failures and auto-recovers
 WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", str(config_defaults.WATCHDOG_IDLE_TIMEOUT_S)))  # 90s after rearm with no wake event
 WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", str(config_defaults.WATCHDOG_ESCALATE_TIMEOUT_S)))  # 60s after recovery attempt
@@ -902,6 +921,95 @@ class MistyController:
                 logger.info(f"Uploaded '{filename}' to Misty ({len(audio_data)} bytes)")
             except Exception as e:
                 logger.warning(f"Failed to upload '{filename}': {e}")
+
+    def _get_misty_image_names(self) -> set[str]:
+        """Return the set of image filenames currently stored on Misty.
+
+        Best-effort: returns an empty set if the inventory cannot be read
+        (e.g., device unreachable), which causes ensure_face_assets() to
+        attempt uploads.
+        """
+        result = self.misty_get("/api/images")
+        if not result:
+            return set()
+        images = result.get("result", []) or []
+        names: set[str] = set()
+        for img in images:
+            if isinstance(img, dict):
+                name = img.get("name") or img.get("Name")
+                if name:
+                    names.add(name)
+            elif isinstance(img, str):
+                names.add(img)
+        return names
+
+    def _upload_face_image(self, filename: str, local_path: str) -> bool:
+        """Upload a single image asset to Misty via SaveImage. Best-effort."""
+        try:
+            with open(local_path, "rb") as f:
+                data = f.read()
+            if len(data) < 100:
+                logger.warning(f"Face asset '{filename}' too small: {len(data)} bytes")
+                return False
+            image_b64 = base64.b64encode(data).decode("ascii")
+            result = self.misty_post("/api/images", {
+                "FileName": filename,
+                "Data": image_b64,
+                "ImmediatelyApply": False,
+                "OverwriteExisting": True,
+            })
+            if result is None:
+                logger.warning(f"Face asset upload failed (no response): {filename}")
+                return False
+            logger.info(f"Uploaded face asset '{filename}' to Misty ({len(data)} bytes)")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to upload face asset '{filename}': {e}")
+            return False
+
+    def ensure_face_assets(self) -> bool:
+        """Idempotently ensure custom face assets are present on Misty (#110).
+
+        Skips assets already on the device (checked via the image inventory),
+        uploads any that are missing from the local ``assets`` directory, and
+        informs the FaceAnimator whether all required custom faces are
+        available. When some are unavailable, the animator falls back to
+        built-in firmware faces.
+
+        Returns True if every required custom face is available on the device
+        (already present or successfully uploaded); False otherwise.
+        """
+        inventory = self._get_misty_image_names()
+        uploaded = 0
+        skipped = 0
+        all_available = True
+
+        for filename in REQUIRED_FACE_ASSETS:
+            if filename in inventory:
+                skipped += 1
+                continue
+            local_path = os.path.join(FACE_ASSETS_DIR, filename)
+            if not os.path.exists(local_path):
+                logger.warning(
+                    f"Custom face asset missing locally: {local_path} — "
+                    "will rely on built-in fallback"
+                )
+                all_available = False
+                continue
+            if self._upload_face_image(filename, local_path):
+                uploaded += 1
+            else:
+                all_available = False
+
+        logger.info(
+            f"Face assets: {skipped} already present, {uploaded} uploaded, "
+            f"custom_available={all_available}"
+        )
+
+        if self._face_animator:
+            self._face_animator.set_custom_faces_available(all_available)
+
+        return all_available
 
     def check_orchestration_health(self) -> bool:
         try:
@@ -2303,9 +2411,14 @@ class MistyController:
         # Upload to Misty and play — animated, looking at user
         emotion = result.get("emotion", "neutral")
         talking_face = f"face_talking_{emotion}.gif"
+        # Route emotion through the animator so it selects the matching talking
+        # face (and applies built-in fallback if custom assets are unavailable).
+        if self._face_animator:
+            self._face_animator.set_emotion(emotion)
         self.set_state(State.PLAYING)
         self.set_led(148, 0, 211)  # purple = speaking
-        self.display_image(talking_face)
+        if not self._face_animator:
+            self.display_image(talking_face)
         self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # face forward — eye contact
 
         play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
@@ -2463,9 +2576,12 @@ class MistyController:
             # Play the response
             emotion = result.get("emotion", "neutral")
             talking_face = f"face_talking_{emotion}.gif"
+            if self._face_animator:
+                self._face_animator.set_emotion(emotion)
             self.set_state(State.PLAYING)
             self.set_led(148, 0, 211)  # purple = speaking
-            self.display_image(talking_face)
+            if not self._face_animator:
+                self.display_image(talking_face)
             self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # face forward
 
             play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
@@ -2723,6 +2839,10 @@ class MistyController:
         # Upload "What's up baby?" greeting to Misty via orchestration TTS
         if orch_ok:
             self._upload_greeting()
+
+        # Ensure custom face assets are on Misty (idempotent). If some are
+        # unavailable, the animator falls back to built-in firmware faces.
+        self.ensure_face_assets()
 
         # Cancel any lingering skills (e.g., built-in faceDetection)
         self.misty_post("/api/skills/cancel")
