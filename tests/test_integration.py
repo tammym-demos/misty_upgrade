@@ -2281,6 +2281,7 @@ class TestSpeakMoveIntegration(unittest.TestCase):
         self.ctrl.hazard_lock = threading.Lock()
         self.ctrl.last_activity_time = time.time()
         self.ctrl._wake_word_listener = None
+        self.ctrl._face_animator = None
         self.ctrl.misty_post = mock_post
         self.ctrl.DRIVE_MAX_DURATION_MS = 3000
         self.ctrl.MOVEMENT_SETTLE_MS = 100  # fast for tests
@@ -2885,6 +2886,167 @@ class TestCanonicalDefaults(unittest.TestCase):
 
     def test_laptop_recording_mode_is_valid(self):
         self.assertIn(self._cfg.LAPTOP_MISTY_RECORDING_MODE, ("fallback", "tally", "off"))
+
+
+class TestEmotionClassification(unittest.TestCase):
+    """Unit tests for LLM-response emotion tagging used by the face system (#110).
+
+    These validate the emotion tag that orchestration responses include so the
+    controller/FaceAnimator can pick a matching talking face. No live services.
+    """
+
+    _svc = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import orchestration_service  # noqa: PLC0415
+            cls._svc = orchestration_service
+        except Exception as exc:  # pragma: no cover - import guard
+            print(f"[TestEmotionClassification] Could not import: {exc}")
+
+    def setUp(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+
+    _VALID = {"excited", "happy", "sad", "curious", "neutral"}
+
+    def test_excited_detected(self):
+        self.assertEqual(self._svc.classify_emotion("Wow, that is amazing!!"), "excited")
+
+    def test_sad_detected(self):
+        self.assertEqual(
+            self._svc.classify_emotion("Unfortunately that is a tough situation."),
+            "sad",
+        )
+
+    def test_happy_detected(self):
+        self.assertEqual(self._svc.classify_emotion("That's a great idea!"), "happy")
+
+    def test_curious_detected(self):
+        self.assertEqual(
+            self._svc.classify_emotion("Hmm, that's interesting. I wonder why?"),
+            "curious",
+        )
+
+    def test_neutral_default(self):
+        self.assertEqual(self._svc.classify_emotion("The store opens at nine."), "neutral")
+
+    def test_empty_is_neutral(self):
+        self.assertEqual(self._svc.classify_emotion(""), "neutral")
+        self.assertEqual(self._svc.classify_emotion(None), "neutral")
+
+    def test_all_outputs_are_valid_emotions(self):
+        """Every classification maps to a supported face_talking_{emotion} variant."""
+        samples = [
+            "Wow amazing!!", "I'm so sorry for your loss", "That's wonderful!",
+            "Hmm, curious?", "It is a table.", "", "12345",
+        ]
+        for text in samples:
+            self.assertIn(self._svc.classify_emotion(text), self._VALID)
+
+
+class TestCustomFaceAssetUpload(unittest.TestCase):
+    """Unit tests for idempotent startup face-asset upload + fallback (#110).
+
+    All Misty HTTP interaction is mocked — no live robot required.
+    """
+
+    _ctrl_mod = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            _ctrl_path = os.path.normpath(
+                os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration")
+            )
+            if _ctrl_path not in sys.path:
+                sys.path.insert(0, _ctrl_path)
+            import misty_controller as _ctrl_mod  # noqa: PLC0415
+            cls._ctrl_mod = _ctrl_mod
+        except Exception as exc:  # pragma: no cover - import guard
+            print(f"[TestCustomFaceAssetUpload] Could not import misty_controller: {exc}")
+
+    def setUp(self):
+        if self._ctrl_mod is None:
+            self.skipTest("misty_controller could not be imported")
+        self.ctrl = self._ctrl_mod.MistyController.__new__(self._ctrl_mod.MistyController)
+        self.ctrl._face_animator = unittest.mock.MagicMock()
+
+    # --- _get_misty_image_names parsing ---
+
+    def test_get_image_names_parses_result(self):
+        self.ctrl.misty_get = unittest.mock.MagicMock(
+            return_value={"result": [{"name": "e_Joy.jpg"}, {"name": "face_idle.gif"}]}
+        )
+        names = self.ctrl._get_misty_image_names()
+        self.assertEqual(names, {"e_Joy.jpg", "face_idle.gif"})
+
+    def test_get_image_names_empty_on_failure(self):
+        self.ctrl.misty_get = unittest.mock.MagicMock(return_value=None)
+        self.assertEqual(self.ctrl._get_misty_image_names(), set())
+
+    # --- ensure_face_assets behavior ---
+
+    def test_ensure_skips_when_all_present_idempotent(self):
+        """When all required faces are already on the device, no uploads occur."""
+        present = set(self._ctrl_mod.REQUIRED_FACE_ASSETS)
+        self.ctrl._get_misty_image_names = unittest.mock.MagicMock(return_value=present)
+        self.ctrl._upload_face_image = unittest.mock.MagicMock(return_value=True)
+
+        result = self.ctrl.ensure_face_assets()
+
+        self.assertTrue(result)
+        self.ctrl._upload_face_image.assert_not_called()
+        self.ctrl._face_animator.set_custom_faces_available.assert_called_once_with(True)
+
+    def test_ensure_uploads_missing_assets(self):
+        """Missing-but-locally-present assets are uploaded; result is available."""
+        self.ctrl._get_misty_image_names = unittest.mock.MagicMock(return_value=set())
+        self.ctrl._upload_face_image = unittest.mock.MagicMock(return_value=True)
+
+        with unittest.mock.patch.object(self._ctrl_mod.os.path, "exists", return_value=True):
+            result = self.ctrl.ensure_face_assets()
+
+        self.assertTrue(result)
+        self.assertEqual(
+            self.ctrl._upload_face_image.call_count,
+            len(self._ctrl_mod.REQUIRED_FACE_ASSETS),
+        )
+        self.ctrl._face_animator.set_custom_faces_available.assert_called_once_with(True)
+
+    def test_ensure_missing_local_triggers_fallback(self):
+        """When local assets are missing, animator is told to use built-in fallback."""
+        self.ctrl._get_misty_image_names = unittest.mock.MagicMock(return_value=set())
+        self.ctrl._upload_face_image = unittest.mock.MagicMock(return_value=True)
+
+        with unittest.mock.patch.object(self._ctrl_mod.os.path, "exists", return_value=False):
+            result = self.ctrl.ensure_face_assets()
+
+        self.assertFalse(result)
+        self.ctrl._upload_face_image.assert_not_called()
+        self.ctrl._face_animator.set_custom_faces_available.assert_called_once_with(False)
+
+    def test_ensure_upload_failure_triggers_fallback(self):
+        """A failed upload marks custom faces unavailable (fallback)."""
+        self.ctrl._get_misty_image_names = unittest.mock.MagicMock(return_value=set())
+        self.ctrl._upload_face_image = unittest.mock.MagicMock(return_value=False)
+
+        with unittest.mock.patch.object(self._ctrl_mod.os.path, "exists", return_value=True):
+            result = self.ctrl.ensure_face_assets()
+
+        self.assertFalse(result)
+        self.ctrl._face_animator.set_custom_faces_available.assert_called_once_with(False)
+
+    def test_ensure_no_animator_does_not_crash(self):
+        """ensure_face_assets works when no animator is configured."""
+        self.ctrl._face_animator = None
+        self.ctrl._get_misty_image_names = unittest.mock.MagicMock(
+            return_value=set(self._ctrl_mod.REQUIRED_FACE_ASSETS)
+        )
+        self.ctrl._upload_face_image = unittest.mock.MagicMock(return_value=True)
+        result = self.ctrl.ensure_face_assets()
+        self.assertTrue(result)
 
 
 if __name__ == "__main__":

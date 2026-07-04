@@ -17,6 +17,8 @@ When you add or change a default:
 Do **not** hard-code the same value in another file — always import from here.
 """
 
+import os
+
 # ---------------------------------------------------------------------------
 # Orchestration service (orchestration_service.py)
 # ---------------------------------------------------------------------------
@@ -72,3 +74,22 @@ FACE_RECOGNITION_TIMEOUT_S: float = 3.0
 USE_FACE_ANIMATION: bool = False
 FACE_ANIMATION_MAX_FPS: float = 4.0
 FACE_ANIMATION_MIN_INTERVAL_S: float = 0.25
+
+# Custom face assets uploaded to Misty at startup (issue #110).
+# FACE_ASSETS_DIR is env-configurable (FACE_ASSETS_DIR); it defaults to the
+# repo-level assets/ directory (config_defaults.py lives in
+# src/windows-orchestration/, so ../../assets is the repo root assets dir).
+FACE_ASSETS_DIR: str = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "assets")
+)
+# Manifest of custom face assets that must exist on the device (not tunable).
+REQUIRED_FACE_ASSETS: tuple = (
+    "face_idle.gif",
+    "face_listening.png",
+    "face_processing.gif",
+    "face_talking_neutral.gif",
+    "face_talking_happy.gif",
+    "face_talking_excited.gif",
+    "face_talking_sad.gif",
+    "face_talking_curious.gif",
+)
