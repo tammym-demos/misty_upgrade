@@ -327,9 +327,14 @@ class FaceAnimator:
         spec = self._animation_map.get(state_key)
         if spec is None:
             return None
+        # Prefer static_fallback per AnimationSpec's contract (the frame used
+        # when animation is disabled/fails); fall back to frames[0] only when
+        # no static_fallback is configured.
+        if spec.static_fallback:
+            return spec.static_fallback
         if spec.frames:
             return spec.frames[0]
-        return spec.static_fallback or None
+        return None
 
     def set_state(self, state, emotion: Optional[str] = None) -> None:
         """Update the target animation state. Non-blocking.
