@@ -15,7 +15,8 @@ pyttsx3
 # Misty controller: WebSocket client for event subscriptions
 websocket-client
 # Wake word detection: laptop mic + openWakeWord (issue #44)
-sounddevice
+# 0.5.x selects an ARM64 PortAudio DLL on Windows ARM64 even under x64 Python emulation.
+sounddevice==0.4.7
 openwakeword
 # BLE provisioning: WiFi setup over Bluetooth (issue #111)
 bleak

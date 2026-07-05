@@ -346,7 +346,7 @@ MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", str(config_defaults.MAX_C
 # Locked v1 model stack
 # Foundry Local requires full model IDs for inference calls
 MODELS = {
-    "chat": "Phi-3.5-mini-instruct-openvino-gpu:2",
+    "chat": os.getenv("FOUNDRY_CHAT_MODEL", "Phi-3.5-mini-instruct-generic-cpu:2"),
     "stt": "whisper-tiny",
 }
 # Short aliases for display/diagnostics

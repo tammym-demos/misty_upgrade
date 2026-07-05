@@ -6,6 +6,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import readline from "node:readline/promises";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -20,7 +21,7 @@ const DEFAULTS = {
   orchestrationHealthUrl: "http://127.0.0.1:5000/api/health",
   controllerStatusUrl: "http://127.0.0.1:5001/api/status",
   mistyIp: "10.0.0.44",
-  chatModelId: "Phi-3.5-mini-instruct-openvino-gpu:2",
+  chatModelId: "Phi-3.5-mini-instruct-generic-cpu:2",
   chatModelAlias: "phi-3.5-mini",
   modelTtlSeconds: 3600,
 };
@@ -44,6 +45,8 @@ Options:
                           Override ORCHESTRATION_URL for the controller
   --controller-port <n>   Override controller API port (default: 5001)
   --python <command>      Python executable to use (default: python)
+  --yes                   Assume yes for install prompts
+  --no-install            Do not prompt to install missing prerequisites
   -h, --help              Show this help
 `);
 }
@@ -57,6 +60,9 @@ function parseArgs(argv) {
     scan: true,
     controllerPort: DEFAULTS.controllerPort,
     python: "python",
+    pythonExplicit: false,
+    yes: false,
+    install: true,
   };
   if (options.command === "-h" || options.command === "--help") {
     options.command = "help";
@@ -80,6 +86,11 @@ function parseArgs(argv) {
       options.controllerPort = Number(argv[++index]);
     } else if (arg === "--python") {
       options.python = argv[++index];
+      options.pythonExplicit = true;
+    } else if (arg === "--yes" || arg === "-y") {
+      options.yes = true;
+    } else if (arg === "--no-install") {
+      options.install = false;
     } else if (arg === "-h" || arg === "--help") {
       options.command = "help";
     } else {
@@ -196,12 +207,253 @@ function run(command, args, options = {}) {
   };
 }
 
-function ensureCommand(command, args) {
-  const result = run(command, args);
+function runInherited(command, args, options = {}) {
+  return spawnSync(command, args, {
+    cwd: options.cwd ?? REPO_ROOT,
+    env: options.env ?? process.env,
+    stdio: "inherit",
+    timeout: options.timeout ?? 600000,
+    windowsHide: false,
+  });
+}
+
+function commandWorks(command, args) {
+  return run(command, args).ok;
+}
+
+async function confirmInstall(question, options) {
+  if (!options.install) {
+    return false;
+  }
+  if (options.yes) {
+    return true;
+  }
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    return false;
+  }
+
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = (await rl.question(`${question} [Y/n] `)).trim().toLowerCase();
+    return answer === "" || answer === "y" || answer === "yes";
+  } finally {
+    rl.close();
+  }
+}
+
+function pythonRequirements() {
+  const requirementsPath = path.join(ORCH_DIR, "requirements.txt");
+  const packages = [];
+
+  for (const rawLine of fs.readFileSync(requirementsPath, "utf8").split(/\r?\n/)) {
+    const line = rawLine.split("#", 1)[0].trim();
+    if (!line || line.startsWith("-")) {
+      continue;
+    }
+    const packageName = line.split(/[<>=~!;\[]/, 1)[0].trim();
+    if (packageName) {
+      packages.push(packageName);
+    }
+  }
+
+  return packages;
+}
+
+function missingPythonRequirements(python) {
+  const packages = pythonRequirements();
+  const script = `
+import importlib.metadata as metadata
+import sys
+
+missing = []
+for package in sys.argv[1:]:
+    try:
+        metadata.version(package)
+    except metadata.PackageNotFoundError:
+        missing.append(package)
+
+print("\\n".join(missing))
+sys.exit(1 if missing else 0)
+`;
+
+  const result = run(python, ["-c", script, ...packages]);
+  if (result.error) {
+    throw new Error(`Unable to inspect Python packages with ${python}:\n${result.error.message}`);
+  }
+
+  return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function pythonPlatform(python) {
+  const script = `
+import platform
+import sys
+import sysconfig
+
+print(sys.version.split()[0])
+print(platform.machine())
+print(sysconfig.get_platform())
+`;
+  const result = run(python, ["-c", script]);
   if (!result.ok) {
     const details = result.error?.message || result.stderr || result.stdout || `exit code ${result.status}`;
-    throw new Error(`Required command failed: ${command} ${args.join(" ")}\n${details}`);
+    throw new Error(`Unable to inspect Python runtime with ${python}:\n${details}`);
   }
+  const [version, machine, platformTag] = result.stdout.split(/\r?\n/).map((line) => line.trim());
+  return { version, machine, platformTag };
+}
+
+function windowsX64PythonPath() {
+  return path.join(process.env.LOCALAPPDATA || "", "Programs", "Python", "Python312-x64", "python.exe");
+}
+
+function needsFasterWhisper(packages = pythonRequirements()) {
+  return packages.includes("faster-whisper");
+}
+
+function assertPythonRuntimeCompatible(options, packages = pythonRequirements()) {
+  if (!needsFasterWhisper(packages)) {
+    return;
+  }
+
+  const runtime = pythonPlatform(options.python);
+  if (process.platform === "win32" && runtime.platformTag === "win-arm64") {
+    const x64Python = windowsX64PythonPath();
+    const pythonSuggestion = fs.existsSync(x64Python)
+      ? `  npx . start --python "${x64Python}"\n`
+      : "  npx . start --python C:\\Path\\To\\Python312-x64\\python.exe\n";
+    throw new Error(
+      "The active Python runtime is Windows ARM64, but faster-whisper requires ctranslate2, " +
+      "which does not publish a Windows ARM64 pip wheel.\n" +
+      `Detected: ${options.python} ${runtime.version} (${runtime.machine}, ${runtime.platformTag})\n` +
+      "Install a Windows x64 Python runtime and retry with that executable, for example:\n" +
+      pythonSuggestion +
+      "Do not use the PyPI package named 'foundry-local'; Foundry Local is installed with winget.",
+    );
+  }
+}
+
+function selectCompatiblePython(options) {
+  if (options.pythonExplicit || process.platform !== "win32" || !needsFasterWhisper()) {
+    return;
+  }
+
+  const runtime = pythonPlatform(options.python);
+  if (runtime.platformTag !== "win-arm64") {
+    return;
+  }
+
+  const x64Python = windowsX64PythonPath();
+  if (!fs.existsSync(x64Python)) {
+    return;
+  }
+
+  const x64Runtime = pythonPlatform(x64Python);
+  if (x64Runtime.platformTag !== "win-amd64") {
+    return;
+  }
+
+  options.python = x64Python;
+  console.log(`Python: using Windows x64 runtime at ${x64Python}`);
+}
+
+async function ensurePython(options) {
+  const result = run(options.python, ["--version"]);
+  if (result.ok) {
+    return;
+  }
+
+  const details = result.error?.message || result.stderr || result.stdout || `exit code ${result.status}`;
+  throw new Error(
+    `Python is required but '${options.python}' is not available.\n` +
+    "Install Python, or pass the executable with --python <command>.\n" +
+    `Details: ${details}`,
+  );
+}
+
+async function ensurePythonDependencies(options) {
+  assertPythonRuntimeCompatible(options);
+  const missing = missingPythonRequirements(options.python);
+  if (missing.length === 0) {
+    return;
+  }
+
+  const installCommand = `${options.python} -m pip install -r ${path.join("src", "windows-orchestration", "requirements.txt")}`;
+  if (!await confirmInstall(
+    `Python dependencies are missing (${missing.join(", ")}). Run '${installCommand}' now?`,
+    options,
+  )) {
+    throw new Error(
+      `Python dependencies are missing: ${missing.join(", ")}\n` +
+      `Install them with: ${installCommand}`,
+    );
+  }
+
+  const install = runInherited(options.python, [
+    "-m",
+    "pip",
+    "install",
+    "-r",
+    path.join(ORCH_DIR, "requirements.txt"),
+  ]);
+  if (install.status !== 0) {
+    throw new Error(`Python dependency installation failed with exit code ${install.status}`);
+  }
+
+  const stillMissing = missingPythonRequirements(options.python);
+  if (stillMissing.length > 0) {
+    throw new Error(`Python dependencies are still missing after install: ${stillMissing.join(", ")}`);
+  }
+}
+
+async function ensureFoundryCli(options) {
+  if (options.skipFoundry || commandWorks("foundry", ["--version"])) {
+    return;
+  }
+
+  const wingetAvailable = process.platform === "win32" && commandWorks("winget", ["--version"]);
+  if (!wingetAvailable) {
+    throw new Error(
+      "Foundry Local CLI is required but 'foundry' is not on PATH.\n" +
+      "Install Microsoft Foundry Local, then open a new terminal and retry.",
+    );
+  }
+
+  if (!await confirmInstall(
+    "Foundry Local CLI is missing. Install Microsoft.FoundryLocal with winget now?",
+    options,
+  )) {
+    throw new Error(
+      "Foundry Local CLI is required but 'foundry' is not on PATH.\n" +
+      "Install it with: winget install --id Microsoft.FoundryLocal --source winget",
+    );
+  }
+
+  const install = runInherited("winget", [
+    "install",
+    "--id",
+    "Microsoft.FoundryLocal",
+    "--source",
+    "winget",
+    "--accept-package-agreements",
+    "--accept-source-agreements",
+  ], { timeout: 900000 });
+  if (install.status !== 0) {
+    throw new Error(`Foundry Local installation failed with exit code ${install.status}`);
+  }
+  if (!commandWorks("foundry", ["--version"])) {
+    throw new Error(
+      "Foundry Local was installed, but 'foundry' is still not available on PATH.\n" +
+      "Open a new terminal and retry, or ensure the WindowsApps directory is on PATH.",
+    );
+  }
+}
+
+async function ensureStartPrerequisites(options) {
+  await ensurePython(options);
+  selectCompatiblePython(options);
+  await ensurePythonDependencies(options);
+  await ensureFoundryCli(options);
 }
 
 function redactSensitive(value) {
@@ -269,6 +521,31 @@ function chatModelIsLoaded() {
   );
 }
 
+function chatModelIsCached() {
+  const result = run("foundry", ["cache", "list"], { timeout: 30000 });
+  return result.ok && (
+    result.stdout.includes(DEFAULTS.chatModelId)
+    || result.stdout.includes(DEFAULTS.chatModelAlias)
+  );
+}
+
+function ensureChatModelCached() {
+  if (chatModelIsCached()) {
+    return;
+  }
+
+  console.log(`Foundry chat model: downloading ${DEFAULTS.chatModelAlias} (${DEFAULTS.chatModelId})`);
+  const result = runInherited("foundry", [
+    "model",
+    "download",
+    DEFAULTS.chatModelId,
+  ], { timeout: 1800000 });
+
+  if (result.status !== 0 && !chatModelIsCached()) {
+    throw new Error(`Unable to download Foundry chat model; foundry exited with code ${result.status}`);
+  }
+}
+
 function loadChatModel(state, options) {
   if (options.skipFoundry || options.skipModelLoad) {
     console.log("Foundry chat model: skipped");
@@ -284,6 +561,8 @@ function loadChatModel(state, options) {
     };
     return;
   }
+
+  ensureChatModelCached();
 
   console.log(`Foundry chat model: loading ${DEFAULTS.chatModelAlias}`);
   const result = run("foundry", [
@@ -528,10 +807,7 @@ function spawnService(name, command, args, cwd, env) {
 }
 
 async function start(options) {
-  ensureCommand(options.python, ["--version"]);
-  if (!options.skipFoundry) {
-    ensureCommand("foundry", ["--version"]);
-  }
+  await ensureStartPrerequisites(options);
 
   const state = readState();
   const env = serviceEnv(options, state);
