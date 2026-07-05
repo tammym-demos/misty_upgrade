@@ -11,10 +11,7 @@ Covers:
 
 import sys
 import os
-import time
 from unittest.mock import patch, MagicMock
-
-import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration"))
 
