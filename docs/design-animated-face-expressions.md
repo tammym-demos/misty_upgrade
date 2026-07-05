@@ -349,3 +349,82 @@ No native sequence/animation API exists. Animation must be driven via repeated
 | Design includes a hardware validation step for frame rate and supported animation formats | §7, §10 (results) |
 | Animation can be disabled without affecting wake word, recording, playback, movement safety, shutdown cleanup | §5.4 (flag), §6.2, §6.3, §6.4 |
 | Documentation notes BMO assets are not included or copied | §2 (asset boundary), §9 |
+
+---
+
+## 12. Persistent, replaceable, emotion-aware face (#116)
+
+Issue #116 builds on the custom face system merged in #110 / PR #115. It makes
+the custom face identity persistent (never silently reverting to a firmware
+face), centralizes display through one resolver, adds an explicit face
+replacement workflow, and adds optional emotion-aware talking head motion.
+
+### 12.1 Single resolver / always-available `FaceAnimator`
+
+The controller now **always constructs** a `FaceAnimator`. `USE_FACE_ANIMATION`
+scopes only the continuous frame-loop thread: when it is `false`, the thread is
+not started, but `set_state()`, `set_emotion()`, and `show_asset()` still resolve
+and push the correct frame synchronously. This guarantees custom face identity,
+emotion selection, and built-in fallback work regardless of the flag.
+
+All controller face changes route through the resolver:
+
+- State-driven faces use `set_state()` / `set_emotion()` (already wired through
+  `MistyController.set_state()` / `try_set_state()`).
+- One-off / transient faces (movement acknowledgment, error blips) use
+  `MistyController.show_face(filename)` → `FaceAnimator.show_asset()`, which
+  applies fallback but does **not** change the animation state.
+
+No controller path calls `display_image("face_*")` directly any more.
+
+### 12.2 Deterministic built-in fallback
+
+When required assets are missing locally, an upload fails, the inventory is
+unreliable, or a custom display would fail, the controller marks custom faces
+unavailable (`set_custom_faces_available(False)`). Every custom asset then
+resolves to a built-in firmware face (`e_*.jpg`) via
+`face_animator.ASSET_BUILTIN_FALLBACK` / `builtin_fallback_for_asset()`. Built-in
+faces ship with every Misty II, so a display never fails on a missing file, and
+the fallback is display-only (no per-frame error logging).
+
+### 12.3 Face replacement workflow
+
+Custom face assets are uploaded at startup by `ensure_face_assets()`, controlled
+by two settings (see `config_defaults.py` / `.env.example`):
+
+| Setting | Values | Effect |
+|---------|--------|--------|
+| `FACE_ASSETS_DIR` | path | Directory holding the `face_*` assets to upload. Point at a new folder that reuses the required filenames to swap the face. |
+| `FACE_ASSETS_SYNC_MODE` | `missing` (default) / `overwrite` | `missing` uploads only assets not already on the device (idempotent startup). `overwrite` force re-uploads every required asset even if a same-named file exists. |
+| `FACE_ASSETS_FORCE_UPLOAD` | `true` / unset | Convenience alias that forces `overwrite` for a single run. |
+
+**To replace the face:** put the new assets (same required filenames) in
+`FACE_ASSETS_DIR`, set `FACE_ASSETS_SYNC_MODE=overwrite` (or
+`FACE_ASSETS_FORCE_UPLOAD=true`), start the controller once so the new assets
+overwrite Misty's stored images, then set the mode back to `missing` so normal
+startup stays idempotent.
+
+### 12.4 Emotion-aware talking head motion
+
+`USE_TALKING_HEAD_MOTION` (default `false`) enables subtle, emotion-aware head
+motion while Misty speaks. Implemented by `talking_head_motion.TalkingHeadMotion`:
+
+- Starts only for state `PLAYING` (normal responses, follow-ups, movement
+  acknowledgments, and movement-failure speech) and stops + re-centers the head
+  when playback ends.
+- `MistyController.set_state()` / `try_set_state()` stop the motion on **any**
+  transition away from `PLAYING`, so it never runs during
+  `MOVING`/`CHARGING`/`ERROR`/reboot/re-arm; `_shutdown()` also stops it.
+- All movements stay within a safe head envelope (configurable in
+  `config_defaults.py`) and are hard-clamped to Misty's mechanical limits
+  (pitch -40..26, roll -40..40, yaw -81..81).
+- It only ever issues `/api/head` commands — never drive/arm/audio/keyphrase —
+  keeping it decoupled from movement/drive safety.
+
+### 12.5 Verification (cloud-safe)
+
+`tests/test_face_resolver.py` covers the resolver, `show_asset`, disabled-animation
+identity/fallback, and `ensure_face_assets` sync modes.
+`tests/test_talking_head_motion.py` covers gating, safe-envelope clamping, emotion
+scaling, and stop/center behavior. Live visual tuning on Misty hardware is a
+separate manual step and is not required for these unit tests.

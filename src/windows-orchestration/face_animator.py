@@ -175,6 +175,39 @@ BUILTIN_EMOTION_FALLBACK: dict[str, str] = {
     "curious": "e_Surprise.jpg",
 }
 
+# Direct map from each custom face asset filename to the built-in firmware face
+# (e_*.jpg) used when custom assets are unavailable on the device. Every custom
+# asset that a controller might display directly must appear here so the resolver
+# can always degrade to a face that ships with the firmware (never a missing
+# file). Keyed by the custom asset filename.
+ASSET_BUILTIN_FALLBACK: dict[str, str] = {
+    "face_idle.gif": "e_DefaultContent.jpg",
+    "face_listening.png": "e_Surprise.jpg",
+    "face_processing.gif": "e_Contempt.jpg",
+    "face_talking_neutral.gif": "e_DefaultContent.jpg",
+    "face_talking_happy.gif": "e_Joy.jpg",
+    "face_talking_excited.gif": "e_Joy2.jpg",
+    "face_talking_sad.gif": "e_Sadness.jpg",
+    "face_talking_curious.gif": "e_Surprise.jpg",
+}
+# Built-in face shown when an unknown custom asset is requested.
+DEFAULT_BUILTIN_FALLBACK = "e_DefaultContent.jpg"
+
+
+def builtin_fallback_for_asset(filename: str) -> str:
+    """Return the built-in firmware face to use in place of a custom asset.
+
+    Built-in ``e_*.jpg`` faces ship with every Misty II, so they never fail on a
+    missing file. Custom assets already keyed on their built-in map pass through
+    that mapping; anything else degrades to the default content face.
+    """
+    if not filename:
+        return DEFAULT_BUILTIN_FALLBACK
+    if not filename.startswith("face_"):
+        # Already a built-in / non-custom asset — display as-is.
+        return filename
+    return ASSET_BUILTIN_FALLBACK.get(filename, DEFAULT_BUILTIN_FALLBACK)
+
 
 class FaceAnimator:
     """Companion-side face animation driver for Misty II.
@@ -266,6 +299,46 @@ class FaceAnimator:
             return
 
         self._state_changed.set()
+
+    def resolve_asset(self, filename: str) -> str:
+        """Resolve a custom face asset filename to the frame to actually display.
+
+        When custom face assets are unavailable on the device, the built-in
+        firmware fallback (``e_*.jpg``) is substituted so a display never fails
+        on a missing file. Otherwise the custom asset is returned unchanged.
+        Never raises.
+        """
+        with self._lock:
+            custom_available = self._custom_faces_available
+        if custom_available:
+            return filename
+        return builtin_fallback_for_asset(filename)
+
+    def show_asset(self, filename: str) -> bool:
+        """Display an arbitrary custom face asset immediately, with fallback.
+
+        This is the single entry point for one-off / transient face displays
+        (e.g., movement acknowledgment, error blips) that are not tied to a
+        state transition. It applies built-in firmware fallback resolution but
+        does **not** change the target animation state, so it will not disturb
+        the state-driven animation loop. Best-effort; never raises.
+
+        Deterministic display-failure fallback (#116): if a custom ``face_*``
+        asset fails to display while custom faces were believed available, mark
+        custom faces unavailable and immediately retry with the built-in
+        firmware fallback so the display never gets stuck on a stale frame and
+        subsequent calls resolve to built-ins.
+        """
+        frame = self.resolve_asset(filename)
+        if self._push_frame(frame):
+            return True
+
+        with self._lock:
+            was_available = self._custom_faces_available
+        if was_available and isinstance(filename, str) and filename.startswith("face_"):
+            self.set_custom_faces_available(False)
+            return self._push_frame(builtin_fallback_for_asset(filename))
+        return False
 
     def start(self):
         """Start the animation thread."""
