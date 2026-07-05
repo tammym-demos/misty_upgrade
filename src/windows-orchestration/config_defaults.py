@@ -17,6 +17,8 @@ When you add or change a default:
 Do **not** hard-code the same value in another file — always import from here.
 """
 
+import os
+
 # ---------------------------------------------------------------------------
 # Orchestration service (orchestration_service.py)
 # ---------------------------------------------------------------------------
@@ -72,3 +74,48 @@ FACE_RECOGNITION_TIMEOUT_S: float = 3.0
 USE_FACE_ANIMATION: bool = False
 FACE_ANIMATION_MAX_FPS: float = 4.0
 FACE_ANIMATION_MIN_INTERVAL_S: float = 0.25
+
+# Custom face assets uploaded to Misty at startup (issue #110).
+# FACE_ASSETS_DIR is env-configurable (FACE_ASSETS_DIR); it defaults to the
+# repo-level assets/ directory (config_defaults.py lives in
+# src/windows-orchestration/, so ../../assets is the repo root assets dir).
+FACE_ASSETS_DIR: str = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "assets")
+)
+# Manifest of custom face assets that must exist on the device (not tunable).
+REQUIRED_FACE_ASSETS: tuple = (
+    "face_idle.gif",
+    "face_listening.png",
+    "face_processing.gif",
+    "face_talking_neutral.gif",
+    "face_talking_happy.gif",
+    "face_talking_excited.gif",
+    "face_talking_sad.gif",
+    "face_talking_curious.gif",
+)
+
+# Face asset replacement / sync behavior (issue #116).
+#   "missing"   = idempotent startup — only upload required assets that are not
+#                 already present on the device (default; safe to run every boot).
+#   "overwrite" = force re-upload of every required asset even if a file with the
+#                 same name already exists on Misty. Use this to replace the
+#                 custom face with a new set that reuses the same filenames, then
+#                 return to "missing" for normal idempotent startup.
+# The FACE_ASSETS_FORCE_UPLOAD=true environment flag is a convenience alias that
+# forces "overwrite" mode for a single run.
+FACE_ASSETS_SYNC_MODE: str = "missing"
+
+# Emotion-aware subtle talking head motion (issue #116). Off by default and
+# gated by config. When enabled, Misty makes small, safe head movements while
+# speaking (state PLAYING only) and re-centers when playback ends or the state
+# leaves PLAYING. Never runs during MOVING/CHARGING/ERROR/shutdown or drive
+# commands, and always stays within the safe head limits below.
+USE_TALKING_HEAD_MOTION: bool = False
+# Safe head-motion envelope for talking motion (degrees). These stay well inside
+# Misty's mechanical limits (pitch -40..26, roll -40..40, yaw -81..81).
+TALKING_HEAD_PITCH_CENTER: float = -10.0   # slight up-tilt = eye contact
+TALKING_HEAD_PITCH_RANGE: float = 4.0      # +/- pitch wobble
+TALKING_HEAD_YAW_RANGE: float = 6.0        # +/- yaw wobble
+TALKING_HEAD_ROLL_RANGE: float = 3.0       # +/- roll wobble
+TALKING_HEAD_VELOCITY: float = 30.0        # gentle move velocity
+TALKING_HEAD_INTERVAL_S: float = 0.8       # seconds between micro-movements

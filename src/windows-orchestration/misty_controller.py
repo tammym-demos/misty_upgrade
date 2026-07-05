@@ -75,6 +75,37 @@ USE_FACE_ANIMATION = os.getenv("USE_FACE_ANIMATION", "").lower() in ("1", "true"
 FACE_ANIMATION_MAX_FPS = float(os.getenv("FACE_ANIMATION_MAX_FPS", str(config_defaults.FACE_ANIMATION_MAX_FPS)))
 FACE_ANIMATION_MIN_INTERVAL_S = float(os.getenv("FACE_ANIMATION_MIN_INTERVAL_S", str(config_defaults.FACE_ANIMATION_MIN_INTERVAL_S)))
 
+# Custom face assets uploaded to Misty at startup (#110). These are the
+# Pillow-generated faces referenced by FaceAnimator / display flows. They are
+# uploaded idempotently at startup; if any are unavailable, the animator falls
+# back to built-in firmware faces. Defaults come from config_defaults (single
+# source of truth); FACE_ASSETS_DIR remains env-overridable.
+FACE_ASSETS_DIR = os.getenv("FACE_ASSETS_DIR", config_defaults.FACE_ASSETS_DIR)
+REQUIRED_FACE_ASSETS = config_defaults.REQUIRED_FACE_ASSETS
+
+# Face asset replacement / sync behavior (#116). "missing" (default) uploads
+# only assets not already on the device (idempotent startup); "overwrite" force
+# re-uploads every required asset so a new face reusing the same filenames
+# replaces Misty's stored assets. FACE_ASSETS_FORCE_UPLOAD=true is a convenience
+# alias that forces overwrite for a single run.
+_RAW_FACE_ASSETS_SYNC_MODE = os.getenv(
+    "FACE_ASSETS_SYNC_MODE", config_defaults.FACE_ASSETS_SYNC_MODE
+).strip().lower()
+FACE_ASSETS_SYNC_MODE = (
+    _RAW_FACE_ASSETS_SYNC_MODE
+    if _RAW_FACE_ASSETS_SYNC_MODE in ("missing", "overwrite")
+    else "missing"
+)
+if os.getenv("FACE_ASSETS_FORCE_UPLOAD", "").lower() in ("1", "true", "yes"):
+    FACE_ASSETS_SYNC_MODE = "overwrite"
+
+# Emotion-aware subtle talking head motion (#116) — off by default, gated here.
+# Only active during PLAYING and always within safe head limits; never runs
+# during MOVING/CHARGING/ERROR/shutdown or drive commands.
+USE_TALKING_HEAD_MOTION = os.getenv(
+    "USE_TALKING_HEAD_MOTION", str(config_defaults.USE_TALKING_HEAD_MOTION)
+).lower() in ("1", "true", "yes")
+
 # Keyphrase watchdog — detects silent failures and auto-recovers
 WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", str(config_defaults.WATCHDOG_IDLE_TIMEOUT_S)))  # 90s after rearm with no wake event
 WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", str(config_defaults.WATCHDOG_ESCALATE_TIMEOUT_S)))  # 60s after recovery attempt
@@ -275,17 +306,37 @@ class MistyController:
         self._face_event_name: str | None = None  # WebSocket event name for face recognition
         self._trained_faces: list[str] = []  # cached list of trained face IDs
 
-        # Face animation (#73) — state-driven animated expressions
-        self._face_animator = None
+        # Face animation (#73) — state-driven animated expressions.
+        # The FaceAnimator is ALWAYS constructed so custom face identity, emotion
+        # selection, and built-in fallback are available regardless of
+        # USE_FACE_ANIMATION. That flag now scopes ONLY the continuous frame-loop
+        # thread: when disabled, set_state()/set_emotion()/show_asset() still
+        # resolve and push the correct frame synchronously (#116).
+        from face_animator import FaceAnimator
+        self._face_animator = FaceAnimator(
+            misty_base_url=MISTY_BASE,
+            enabled=USE_FACE_ANIMATION,
+            max_fps=FACE_ANIMATION_MAX_FPS,
+            min_interval_s=FACE_ANIMATION_MIN_INTERVAL_S,
+        )
+        # Only run the frame-loop thread when animation is enabled; identity,
+        # emotion and fallback resolution work without the thread when disabled.
         if USE_FACE_ANIMATION:
-            from face_animator import FaceAnimator
-            self._face_animator = FaceAnimator(
-                misty_base_url=MISTY_BASE,
-                enabled=True,
-                max_fps=FACE_ANIMATION_MAX_FPS,
-                min_interval_s=FACE_ANIMATION_MIN_INTERVAL_S,
-            )
             self._face_animator.start()
+
+        # Emotion-aware talking head motion (#116) — gently moves the head while
+        # speaking (PLAYING only). Always constructed; a no-op when disabled.
+        from talking_head_motion import TalkingHeadMotion
+        self._talking_head = TalkingHeadMotion(
+            move_head=self.move_head,
+            enabled=USE_TALKING_HEAD_MOTION,
+            pitch_center=config_defaults.TALKING_HEAD_PITCH_CENTER,
+            pitch_range=config_defaults.TALKING_HEAD_PITCH_RANGE,
+            yaw_range=config_defaults.TALKING_HEAD_YAW_RANGE,
+            roll_range=config_defaults.TALKING_HEAD_ROLL_RANGE,
+            velocity=config_defaults.TALKING_HEAD_VELOCITY,
+            interval_s=config_defaults.TALKING_HEAD_INTERVAL_S,
+        )
 
     # --- State transitions ---
 
@@ -297,6 +348,11 @@ class MistyController:
             logger.info(f"State: {old.value} -> {new_state.value}")
             if self._face_animator:
                 self._face_animator.set_state(new_state)
+            # Stop (and re-center) talking head motion whenever we leave PLAYING.
+            # This guarantees motion never persists into MOVING/CHARGING/ERROR/
+            # reboot/re-arm or any other state (#116).
+            if new_state != State.PLAYING and getattr(self, "_talking_head", None):
+                self._talking_head.stop()
 
     def try_set_state(self, expected: State, new_state: State) -> bool:
         """Atomic compare-and-swap for state transitions. Returns True if successful."""
@@ -307,6 +363,8 @@ class MistyController:
                 logger.info(f"State: {old.value} -> {new_state.value}")
                 if self._face_animator:
                     self._face_animator.set_state(new_state)
+                if new_state != State.PLAYING and getattr(self, "_talking_head", None):
+                    self._talking_head.stop()
                 return True
             return False
 
@@ -341,6 +399,22 @@ class MistyController:
 
     def display_image(self, filename: str):
         self.misty_post("/api/images/display", {"FileName": filename, "Alpha": 1})
+
+    def show_face(self, filename: str):
+        """Single entry point for direct/transient custom-face display (#116).
+
+        Routes through the always-available FaceAnimator so built-in firmware
+        fallback (e_*.jpg) applies automatically when custom assets are missing
+        or failed to upload. Does not change the animation state, so it is safe
+        for one-off faces (movement acknowledgment, error blips). Prefer
+        ``set_state()`` for state-driven faces (emotion is applied via the
+        FaceAnimator, e.g. ``self._face_animator.set_emotion()``); use this only
+        where a specific asset must be shown outside a normal state transition.
+        """
+        if self._face_animator is not None:
+            self._face_animator.show_asset(filename)
+        else:  # pragma: no cover - animator is always constructed in __init__
+            self.display_image(filename)
 
     def move_head(self, pitch: float = 0, roll: float = 0, yaw: float = 0, velocity: float = 50):
         """Move Misty's head. Pitch: -40(up) to 26(down). Roll: -40 to 40. Yaw: -81(right) to 81(left)."""
@@ -611,7 +685,7 @@ class MistyController:
 
         # Visual feedback — orange LED + adventurous face
         self.set_led(255, 165, 0)  # orange = moving
-        self.display_image("face_talking_excited.gif")
+        self.show_face("face_talking_excited.gif")
 
         try:
             if command in ("forward", "backward"):
@@ -676,9 +750,11 @@ class MistyController:
             if response.status_code == 200 and len(response.content) > 100:
                 self.set_state(State.PLAYING)
                 self.set_led(255, 255, 0)  # yellow = warning
-                self.display_image("face_talking_sad.gif")
+                self.show_face("face_talking_sad.gif")
+                self._talking_head.start("sad")  # emotion-aware talking motion (#116)
                 play_duration = self.upload_and_play_audio(response.content, RESPONSE_FILENAME)
                 time.sleep(play_duration + 1.0)
+                self._talking_head.stop()  # halt + re-center head (#116)
         except Exception as e:
             logger.warning(f"[Turn {turn}] Movement failure speech failed: {e}")
 
@@ -902,6 +978,102 @@ class MistyController:
                 logger.info(f"Uploaded '{filename}' to Misty ({len(audio_data)} bytes)")
             except Exception as e:
                 logger.warning(f"Failed to upload '{filename}': {e}")
+
+    def _get_misty_image_names(self) -> set[str]:
+        """Return the set of image filenames currently stored on Misty.
+
+        Best-effort: returns an empty set if the inventory cannot be read
+        (e.g., device unreachable), which causes ensure_face_assets() to
+        attempt uploads.
+        """
+        result = self.misty_get("/api/images")
+        if not result:
+            return set()
+        images = result.get("result", []) or []
+        names: set[str] = set()
+        for img in images:
+            if isinstance(img, dict):
+                name = img.get("name") or img.get("Name")
+                if name:
+                    names.add(name)
+            elif isinstance(img, str):
+                names.add(img)
+        return names
+
+    def _upload_face_image(self, filename: str, local_path: str) -> bool:
+        """Upload a single image asset to Misty via SaveImage. Best-effort."""
+        try:
+            with open(local_path, "rb") as f:
+                data = f.read()
+            if len(data) < 100:
+                logger.warning(f"Face asset '{filename}' too small: {len(data)} bytes")
+                return False
+            image_b64 = base64.b64encode(data).decode("ascii")
+            result = self.misty_post("/api/images", {
+                "FileName": filename,
+                "Data": image_b64,
+                "ImmediatelyApply": False,
+                "OverwriteExisting": True,
+            })
+            if result is None:
+                logger.warning(f"Face asset upload failed (no response): {filename}")
+                return False
+            logger.info(f"Uploaded face asset '{filename}' to Misty ({len(data)} bytes)")
+            return True
+        except Exception as e:
+            logger.warning(f"Failed to upload face asset '{filename}': {e}")
+            return False
+
+    def ensure_face_assets(self) -> bool:
+        """Idempotently ensure custom face assets are present on Misty (#110).
+
+        In the default ``missing`` sync mode, assets already on the device
+        (checked via the image inventory) are skipped and only missing ones are
+        uploaded — safe to run every startup. In ``overwrite`` sync mode
+        (``FACE_ASSETS_SYNC_MODE=overwrite`` or ``FACE_ASSETS_FORCE_UPLOAD=true``),
+        every required asset is re-uploaded even if a file with the same name
+        already exists, so a replacement face reusing the same filenames updates
+        Misty's stored assets (#116).
+
+        Informs the FaceAnimator whether all required custom faces are available;
+        when some are unavailable the animator falls back to built-in firmware
+        faces.
+
+        Returns True if every required custom face is available on the device
+        (already present or successfully uploaded); False otherwise.
+        """
+        overwrite = FACE_ASSETS_SYNC_MODE == "overwrite"
+        inventory = set() if overwrite else self._get_misty_image_names()
+        uploaded = 0
+        skipped = 0
+        all_available = True
+
+        for filename in REQUIRED_FACE_ASSETS:
+            if not overwrite and filename in inventory:
+                skipped += 1
+                continue
+            local_path = os.path.join(FACE_ASSETS_DIR, filename)
+            if not os.path.exists(local_path):
+                logger.warning(
+                    f"Custom face asset missing locally: {local_path} — "
+                    "will rely on built-in fallback"
+                )
+                all_available = False
+                continue
+            if self._upload_face_image(filename, local_path):
+                uploaded += 1
+            else:
+                all_available = False
+
+        logger.info(
+            f"Face assets [{FACE_ASSETS_SYNC_MODE}]: {skipped} already present, "
+            f"{uploaded} uploaded, custom_available={all_available}"
+        )
+
+        if self._face_animator:
+            self._face_animator.set_custom_faces_available(all_available)
+
+        return all_available
 
     def check_orchestration_health(self) -> bool:
         try:
@@ -1449,7 +1621,7 @@ class MistyController:
         self.misty_post("/api/audio/keyphrase/stop")
         self.misty_post("/api/skills/cancel")
         self.set_led(0, 0, 0)
-        self.display_image("face_idle.gif")
+        self.show_face("face_idle.gif")
         logger.info("Charging mode active — keyphrase off, LED off, display sleeping")
 
     def exit_charging_mode(self):
@@ -1458,14 +1630,14 @@ class MistyController:
         if self._wake_word_listener:
             self._wake_word_listener.resume()
             self.set_led(0, 255, 0)
-            self.display_image("face_idle.gif")
+            self.show_face("face_idle.gif")
             self.last_activity_time = time.time()
             self._is_dimmed = False
             self.set_state(State.IDLE)
             logger.info("Exited charging mode — resumed laptop wake word listener")
         elif self.start_keyphrase(force_restart=True):
             self.set_led(0, 255, 0)
-            self.display_image("face_idle.gif")
+            self.show_face("face_idle.gif")
             self.last_activity_time = time.time()
             self._is_dimmed = False
             self.set_state(State.IDLE)
@@ -1483,6 +1655,8 @@ class MistyController:
         logger.info("Shutting down...")
         self.running = False
         # Stop face animator first (§6.3 — before existing cleanup sequence)
+        if self._talking_head:
+            self._talking_head.stop()  # halt + re-center head motion (#116)
         if self._face_animator:
             self._face_animator.stop()
         # Stop laptop wake word listener
@@ -1671,7 +1845,7 @@ class MistyController:
             # Explicitly stop keyphrase to ensure mic is free
             self.misty_post("/api/audio/keyphrase/stop")
             self.set_led(0, 255, 0)
-            self.display_image("face_idle.gif")
+            self.show_face("face_idle.gif")
             if current_state in (State.REARMING, State.REBOOTING):
                 self.last_activity_time = time.time()
                 self.set_state(State.IDLE)
@@ -1682,7 +1856,7 @@ class MistyController:
                 self.set_state(State.IDLE)
         elif self.start_keyphrase(force_restart=True):
             self.set_led(0, 255, 0)
-            self.display_image("face_idle.gif")
+            self.show_face("face_idle.gif")
             if current_state in (State.REARMING, State.REBOOTING):
                 # Re-arm or post-reboot reconnect — no grace period, go straight to IDLE
                 self.last_activity_time = time.time()
@@ -1753,7 +1927,7 @@ class MistyController:
             if self._is_dimmed and self.get_state() == State.IDLE:
                 self._is_dimmed = False
                 self.set_led(0, 255, 0)
-                self.display_image("face_idle.gif")
+                self.show_face("face_idle.gif")
                 logger.info("Restored from idle-dim on wake word")
 
             if self.get_state() == State.IDLE and time.time() >= self.ready_time:
@@ -1927,7 +2101,7 @@ class MistyController:
         if self._is_dimmed and self.get_state() == State.IDLE:
             self._is_dimmed = False
             self.set_led(0, 255, 0)
-            self.display_image("face_idle.gif")
+            self.show_face("face_idle.gif")
             logger.info("Restored from idle-dim on laptop wake word")
 
         if self.get_state() == State.IDLE and time.time() >= self.ready_time:
@@ -2022,7 +2196,7 @@ class MistyController:
         except Exception as e:
             logger.error(f"[Turn {turn}] Error: {e}", exc_info=True)
             self.set_led(255, 0, 0)  # red = error
-            self.display_image("face_talking_sad.gif")
+            self.show_face("face_talking_sad.gif")
             time.sleep(2)
 
         finally:
@@ -2038,7 +2212,7 @@ class MistyController:
         # 1. Visual feedback — listening attentively
         self.set_state(State.RECORDING)
         self.set_led(255, 140, 0)  # orange
-        self.display_image("face_listening.png")  # wide-eyed, attentive
+        self.show_face("face_listening.png")  # wide-eyed, attentive
         self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # look up slightly — eye contact
 
         # Start face recognition concurrently with recording (#16)
@@ -2151,7 +2325,7 @@ class MistyController:
         # 3. Retrieve recorded audio — wondering face + thinking sound
         self.set_state(State.PROCESSING)
         self.set_led(0, 0, 255)  # blue = processing
-        self.display_image("face_processing.gif")  # one eyebrow raised — "hmm, let me think..."
+        self.show_face("face_processing.gif")  # one eyebrow raised — "hmm, let me think..."
         self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)  # tilt head — pondering
 
         # Play thinking phrase so the user knows Misty heard them
@@ -2260,9 +2434,11 @@ class MistyController:
                     try:
                         self.set_state(State.PLAYING)
                         self.set_led(148, 0, 211)  # purple = speaking
-                        self.display_image("face_talking_happy.gif")
+                        self.show_face("face_talking_happy.gif")
+                        self._talking_head.start("happy")  # talking motion (#116)
                         play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
                         time.sleep(play_duration + 1.0)
+                        self._talking_head.stop()  # halt + re-center head (#116)
                     except Exception as e:
                         logger.warning(f"[Turn {turn}] Movement ack playback failed: {e}")
 
@@ -2302,16 +2478,20 @@ class MistyController:
 
         # Upload to Misty and play — animated, looking at user
         emotion = result.get("emotion", "neutral")
-        talking_face = f"face_talking_{emotion}.gif"
+        # Route emotion through the always-available animator so it selects the
+        # matching talking face (and applies built-in fallback when custom assets
+        # are unavailable) — works whether or not the frame-loop is enabled (#116).
+        self._face_animator.set_emotion(emotion)
         self.set_state(State.PLAYING)
         self.set_led(148, 0, 211)  # purple = speaking
-        self.display_image(talking_face)
         self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # face forward — eye contact
+        self._talking_head.start(emotion)  # gentle emotion-aware motion while speaking (#116)
 
         play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
 
         # Wait for playback to finish (generous buffer — no completion callback from Misty)
         time.sleep(play_duration + 2.0)
+        self._talking_head.stop()  # halt + re-center head when playback ends (#116)
 
         elapsed = time.time() - turn_start
         logger.info(f"[Turn {turn}] Exchange complete in {elapsed:.1f}s")
@@ -2321,7 +2501,7 @@ class MistyController:
         """Listen briefly for follow-up speech. Returns True if speech was detected and responded to."""
         self.set_state(State.LISTENING)
         self.set_led(0, 200, 200)  # cyan = listening for follow-up
-        self.display_image("face_listening.png")  # warm, expectant — "go on..."
+        self.show_face("face_listening.png")  # warm, expectant — "go on..."
         self.move_head(pitch=-10, roll=-3, yaw=-10, velocity=40)  # slight head tilt — attentive
 
         # Record a short clip — use VAD if available
@@ -2393,7 +2573,7 @@ class MistyController:
         # Show thinking face while processing follow-up
         self.set_state(State.PROCESSING)
         self.set_led(0, 0, 255)  # blue = processing
-        self.display_image("face_processing.gif")  # wondering face
+        self.show_face("face_processing.gif")  # wondering face
         self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)
 
         # Send through the full pipeline — orchestration returns empty_stt error
@@ -2433,8 +2613,11 @@ class MistyController:
                         audio_resp.raise_for_status()
                         self.set_state(State.PLAYING)
                         self.set_led(148, 0, 211)
+                        self.show_face("face_talking_happy.gif")  # consistent ack face (#116)
+                        self._talking_head.start("happy")  # talking motion (#116)
                         play_duration = self.upload_and_play_audio(audio_resp.content, RESPONSE_FILENAME)
                         time.sleep(play_duration + 1.0)
+                        self._talking_head.stop()  # halt + re-center head (#116)
                     except Exception as e:
                         logger.warning(f"[Turn {turn}] Follow-up movement ack audio failed: {e}")
 
@@ -2462,14 +2645,15 @@ class MistyController:
 
             # Play the response
             emotion = result.get("emotion", "neutral")
-            talking_face = f"face_talking_{emotion}.gif"
+            self._face_animator.set_emotion(emotion)
             self.set_state(State.PLAYING)
             self.set_led(148, 0, 211)  # purple = speaking
-            self.display_image(talking_face)
             self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # face forward
+            self._talking_head.start(emotion)  # emotion-aware talking motion (#116)
 
             play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
             time.sleep(play_duration + 0.5)
+            self._talking_head.stop()  # halt + re-center head when playback ends (#116)
             return True
 
         except Exception as e:
@@ -2510,7 +2694,7 @@ class MistyController:
 
                 self.set_led(0, 255, 0)
 
-                self.display_image("face_idle.gif")
+                self.show_face("face_idle.gif")
 
                 self.last_activity_time = time.time()
 
@@ -2587,7 +2771,7 @@ class MistyController:
 
         # Announce the reboot to the user
         self.set_led(255, 200, 0)  # yellow = maintenance
-        self.display_image("face_idle.gif")  # calm face
+        self.show_face("face_idle.gif")  # calm face
         self._play_reboot_announcement()
 
         # Stop all audio before reboot
@@ -2723,6 +2907,10 @@ class MistyController:
         # Upload "What's up baby?" greeting to Misty via orchestration TTS
         if orch_ok:
             self._upload_greeting()
+
+        # Ensure custom face assets are on Misty (idempotent). If some are
+        # unavailable, the animator falls back to built-in firmware faces.
+        self.ensure_face_assets()
 
         # Cancel any lingering skills (e.g., built-in faceDetection)
         self.misty_post("/api/skills/cancel")
