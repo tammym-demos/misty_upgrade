@@ -23,6 +23,7 @@ const DEFAULTS = {
   chatModelId: "Phi-3.5-mini-instruct-generic-cpu:2",
   chatModelAlias: "phi-3.5-mini",
   modelTtlSeconds: 3600,
+  wakeWordModelPath: path.join(REPO_ROOT, "models", "hey_misty.onnx"),
 };
 
 const WAKE_WORD_PYTHON_MODULES = ["numpy", "sounddevice", "openwakeword"];
@@ -277,12 +278,19 @@ sys.exit(1 if failures else 0)
 function checkWakeWordModelPath(env) {
   const configuredPath = env.OWW_CUSTOM_MODEL_PATH?.trim();
   if (!configuredPath) {
+    if (fs.existsSync(DEFAULTS.wakeWordModelPath)) {
+      env.OWW_CUSTOM_MODEL_PATH = DEFAULTS.wakeWordModelPath;
+      return;
+    }
+
     throw new Error(
       "Laptop wake-word prerequisites are not ready:\n" +
+      `  - Bundled wake-word model is missing: ${DEFAULTS.wakeWordModelPath}\n` +
       "  - OWW_CUSTOM_MODEL_PATH is not configured.\n\n" +
       "The supported wake path requires a trained custom OpenWakeWord model for \"Hey Misty\"; " +
       "Misty's built-in keyphrase is unsupported.\n" +
-      "Set OWW_CUSTOM_MODEL_PATH in src\\windows-orchestration\\.env or pass it in the environment, then retry startup.",
+      "Restore models\\hey_misty.onnx or set OWW_CUSTOM_MODEL_PATH in " +
+      "src\\windows-orchestration\\.env or the environment, then retry startup.",
     );
   }
 
@@ -293,7 +301,8 @@ function checkWakeWordModelPath(env) {
     throw new Error(
       "Laptop wake-word prerequisites are not ready:\n" +
       `  - OWW_CUSTOM_MODEL_PATH does not exist: ${modelPath}\n\n` +
-      "Set OWW_CUSTOM_MODEL_PATH to a trained custom \"Hey Misty\" OpenWakeWord model artifact, then retry startup.",
+      "Set OWW_CUSTOM_MODEL_PATH to a trained custom \"Hey Misty\" OpenWakeWord model artifact, " +
+      "or unset it to use the bundled models\\hey_misty.onnx artifact.",
     );
   }
 }

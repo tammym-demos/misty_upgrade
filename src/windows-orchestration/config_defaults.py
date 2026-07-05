@@ -67,6 +67,15 @@ PROACTIVE_REBOOT_AFTER_RECORDINGS: int = 15
 LAPTOP_MISTY_RECORDING_MODE: str = "fallback"
 LAPTOP_MISTY_TALLY_RECORDING_S: float = 1.0
 
+# Laptop OpenWakeWord wake phrase (issue #72).
+# The repository includes the trained "Hey Misty" model, so startup can use it
+# by default while still allowing OWW_CUSTOM_MODEL_PATH to override it.
+OWW_CUSTOM_MODEL_PATH: str = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "models", "hey_misty.onnx")
+)
+OWW_MODEL_NAME: str = "hey_misty"
+OWW_THRESHOLD: float = 0.7
+
 # Face recognition (issue #16)
 FACE_RECOGNITION_TIMEOUT_S: float = 3.0
 

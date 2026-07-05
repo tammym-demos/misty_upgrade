@@ -21,7 +21,7 @@ npx . status
 npx . stop
 ```
 
-The CLI reads `src\windows-orchestration\.env` when present. Startup loads `Phi-3.5-mini-instruct-generic-cpu:2` into Foundry Local with a 1-hour TTL before starting the controller, so the first chat does not pay model-load latency. Before launching the controller, startup preflights the laptop wake-word path: `numpy`, `sounddevice`, `openwakeword`, bundled OpenWakeWord resource models, and `OWW_CUSTOM_MODEL_PATH`. It also checks Misty's REST API at `http://<MISTY_IP>/api/device`. If the configured IP is stale, it scans local private IPv4 `/24` networks for Misty's device API, stores the discovered IP and broadcast/reverse-DNS name in `.misty-services.json`, and reuses that address next time. Override common settings inline:
+The CLI reads `src\windows-orchestration\.env` when present. Startup loads `Phi-3.5-mini-instruct-generic-cpu:2` into Foundry Local with a 1-hour TTL before starting the controller, so the first chat does not pay model-load latency. Before launching the controller, startup preflights the laptop wake-word path: `numpy`, `sounddevice`, `openwakeword`, bundled OpenWakeWord resource models, and the bundled `models\hey_misty.onnx` custom wake-word model unless `OWW_CUSTOM_MODEL_PATH` overrides it. It also checks Misty's REST API at `http://<MISTY_IP>/api/device`. If the configured IP is stale, it scans local private IPv4 `/24` networks for Misty's device API, stores the discovered IP and broadcast/reverse-DNS name in `.misty-services.json`, and reuses that address next time. Override common settings inline:
 
 ```powershell
 npx . start --misty-ip 10.0.0.44 --orchestration-url http://10.0.0.58:5000
@@ -210,7 +210,7 @@ Common environment variables:
 | `MISTY_IP` | `10.0.0.44` | Misty robot IP address. |
 | `ORCHESTRATION_URL` | `http://10.0.0.58:5000` | URL for the Flask orchestration service. |
 | `USE_LAPTOP_WAKE_WORD` | `true` | Required wake-word mode; the controller will fail fast if laptop wake-word startup is unavailable. |
-| `OWW_CUSTOM_MODEL_PATH` | empty | Path to the custom "Hey Misty" OpenWakeWord model artifact. |
+| `OWW_CUSTOM_MODEL_PATH` | `models\hey_misty.onnx` | Optional override path to a custom "Hey Misty" OpenWakeWord model artifact. |
 | `OWW_MODEL_NAME` | `hey_misty` | Model label for the configured wake-word artifact. |
 | `OWW_THRESHOLD` | `0.7` | Confidence threshold for wake-word inference. |
 | `FOUNDRY_LOCAL_HOST` | auto-discovered | Optional Foundry Local base URL override. |
@@ -227,7 +227,7 @@ Common environment variables:
 | `LAPTOP_MISTY_RECORDING_MODE` | `fallback` | Misty recorder behavior during conversations: `fallback` keeps full Misty audio as a safe fallback, `tally` records only a short tally-light pulse, and `off` disables Misty-side recording. |
 | `LAPTOP_MISTY_TALLY_RECORDING_S` | `1.0` | Length of the tally-light-only Misty recording pulse when `LAPTOP_MISTY_RECORDING_MODE=tally`. |
 
-Copy `src\windows-orchestration\.env.example` to `.env` if you want persistent local settings for the orchestration service. For the supported wake path, train or obtain a custom "Hey Misty" OpenWakeWord model artifact, place it on the laptop at a path the controller can access, and set `OWW_CUSTOM_MODEL_PATH` to that path before launching the controller. Startup fails before the controller is launched if the path is missing, empty, or points to a nonexistent file.
+Copy `src\windows-orchestration\.env.example` to `.env` if you want persistent local settings for the orchestration service. For the supported wake path, the repo bundles `models\hey_misty.onnx`, so `OWW_CUSTOM_MODEL_PATH` can stay empty unless you want to use a retrained or alternate model. Startup fails before the controller is launched if neither the bundled model nor a configured override exists, or if the override points to a nonexistent file.
 
 If `LAPTOP_MISTY_RECORDING_MODE` is `tally` or `off` and laptop mic capture returns no usable audio, the controller raises a clear retryable error instead of silently falling back to Misty. Check the laptop microphone or switch back to `fallback` when robot-side backup audio is needed.
 

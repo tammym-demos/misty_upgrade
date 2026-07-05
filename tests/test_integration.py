@@ -173,6 +173,24 @@ class TestWakeWordConfiguration(unittest.TestCase):
             self.skipTest("misty_controller could not be imported")
         self.assertTrue(self._controller_module.USE_LAPTOP_WAKE_WORD)
 
+    def test_listener_defaults_to_bundled_custom_model(self):
+        """The listener should use the bundled Hey Misty model when no override is set."""
+        if self._listener_module is None:
+            self.skipTest("wake_word_listener could not be imported")
+
+        expected = os.path.normpath(
+            os.path.join(
+                os.path.dirname(__file__),
+                "..",
+                "models",
+                "hey_misty.onnx",
+            )
+        )
+        actual = os.path.normpath(self._listener_module.OWW_CUSTOM_MODEL_PATH)
+
+        self.assertEqual(actual, expected)
+        self.assertTrue(os.path.exists(actual))
+
     def test_missing_custom_model_configuration_fails_fast(self):
         """Missing custom-model config should fail the listener instead of silently using Misty keyphrase."""
         if self._listener_module is None:
