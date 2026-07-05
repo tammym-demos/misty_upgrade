@@ -14,6 +14,9 @@ Run these from the Windows companion device. One-command local startup/shutdown 
 # Start Foundry Local, load Phi-3.5-mini, the orchestration service, and the Misty controller
 npx . start
 
+# Windows ARM64 companion laptops should use x64 Python for faster-whisper/STT
+npx . start --python C:\Users\<you>\AppData\Local\Programs\Python\Python312-x64\python.exe
+
 # Check service status
 npx . status
 
@@ -21,13 +24,13 @@ npx . status
 npx . stop
 ```
 
-The CLI reads `src\windows-orchestration\.env` when present. Startup loads `Phi-3.5-mini-instruct-generic-cpu:2` into Foundry Local with a 1-hour TTL before starting the controller, so the first chat does not pay model-load latency. Before launching the controller, startup preflights the laptop wake-word path: `numpy`, `sounddevice`, `openwakeword`, bundled OpenWakeWord resource models, and the bundled `models\hey_misty.onnx` custom wake-word model unless `OWW_CUSTOM_MODEL_PATH` overrides it. It also checks Misty's REST API at `http://<MISTY_IP>/api/device`. If the configured IP is stale, it scans local private IPv4 `/24` networks for Misty's device API, stores the discovered IP and broadcast/reverse-DNS name in `.misty-services.json`, and reuses that address next time. Override common settings inline:
+The CLI reads `src\windows-orchestration\.env` when present. Startup loads `Phi-3.5-mini-instruct-generic-cpu:2` into Foundry Local with a 1-hour TTL before starting the controller, so the first chat does not pay model-load latency. Before launching services, startup preflights the full local runtime: STT/TTS imports (`faster_whisper`, `kokoro_onnx`, `soundfile`), Kokoro model assets (`kokoro-v1.0.int8.onnx`, `voices-v1.0.bin`), the laptop wake-word path (`numpy`, `sounddevice`, `openwakeword`), bundled OpenWakeWord resource models, and the bundled `models\hey_misty.onnx` custom wake-word model unless `OWW_CUSTOM_MODEL_PATH` overrides it. It also warns when the selected Python path appears to be Windows ARM64, because live STT may require x64 Python on ARM companion devices. Finally, it checks Misty's REST API at `http://<MISTY_IP>/api/device`. If the configured IP is stale, it scans local private IPv4 `/24` networks for Misty's device API, stores the discovered IP and broadcast/reverse-DNS name in `.misty-services.json`, and reuses that address next time. Override common settings inline:
 
 ```powershell
 npx . start --misty-ip 10.0.0.44 --orchestration-url http://10.0.0.58:5000
 ```
 
-On a new companion computer, install dependencies and download OpenWakeWord's bundled resource models before first startup:
+On a new companion computer, install dependencies, download OpenWakeWord's bundled resource models, and place Kokoro's two model files in `src\windows-orchestration` before first startup:
 
 ```powershell
 cd src\windows-orchestration
@@ -123,7 +126,7 @@ Movement adds a guarded `MOVING` state with battery, bump, hazard, and sensor fr
 |---|---|---|
 | Wake word | openWakeWord | Runs on the laptop mic via `sounddevice`. |
 | STT | faster-whisper / whisper-tiny | Runs in-process in `orchestration_service.py`; not served by Foundry Local. |
-| Chat | Phi-3.5-mini | Served by Foundry Local using full model ID `Phi-3.5-mini-instruct-openvino-gpu:2`. |
+| Chat | Phi-3.5-mini | Served by Foundry Local using full model ID `Phi-3.5-mini-instruct-generic-cpu:2`. |
 | TTS | Kokoro-ONNX | Primary offline neural TTS, in-process in the orchestration service. |
 | TTS fallback | pyttsx3 / Windows SAPI5 | Used when Kokoro is unavailable. |
 
@@ -213,11 +216,15 @@ Common environment variables:
 | `OWW_CUSTOM_MODEL_PATH` | `models\hey_misty.onnx` | Optional override path to a custom "Hey Misty" OpenWakeWord model artifact. |
 | `OWW_MODEL_NAME` | `hey_misty` | Model label for the configured wake-word artifact. |
 | `OWW_THRESHOLD` | `0.7` | Confidence threshold for wake-word inference. |
+| `LAPTOP_MIC_DEVICE` | OS default | Optional `sounddevice` input device index or name for laptop wake-word/STT capture. |
+| `CHAT_MODEL_ID` | `Phi-3.5-mini-instruct-generic-cpu:2` | Foundry Local chat model ID used for `/v1/chat/completions`. |
+| `STT_DEVICE` | `cpu` | faster-whisper device; default avoids accidental CUDA selection on non-CUDA Windows laptops. |
+| `STT_COMPUTE_TYPE` | `int8` | faster-whisper compute type. |
 | `FOUNDRY_LOCAL_HOST` | auto-discovered | Optional Foundry Local base URL override. |
 | `FOUNDRY_API_TIMEOUT` | `10.0` | Per-request timeout for Foundry API calls. |
 | `SERVICE_TIMEOUT` | `15.0` | Overall service timeout setting. |
 | `KOKORO_VOICE` | `af_sky` | Kokoro voice ID. |
-| `KOKORO_SPEED` | `1.2` | Kokoro speech speed. |
+| `KOKORO_SPEED` | `1.2` | Kokoro speech speed; synthesis latency scales mostly with response length. |
 | `MAX_USER_CHARS` | `400` | Per-utterance prompt character cap. |
 | `MAX_CONTEXT_CHARS` | `5000` | Total LLM context character budget. |
 | `FOLLOWUP_TIMEOUT_S` | `90` | Follow-up conversation window. |
@@ -227,7 +234,7 @@ Common environment variables:
 | `LAPTOP_MISTY_RECORDING_MODE` | `fallback` | Misty recorder behavior during conversations: `fallback` keeps full Misty audio as a safe fallback, `tally` records only a short tally-light pulse, and `off` disables Misty-side recording. |
 | `LAPTOP_MISTY_TALLY_RECORDING_S` | `1.0` | Length of the tally-light-only Misty recording pulse when `LAPTOP_MISTY_RECORDING_MODE=tally`. |
 
-Copy `src\windows-orchestration\.env.example` to `.env` if you want persistent local settings for the orchestration service. For the supported wake path, the repo bundles `models\hey_misty.onnx`, so `OWW_CUSTOM_MODEL_PATH` can stay empty unless you want to use a retrained or alternate model. Startup fails before the controller is launched if neither the bundled model nor a configured override exists, or if the override points to a nonexistent file.
+Copy `src\windows-orchestration\.env.example` to `.env` if you want persistent local settings for the orchestration service. For the supported wake path, the repo bundles `models\hey_misty.onnx`, so `OWW_CUSTOM_MODEL_PATH` can stay empty unless you want to use a retrained or alternate model. Set `LAPTOP_MIC_DEVICE` when the OS default input is muted or wrong. Startup fails before the controller is launched if required runtime imports, OpenWakeWord resources, Kokoro assets, or the wake-word model are missing.
 
 If `LAPTOP_MISTY_RECORDING_MODE` is `tally` or `off` and laptop mic capture returns no usable audio, the controller raises a clear retryable error instead of silently falling back to Misty. Check the laptop microphone or switch back to `fallback` when robot-side backup audio is needed.
 

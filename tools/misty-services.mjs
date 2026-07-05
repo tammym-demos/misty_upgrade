@@ -27,7 +27,9 @@ const DEFAULTS = {
 };
 
 const WAKE_WORD_PYTHON_MODULES = ["numpy", "sounddevice", "openwakeword"];
+const ORCHESTRATION_PYTHON_MODULES = ["faster_whisper", "kokoro_onnx", "soundfile"];
 const OPENWAKEWORD_RESOURCE_MODELS = ["melspectrogram.onnx", "embedding_model.onnx"];
+const KOKORO_MODEL_FILES = ["kokoro-v1.0.int8.onnx", "voices-v1.0.bin"];
 
 function usage() {
   console.log(`Usage: npx . <command> [options]
@@ -266,13 +268,37 @@ sys.exit(1 if failures else 0)
     : redactSensitive(result.stderr || result.stdout || result.error?.message || `exit code ${result.status}`);
   throw new Error(
     `${label} prerequisites are not ready:\n${details}\n\n` +
-    "The controller uses laptop-side OpenWakeWord; Misty's built-in keyphrase is unsupported.\n" +
     "Install runtime dependencies, then retry startup:\n" +
     `  cd ${ORCH_DIR}\n` +
     `  ${options.python} -m pip install -r requirements.txt\n\n` +
-    "If the full install is blocked by faster-whisper/PyAV wheels on Windows ARM64, install the wake-word prerequisites first:\n" +
-    `  ${options.python} -m pip install numpy sounddevice openwakeword`,
+    "On Windows ARM64, faster-whisper/PyAV wheels may be unavailable for ARM64 Python. " +
+    "Use x64 Python for live services, for example:\n" +
+    "  npx . start --python C:\\Users\\<you>\\AppData\\Local\\Programs\\Python\\Python312-x64\\python.exe",
   );
+}
+
+function warnIfLikelyArm64Python(options, env) {
+  const script = `
+import json
+import platform
+import sys
+
+print("MISTY_PYTHON_RUNTIME=" + json.dumps({
+    "executable": sys.executable,
+    "machine": platform.machine(),
+    "platform": sys.platform,
+}, sort_keys=True))
+`;
+  const result = run(options.python, ["-c", script], { cwd: ORCH_DIR, env, timeout: 30000 });
+  const payload = parseJsonMarker(result.stdout, "MISTY_PYTHON_RUNTIME=");
+  const executable = String(payload?.executable || options.python);
+  if (process.platform === "win32" && /arm64/i.test(executable)) {
+    console.warn(
+      "Preflight warning: Python path appears to be Windows ARM64. " +
+      "Live STT uses faster-whisper, which may require x64 Python on this companion device. " +
+      "If startup or STT fails, retry with --python pointing at Python312-x64\\python.exe.",
+    );
+  }
 }
 
 function checkWakeWordModelPath(env) {
@@ -346,11 +372,31 @@ sys.exit(1 if missing else 0)
 }
 
 function preflightPythonRuntime(options, env) {
+  warnIfLikelyArm64Python(options, env);
+  checkPythonImports(options, env, ORCHESTRATION_PYTHON_MODULES, "Orchestration STT/TTS");
+  checkKokoroAssets();
   if (envFlagEnabled(env.USE_LAPTOP_WAKE_WORD, true)) {
     checkPythonImports(options, env, WAKE_WORD_PYTHON_MODULES, "Laptop wake-word");
     checkOpenWakeWordResources(options, env);
     checkWakeWordModelPath(env);
   }
+}
+
+function checkKokoroAssets() {
+  const missing = KOKORO_MODEL_FILES.filter((fileName) => !fs.existsSync(path.join(ORCH_DIR, fileName)));
+  if (!missing.length) {
+    return;
+  }
+
+  throw new Error(
+    "Kokoro TTS prerequisites are not ready:\n" +
+    missing.map((fileName) => `  - Missing ${path.join(ORCH_DIR, fileName)}`).join("\n") +
+    "\n\nDownload the Kokoro model files into src\\windows-orchestration, then retry startup:\n" +
+    "  cd src\\windows-orchestration\n" +
+    "  curl.exe -L --fail --output kokoro-v1.0.int8.onnx https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx\n" +
+    "  curl.exe -L --fail --output voices-v1.0.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin\n\n" +
+    "Without these files the service falls back to pyttsx3/SAPI5, which can be slow enough to trigger controller timeouts.",
+  );
 }
 
 function foundryIsRunning() {

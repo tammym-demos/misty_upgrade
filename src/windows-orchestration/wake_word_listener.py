@@ -48,6 +48,12 @@ OWW_CUSTOM_MODEL_PATH = os.getenv(
 ).strip() or config_defaults.OWW_CUSTOM_MODEL_PATH
 
 # Audio capture settings (laptop mic)
+_LAPTOP_MIC_DEVICE_RAW = os.getenv("LAPTOP_MIC_DEVICE", config_defaults.LAPTOP_MIC_DEVICE).strip()
+LAPTOP_MIC_DEVICE = (
+    int(_LAPTOP_MIC_DEVICE_RAW)
+    if _LAPTOP_MIC_DEVICE_RAW.isdigit()
+    else (_LAPTOP_MIC_DEVICE_RAW or None)
+)
 SAMPLE_RATE = 16000       # openWakeWord native rate
 FRAME_SAMPLES = 1280      # 80ms at 16kHz — openWakeWord's expected frame size
 BLOCK_SIZE = 1280          # match frame size for 1:1 callback-to-frame ratio
@@ -205,12 +211,14 @@ class WakeWordListener:
                 blocksize=BLOCK_SIZE,
                 dtype="int16",
                 channels=1,
+                device=LAPTOP_MIC_DEVICE,
                 callback=self._audio_callback,
             )
             self._stream.start()
+            device_label = f"device={LAPTOP_MIC_DEVICE}" if LAPTOP_MIC_DEVICE is not None else "default device"
             logger.info(
                 f"Wake word listener started on laptop mic "
-                f"(rate={SAMPLE_RATE}, block={BLOCK_SIZE})"
+                f"({device_label}, rate={SAMPLE_RATE}, block={BLOCK_SIZE})"
             )
             return True
         except Exception as e:

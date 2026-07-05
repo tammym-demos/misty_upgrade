@@ -26,11 +26,16 @@ import os
 # Foundry Local
 FOUNDRY_API_TIMEOUT: float = 10.0
 SERVICE_TIMEOUT: float = 15.0
+CHAT_MODEL_ID: str = "Phi-3.5-mini-instruct-generic-cpu:2"
 
 # TTS (Kokoro-ONNX)
 KOKORO_VOICE: str = "af_sky"
 KOKORO_SPEED: float = 1.2
 TTS_CACHE_MAX: int = 200
+
+# STT (faster-whisper)
+STT_DEVICE: str = "cpu"
+STT_COMPUTE_TYPE: str = "int8"
 
 # LLM prompt-length limits
 MAX_USER_CHARS: int = 400
@@ -75,6 +80,7 @@ OWW_CUSTOM_MODEL_PATH: str = os.path.normpath(
 )
 OWW_MODEL_NAME: str = "hey_misty"
 OWW_THRESHOLD: float = 0.7
+LAPTOP_MIC_DEVICE: str = ""
 
 # Face recognition (issue #16)
 FACE_RECOGNITION_TIMEOUT_S: float = 3.0

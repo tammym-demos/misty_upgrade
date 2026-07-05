@@ -47,6 +47,8 @@ FOUNDRY_API_TIMEOUT = float(os.getenv("FOUNDRY_API_TIMEOUT", str(config_defaults
 SERVICE_TIMEOUT = float(os.getenv("SERVICE_TIMEOUT", str(config_defaults.SERVICE_TIMEOUT)))
 KOKORO_VOICE = os.getenv("KOKORO_VOICE", config_defaults.KOKORO_VOICE)
 KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", str(config_defaults.KOKORO_SPEED)))
+STT_DEVICE = os.getenv("STT_DEVICE", config_defaults.STT_DEVICE).strip() or config_defaults.STT_DEVICE
+STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", config_defaults.STT_COMPUTE_TYPE).strip() or config_defaults.STT_COMPUTE_TYPE
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     (
@@ -233,29 +235,29 @@ _CONTINUATION_PATTERN = re.compile(
 # Per-mode LLM parameters
 RESPONSE_MODE_CONFIG = {
     "short": {
-        "max_tokens": 50,
-        "max_words": 35,
-        "max_sentences": 3,
+        "max_tokens": 35,
+        "max_words": 24,
+        "max_sentences": 2,
         "prompt_suffix": None,
         "stop": ["\n", "...", "\u2014"],
     },
     "summary": {
-        "max_tokens": 80,
-        "max_words": 50,
-        "max_sentences": 3,
+        "max_tokens": 55,
+        "max_words": 35,
+        "max_sentences": 2,
         "prompt_suffix": (
             "The user wants a detailed response. "
-            "Give a compelling summary in 2-3 sentences. "
+            "Give a compelling summary in 2 short sentences. "
             "End by asking 'Want to hear more?'"
         ),
         "stop": ["...", "\u2014"],  # no \n — multi-sentence responses need room
     },
     "continuation": {
-        "max_tokens": 80,
-        "max_words": 50,
-        "max_sentences": 3,
+        "max_tokens": 55,
+        "max_words": 35,
+        "max_sentences": 2,
         "prompt_suffix": (
-            "Continue where you left off. Give the next part in 2-3 sentences. "
+            "Continue where you left off. Give the next part in 2 short sentences. "
             "If there's more to tell, end with 'Want more?' "
             "If wrapping up, give a satisfying ending."
         ),
@@ -346,7 +348,7 @@ MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", str(config_defaults.MAX_C
 # Locked v1 model stack
 # Foundry Local requires full model IDs for inference calls
 MODELS = {
-    "chat": "Phi-3.5-mini-instruct-openvino-gpu:2",
+    "chat": os.getenv("CHAT_MODEL_ID", config_defaults.CHAT_MODEL_ID).strip() or config_defaults.CHAT_MODEL_ID,
     "stt": "whisper-tiny",
 }
 # Short aliases for display/diagnostics
@@ -600,8 +602,17 @@ def _get_whisper_model():
         return _whisper_model
     try:
         from faster_whisper import WhisperModel  # noqa: PLC0415
-        _whisper_model = WhisperModel("tiny", compute_type="int8", cpu_threads=4)
-        logger.info("faster-whisper model loaded (tiny, int8)")
+        _whisper_model = WhisperModel(
+            "tiny",
+            device=STT_DEVICE,
+            compute_type=STT_COMPUTE_TYPE,
+            cpu_threads=4,
+        )
+        logger.info(
+            "faster-whisper model loaded (tiny, device=%s, compute_type=%s)",
+            STT_DEVICE,
+            STT_COMPUTE_TYPE,
+        )
         return _whisper_model
     except Exception as e:
         logger.error(f"Failed to load faster-whisper: {e}")
