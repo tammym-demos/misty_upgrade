@@ -15,6 +15,7 @@ pyttsx3
 # Misty controller: WebSocket client for event subscriptions
 websocket-client
 # Wake word detection: laptop mic + openWakeWord (issue #44)
+numpy
 sounddevice
 openwakeword
 # BLE provisioning: WiFi setup over Bluetooth (issue #111)

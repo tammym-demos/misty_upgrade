@@ -20,10 +20,13 @@ const DEFAULTS = {
   orchestrationHealthUrl: "http://127.0.0.1:5000/api/health",
   controllerStatusUrl: "http://127.0.0.1:5001/api/status",
   mistyIp: "10.0.0.44",
-  chatModelId: "Phi-3.5-mini-instruct-openvino-gpu:2",
+  chatModelId: "Phi-3.5-mini-instruct-generic-cpu:2",
   chatModelAlias: "phi-3.5-mini",
   modelTtlSeconds: 3600,
 };
+
+const WAKE_WORD_PYTHON_MODULES = ["numpy", "sounddevice", "openwakeword"];
+const OPENWAKEWORD_RESOURCE_MODELS = ["melspectrogram.onnx", "embedding_model.onnx"];
 
 function usage() {
   console.log(`Usage: npx . <command> [options]
@@ -208,6 +211,137 @@ function redactSensitive(value) {
   return String(value ?? "")
     .replace(/(token|key|secret|password|pwd)=([^&\s]+)/gi, "$1=<redacted>")
     .replace(/(https?:\/\/[^:\s]+:)[^@\s]+@/gi, "$1<redacted>@");
+}
+
+function envFlagEnabled(value, defaultValue) {
+  if (value === undefined || value === null || value === "") {
+    return defaultValue;
+  }
+
+  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+}
+
+function parseImportFailures(stdout) {
+  return parseJsonMarker(stdout, "MISTY_IMPORT_CHECK=");
+}
+
+function parseJsonMarker(stdout, marker) {
+  const line = stdout.split(/\r?\n/).find((entry) => entry.startsWith(marker));
+  if (!line) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(line.slice(marker.length));
+  } catch {
+    return null;
+  }
+}
+
+function checkPythonImports(options, env, modules, label) {
+  const script = `
+import importlib
+import json
+import sys
+
+failures = {}
+for module in ${JSON.stringify(modules)}:
+    try:
+        importlib.import_module(module)
+    except Exception as exc:
+        failures[module] = f"{type(exc).__name__}: {exc}"
+
+print("MISTY_IMPORT_CHECK=" + json.dumps(failures, sort_keys=True))
+sys.exit(1 if failures else 0)
+`;
+  const result = run(options.python, ["-c", script], { cwd: ORCH_DIR, env, timeout: 30000 });
+  if (result.ok) {
+    return;
+  }
+
+  const failures = parseImportFailures(result.stdout);
+  const details = failures
+    ? Object.entries(failures).map(([module, error]) => `  - ${module}: ${error}`).join("\n")
+    : redactSensitive(result.stderr || result.stdout || result.error?.message || `exit code ${result.status}`);
+  throw new Error(
+    `${label} prerequisites are not ready:\n${details}\n\n` +
+    "The controller uses laptop-side OpenWakeWord; Misty's built-in keyphrase is unsupported.\n" +
+    "Install runtime dependencies, then retry startup:\n" +
+    `  cd ${ORCH_DIR}\n` +
+    `  ${options.python} -m pip install -r requirements.txt\n\n` +
+    "If the full install is blocked by faster-whisper/PyAV wheels on Windows ARM64, install the wake-word prerequisites first:\n" +
+    `  ${options.python} -m pip install numpy sounddevice openwakeword`,
+  );
+}
+
+function checkWakeWordModelPath(env) {
+  const configuredPath = env.OWW_CUSTOM_MODEL_PATH?.trim();
+  if (!configuredPath) {
+    throw new Error(
+      "Laptop wake-word prerequisites are not ready:\n" +
+      "  - OWW_CUSTOM_MODEL_PATH is not configured.\n\n" +
+      "The supported wake path requires a trained custom OpenWakeWord model for \"Hey Misty\"; " +
+      "Misty's built-in keyphrase is unsupported.\n" +
+      "Set OWW_CUSTOM_MODEL_PATH in src\\windows-orchestration\\.env or pass it in the environment, then retry startup.",
+    );
+  }
+
+  const modelPath = path.isAbsolute(configuredPath)
+    ? configuredPath
+    : path.resolve(ORCH_DIR, configuredPath);
+  if (!fs.existsSync(modelPath)) {
+    throw new Error(
+      "Laptop wake-word prerequisites are not ready:\n" +
+      `  - OWW_CUSTOM_MODEL_PATH does not exist: ${modelPath}\n\n` +
+      "Set OWW_CUSTOM_MODEL_PATH to a trained custom \"Hey Misty\" OpenWakeWord model artifact, then retry startup.",
+    );
+  }
+}
+
+function checkOpenWakeWordResources(options, env) {
+  const script = `
+import json
+import sys
+from pathlib import Path
+
+import openwakeword
+
+resource_dir = Path(openwakeword.__file__).resolve().parent / "resources" / "models"
+missing = [
+    model
+    for model in ${JSON.stringify(OPENWAKEWORD_RESOURCE_MODELS)}
+    if not (resource_dir / model).exists()
+]
+
+print("MISTY_OWW_RESOURCE_CHECK=" + json.dumps({
+    "resource_dir": str(resource_dir),
+    "missing": missing,
+}, sort_keys=True))
+sys.exit(1 if missing else 0)
+`;
+  const result = run(options.python, ["-c", script], { cwd: ORCH_DIR, env, timeout: 30000 });
+  if (result.ok) {
+    return;
+  }
+
+  const payload = parseJsonMarker(result.stdout, "MISTY_OWW_RESOURCE_CHECK=");
+  const missing = payload?.missing?.length ? payload.missing.join(", ") : "unknown";
+  const resourceDir = payload?.resource_dir || "unknown";
+  throw new Error(
+    "Laptop wake-word prerequisites are not ready:\n" +
+    `  - OpenWakeWord resource models are missing: ${missing}\n` +
+    `  - Resource directory: ${resourceDir}\n\n` +
+    "Download the bundled OpenWakeWord resource models, then retry startup:\n" +
+    `  ${options.python} -c "from openwakeword.utils import download_models; download_models()"`,
+  );
+}
+
+function preflightPythonRuntime(options, env) {
+  if (envFlagEnabled(env.USE_LAPTOP_WAKE_WORD, true)) {
+    checkPythonImports(options, env, WAKE_WORD_PYTHON_MODULES, "Laptop wake-word");
+    checkOpenWakeWordResources(options, env);
+    checkWakeWordModelPath(env);
+  }
 }
 
 function foundryIsRunning() {
@@ -535,6 +669,7 @@ async function start(options) {
 
   const state = readState();
   const env = serviceEnv(options, state);
+  preflightPythonRuntime(options, env);
   state.version = 1;
   state.startedAt = state.startedAt || new Date().toISOString();
 
