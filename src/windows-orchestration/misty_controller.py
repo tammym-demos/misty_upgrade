@@ -407,7 +407,8 @@ class MistyController:
         fallback (e_*.jpg) applies automatically when custom assets are missing
         or failed to upload. Does not change the animation state, so it is safe
         for one-off faces (movement acknowledgment, error blips). Prefer
-        ``set_state()``/``set_emotion()`` for state-driven faces; use this only
+        ``set_state()`` for state-driven faces (emotion is applied via the
+        FaceAnimator, e.g. ``self._face_animator.set_emotion()``); use this only
         where a specific asset must be shown outside a normal state transition.
         """
         if self._face_animator is not None:

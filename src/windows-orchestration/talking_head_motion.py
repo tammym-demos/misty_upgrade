@@ -111,7 +111,7 @@ class TalkingHeadMotion:
         """
         if not self._enabled:
             return
-        e = (emotion or "").strip().lower() if isinstance(emotion, str) else "neutral"
+        e = emotion.strip().lower() if isinstance(emotion, str) and emotion.strip() else "neutral"
         # Restart cleanly if already running so the emotion/scale updates.
         self.stop(center=False)
         with self._lock:

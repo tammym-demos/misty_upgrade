@@ -86,6 +86,27 @@ class TestShowAsset:
         # Target state stays IDLE even though a talking face was shown one-off.
         assert animator._target_state == "IDLE"
 
+    @patch("face_animator.requests.post")
+    def test_show_asset_display_failure_triggers_builtin_fallback(self, mock_post):
+        """A failed custom display flips availability and retries with a built-in."""
+        def _resp(url, json=None, timeout=None):
+            fn = json["FileName"]
+            # Custom face_* pushes fail; built-in e_* pushes succeed.
+            return MagicMock(status_code=500 if fn.startswith("face_") else 200)
+
+        mock_post.side_effect = _resp
+        animator = FaceAnimator("http://10.0.0.23", enabled=False)
+        assert animator.custom_faces_available is True
+
+        ok = animator.show_asset("face_talking_sad.gif")
+
+        assert ok is True  # built-in fallback push succeeded
+        # Availability flipped so subsequent resolves use built-ins.
+        assert animator.custom_faces_available is False
+        filenames = [c.kwargs["json"]["FileName"] for c in mock_post.call_args_list]
+        assert "face_talking_sad.gif" in filenames  # attempted custom first
+        assert "e_Sadness.jpg" in filenames  # then built-in fallback
+
 
 class TestDisabledIdentityAndFallback:
     """USE_FACE_ANIMATION=false equivalent: identity + fallback still work."""

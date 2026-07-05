@@ -135,6 +135,16 @@ class TestEmotionScaling:
         motion.stop()
         assert EMOTION_MOTION_SCALE.get("furious", DEFAULT_MOTION_SCALE) == DEFAULT_MOTION_SCALE
 
+    def test_empty_emotion_normalized_to_neutral(self):
+        rec = _Recorder()
+        motion = TalkingHeadMotion(rec, enabled=True, interval_s=0.1)
+        motion.start("")
+        assert motion._emotion == "neutral"
+        motion.stop()
+        motion.start(None)
+        assert motion._emotion == "neutral"
+        motion.stop()
+
 
 class TestRestartAndSafety:
     def test_restart_updates_emotion(self):

@@ -322,8 +322,23 @@ class FaceAnimator:
         state transition. It applies built-in firmware fallback resolution but
         does **not** change the target animation state, so it will not disturb
         the state-driven animation loop. Best-effort; never raises.
+
+        Deterministic display-failure fallback (#116): if a custom ``face_*``
+        asset fails to display while custom faces were believed available, mark
+        custom faces unavailable and immediately retry with the built-in
+        firmware fallback so the display never gets stuck on a stale frame and
+        subsequent calls resolve to built-ins.
         """
-        return self._push_frame(self.resolve_asset(filename))
+        frame = self.resolve_asset(filename)
+        if self._push_frame(frame):
+            return True
+
+        with self._lock:
+            was_available = self._custom_faces_available
+        if was_available and isinstance(filename, str) and filename.startswith("face_"):
+            self.set_custom_faces_available(False)
+            return self._push_frame(builtin_fallback_for_asset(filename))
+        return False
 
     def start(self):
         """Start the animation thread."""
