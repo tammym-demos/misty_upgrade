@@ -41,15 +41,19 @@ from PIL import Image, ImageEnhance
 
 # --- Constants ---
 WIDTH, HEIGHT = 480, 272
+TARGET_ASPECT = WIDTH / HEIGHT
+FACE_VISIBILITY_BRIGHTNESS = 1.20
 
 # Sprite sheet frame coordinates (x1, y1, x2, y2) in new_robot_pics_v2.png
+# Each crop uses the same 480:272 aspect ratio as Misty's display so generated
+# frames do not visibly zoom or stretch when the controller changes states.
 SPRITE_FRAMES = {
-    "frame_normal": (33, 40, 671, 370),
-    "frame_excited": (690, 40, 1327, 370),
-    "frame_talk_closed": (41, 410, 352, 630),
-    "frame_talk_puckered": (362, 410, 673, 630),
-    "frame_talk_pause": (688, 410, 999, 630),
-    "frame_talk_open": (1008, 410, 1319, 630),
+    "frame_normal": (61, 40, 643, 370),
+    "frame_excited": (718, 40, 1300, 370),
+    "frame_talk_closed": (2, 410, 390, 630),
+    "frame_talk_puckered": (324, 410, 712, 630),
+    "frame_talk_pause": (650, 410, 1038, 630),
+    "frame_talk_open": (968, 410, 1356, 630),
 }
 
 # Emotion color tints (R, G, B, alpha) blended over frames
@@ -70,6 +74,17 @@ EMOTION_BRIGHTNESS = {
 }
 
 
+def _assert_target_aspect(name: str, box: tuple):
+    """Raise if a source crop would be stretched when resized to Misty's display."""
+    x1, y1, x2, y2 = box
+    aspect = (x2 - x1) / (y2 - y1)
+    if abs(aspect - TARGET_ASPECT) > 0.01:
+        raise ValueError(
+            f"{name} crop aspect {aspect:.3f} must match Misty display aspect "
+            f"{TARGET_ASPECT:.3f}: {box}"
+        )
+
+
 def extract_frames(assets_dir: Path):
     """Extract individual frames from the sprite sheet."""
     sprite_path = assets_dir / "new_robot_pics_v2.png"
@@ -81,7 +96,9 @@ def extract_frames(assets_dir: Path):
     frames_dir.mkdir(exist_ok=True)
 
     for name, box in SPRITE_FRAMES.items():
+        _assert_target_aspect(name, box)
         frame = img.crop(box).resize((WIDTH, HEIGHT), Image.LANCZOS)
+        frame = apply_brightness(frame, FACE_VISIBILITY_BRIGHTNESS)
         frame.save(frames_dir / f"{name}.png")
         print(f"  Extracted {name}.png from {box}")
 

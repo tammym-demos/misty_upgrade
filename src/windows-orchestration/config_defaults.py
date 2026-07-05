@@ -38,6 +38,8 @@ STT_DEVICE: str = "cpu"
 STT_COMPUTE_TYPE: str = "int8"
 STT_MIN_RMS: float = 0.002
 STT_MIN_PEAK: float = 0.02
+STT_MIN_AVG_LOGPROB: float = -1.0
+STT_MAX_NO_SPEECH_PROB: float = 0.6
 
 # LLM prompt-length limits
 MAX_USER_CHARS: int = 400

@@ -51,6 +51,8 @@ STT_DEVICE = os.getenv("STT_DEVICE", config_defaults.STT_DEVICE).strip() or conf
 STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", config_defaults.STT_COMPUTE_TYPE).strip() or config_defaults.STT_COMPUTE_TYPE
 STT_MIN_RMS = float(os.getenv("STT_MIN_RMS", str(config_defaults.STT_MIN_RMS)))
 STT_MIN_PEAK = float(os.getenv("STT_MIN_PEAK", str(config_defaults.STT_MIN_PEAK)))
+STT_MIN_AVG_LOGPROB = float(os.getenv("STT_MIN_AVG_LOGPROB", str(config_defaults.STT_MIN_AVG_LOGPROB)))
+STT_MAX_NO_SPEECH_PROB = float(os.getenv("STT_MAX_NO_SPEECH_PROB", str(config_defaults.STT_MAX_NO_SPEECH_PROB)))
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     (
@@ -668,7 +670,23 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
             vad_filter=False,
             initial_prompt="Hey Misty, tell me about science, history, math, geography, and fun facts.",
         )
-        text = " ".join(seg.text.strip() for seg in segments).strip()
+        segment_list = list(segments)
+        text = " ".join(seg.text.strip() for seg in segment_list).strip()
+
+        if segment_list:
+            avg_logprob = sum(getattr(seg, "avg_logprob", 0.0) for seg in segment_list) / len(segment_list)
+            max_no_speech_prob = max(getattr(seg, "no_speech_prob", 0.0) for seg in segment_list)
+            if avg_logprob < STT_MIN_AVG_LOGPROB or max_no_speech_prob > STT_MAX_NO_SPEECH_PROB:
+                logger.info(
+                    "Rejecting low-confidence STT result: avg_logprob=%.3f < %.3f "
+                    "or no_speech_prob=%.3f > %.3f | text=%r",
+                    avg_logprob,
+                    STT_MIN_AVG_LOGPROB,
+                    max_no_speech_prob,
+                    STT_MAX_NO_SPEECH_PROB,
+                    text,
+                )
+                return {"status": "empty", "text": "", "latency_ms": 0}
 
         logger.debug(f"STT result: {text}")
         return {"status": "ok", "text": text}
