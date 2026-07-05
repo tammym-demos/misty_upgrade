@@ -36,6 +36,8 @@ TTS_CACHE_MAX: int = 200
 # STT (faster-whisper)
 STT_DEVICE: str = "cpu"
 STT_COMPUTE_TYPE: str = "int8"
+STT_MIN_RMS: float = 0.002
+STT_MIN_PEAK: float = 0.02
 
 # LLM prompt-length limits
 MAX_USER_CHARS: int = 400

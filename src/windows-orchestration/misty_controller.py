@@ -988,6 +988,10 @@ class MistyController:
         """
         result = self.misty_get("/api/images")
         if not result:
+            logger.warning(
+                "Could not list Misty image inventory; required face assets will be "
+                "checked by upload path"
+            )
             return set()
         images = result.get("result", []) or []
         names: set[str] = set()

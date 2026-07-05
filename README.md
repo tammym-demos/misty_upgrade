@@ -220,6 +220,7 @@ Common environment variables:
 | `CHAT_MODEL_ID` | `Phi-3.5-mini-instruct-generic-cpu:2` | Foundry Local chat model ID used for `/v1/chat/completions`. |
 | `STT_DEVICE` | `cpu` | faster-whisper device; default avoids accidental CUDA selection on non-CUDA Windows laptops. |
 | `STT_COMPUTE_TYPE` | `int8` | faster-whisper compute type. |
+| `STT_MIN_RMS` / `STT_MIN_PEAK` | `0.002` / `0.02` | Near-silence gate before STT to avoid hallucinated follow-up responses. |
 | `FOUNDRY_LOCAL_HOST` | auto-discovered | Optional Foundry Local base URL override. |
 | `FOUNDRY_API_TIMEOUT` | `10.0` | Per-request timeout for Foundry API calls. |
 | `SERVICE_TIMEOUT` | `15.0` | Overall service timeout setting. |

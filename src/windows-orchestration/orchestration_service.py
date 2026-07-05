@@ -49,6 +49,8 @@ KOKORO_VOICE = os.getenv("KOKORO_VOICE", config_defaults.KOKORO_VOICE)
 KOKORO_SPEED = float(os.getenv("KOKORO_SPEED", str(config_defaults.KOKORO_SPEED)))
 STT_DEVICE = os.getenv("STT_DEVICE", config_defaults.STT_DEVICE).strip() or config_defaults.STT_DEVICE
 STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", config_defaults.STT_COMPUTE_TYPE).strip() or config_defaults.STT_COMPUTE_TYPE
+STT_MIN_RMS = float(os.getenv("STT_MIN_RMS", str(config_defaults.STT_MIN_RMS)))
+STT_MIN_PEAK = float(os.getenv("STT_MIN_PEAK", str(config_defaults.STT_MIN_PEAK)))
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     (
@@ -633,7 +635,8 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
         if model is None:
             return {"status": "error", "error": "stt_failure"}
 
-        # Log audio stats for debugging empty STT issues
+        # Log audio stats for debugging empty STT issues and reject near-silence
+        # before Whisper can hallucinate stale or background phrases.
         try:
             import numpy as _np
             audio_io_check = BytesIO(audio_bytes)
@@ -643,6 +646,16 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
             peak = float(_np.max(_np.abs(data)))
             logger.info(f"Audio stats: {len(audio_bytes)} bytes, sr={sr}, "
                         f"duration={len(data)/sr:.1f}s, RMS={rms:.6f}, peak={peak:.6f}")
+            if rms < STT_MIN_RMS and peak < STT_MIN_PEAK:
+                logger.info(
+                    "Audio below STT silence threshold: "
+                    "RMS=%.6f < %.6f and peak=%.6f < %.6f",
+                    rms,
+                    STT_MIN_RMS,
+                    peak,
+                    STT_MIN_PEAK,
+                )
+                return {"status": "empty", "text": "", "latency_ms": 0}
         except Exception as e:
             logger.debug(f"Audio stats failed: {e}")
 
