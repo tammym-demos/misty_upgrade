@@ -57,6 +57,36 @@ MISTY_HOST = os.getenv("MISTY_HOST", "http://10.0.0.44")
 WINDOWS_HOST = os.getenv("WINDOWS_HOST", "http://localhost:5000")
 FOUNDRY_HOST = _discover_foundry_endpoint()
 
+
+class TestOrchestrationSttConfidence(unittest.TestCase):
+    """Unit tests for STT hallucination guards."""
+
+    @classmethod
+    def setUpClass(cls):
+        import orchestration_service  # noqa: PLC0415
+        cls._svc = orchestration_service
+
+    def test_low_confidence_transcript_is_treated_as_empty_stt(self):
+        """Whisper guesses from near-silence should not reach the LLM."""
+        model = unittest.mock.MagicMock()
+        model.transcribe.return_value = (
+            [
+                SimpleNamespace(
+                    text="Thank you very much for watching, and I hope you enjoyed this video.",
+                    avg_logprob=-1.85,
+                    no_speech_prob=0.01,
+                )
+            ],
+            SimpleNamespace(),
+        )
+
+        with unittest.mock.patch.object(self._svc, "_get_whisper_model", return_value=model):
+            result = self._svc.speech_to_text(b"not-a-real-wav", time.time())
+
+        self.assertEqual(result["status"], "empty")
+        self.assertEqual(result["text"], "")
+
+
 class TestLaptopMistyRecordingConfig(unittest.TestCase):
     """Unit tests for laptop-mode Misty recording configuration (#66)."""
 

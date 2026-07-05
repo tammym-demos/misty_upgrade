@@ -18,5 +18,7 @@ websocket-client
 numpy
 sounddevice
 openwakeword
+# Face asset generation and validation
+Pillow
 # BLE provisioning: WiFi setup over Bluetooth (issue #111)
 bleak
