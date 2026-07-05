@@ -492,7 +492,7 @@ class TestFoundryLocalIntegration(unittest.TestCase):
     def test_foundry_chat_completions(self):
         """Test basic LLM inference."""
         payload = {
-            "model": "Phi-3.5-mini-instruct-openvino-gpu:2",
+            "model": os.getenv("FOUNDRY_CHAT_MODEL", "Phi-3.5-mini-instruct-generic-cpu:2"),
             "messages": [{"role": "user", "content": "Hello"}],
             "max_tokens": 50,
         }

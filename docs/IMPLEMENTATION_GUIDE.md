@@ -143,7 +143,7 @@ In both modes, a full Core+Sensory reboot is triggered proactively after `PROACT
 - STT: `whisper-tiny` — Fast speech-to-text — **via faster-whisper (in-process, not Foundry)**
 
 **Foundry Local Endpoints Used**:
-- `POST /v1/chat/completions` — OpenAI-compatible LLM (use full model ID, e.g., `Phi-3.5-mini-instruct-openvino-gpu:2`)
+- `POST /v1/chat/completions` — OpenAI-compatible LLM (use full model ID, e.g., `Phi-3.5-mini-instruct-generic-cpu:2`)
 - `GET /openai/models` — List loaded models (returns array of model ID strings)
 
 > **Important:** Foundry Local does **not** expose a REST endpoint for Whisper STT.
