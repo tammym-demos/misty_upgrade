@@ -777,6 +777,8 @@ async function cleanupMisty(env) {
     ["POST", "/api/audio/keyphrase/stop", undefined],
     ["POST", "/api/audio/record/stop", undefined],
     ["POST", "/api/skills/cancel", undefined],
+    ["POST", "/api/halt", undefined],
+    ["POST", "/api/images/display", JSON.stringify({ FileName: "face_idle.gif", Alpha: 1 })],
     ["POST", "/api/led", JSON.stringify({ red: 0, green: 0, blue: 0 })],
   ];
 

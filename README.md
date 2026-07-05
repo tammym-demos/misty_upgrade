@@ -17,7 +17,7 @@ npx . start
 # Check service status
 npx . status
 
-# Gracefully stop the controller, release Misty audio/LED resources, and stop owned services
+# Gracefully stop the controller, put Misty in a safe rest state, and stop owned services
 npx . stop
 ```
 
@@ -345,7 +345,7 @@ For unattended physical testing, see `tests\autonomous_test_harness.py`.
 - Do not push changes directly to `main`; use a feature branch and PR.
 - Do not rely on Misty's on-robot skills for the current pipeline. Auto-starting skills were removed because they interfered with audio.
 - Do not use sensory-only reboot. Use full reboot with both `Core` and `SensoryServices` set to `true`.
-- On shutdown, stop recording, cancel skills, and turn the LED off so the tally light and audio resources are released.
+- On shutdown, stop recording, cancel skills, halt motion, show the idle face, and turn the LED off so Misty is left in a safe rest state with audio resources released.
 
 ---
 

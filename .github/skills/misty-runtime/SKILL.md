@@ -61,7 +61,10 @@ Foundry Local quirks:
   1. `POST /api/audio/keyphrase/stop`
   2. `POST /api/audio/record/stop`
   3. `POST /api/skills/cancel`
-  4. `POST /api/led {"red":0,"green":0,"blue":0}`
+  4. `POST /api/halt`
+  5. `POST /api/images/display {"FileName":"face_idle.gif","Alpha":1}`
+  6. `POST /api/led {"red":0,"green":0,"blue":0}`
+- Treat this stop-cycle sequence as Misty's safe sleep/rest state. Do not call undocumented sleep/power endpoints unless they have been validated on the target firmware.
 - At very low battery, mic/audio APIs can return success but produce no useful data. Keep operation above ~10%; movement has stricter battery cutoffs in code.
 
 ## Service startup and validation
@@ -169,6 +172,7 @@ Base URL: `http://<MISTY_IP>/api/`
 | POST | `/api/led` | Set LED. |
 | POST | `/api/images/display` | Set face image. |
 | POST | `/api/skills/cancel` | Cancel running on-robot skills. |
+| POST | `/api/halt` | Halt robot motion during stop/safety cleanup. |
 | POST | `/api/reboot` | Full safe reboot with both Core and SensoryServices true. |
 | POST | `/api/head` | Move head. |
 | POST | `/api/arms` | Move arms. |
