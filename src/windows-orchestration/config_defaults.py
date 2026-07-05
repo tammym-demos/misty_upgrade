@@ -93,3 +93,29 @@ REQUIRED_FACE_ASSETS: tuple = (
     "face_talking_sad.gif",
     "face_talking_curious.gif",
 )
+
+# Face asset replacement / sync behavior (issue #116).
+#   "missing"   = idempotent startup — only upload required assets that are not
+#                 already present on the device (default; safe to run every boot).
+#   "overwrite" = force re-upload of every required asset even if a file with the
+#                 same name already exists on Misty. Use this to replace the
+#                 custom face with a new set that reuses the same filenames, then
+#                 return to "missing" for normal idempotent startup.
+# The FACE_ASSETS_FORCE_UPLOAD=true environment flag is a convenience alias that
+# forces "overwrite" mode for a single run.
+FACE_ASSETS_SYNC_MODE: str = "missing"
+
+# Emotion-aware subtle talking head motion (issue #116). Off by default and
+# gated by config. When enabled, Misty makes small, safe head movements while
+# speaking (state PLAYING only) and re-centers when playback ends or the state
+# leaves PLAYING. Never runs during MOVING/CHARGING/ERROR/shutdown or drive
+# commands, and always stays within the safe head limits below.
+USE_TALKING_HEAD_MOTION: bool = False
+# Safe head-motion envelope for talking motion (degrees). These stay well inside
+# Misty's mechanical limits (pitch -40..26, roll -40..40, yaw -81..81).
+TALKING_HEAD_PITCH_CENTER: float = -10.0   # slight up-tilt = eye contact
+TALKING_HEAD_PITCH_RANGE: float = 4.0      # +/- pitch wobble
+TALKING_HEAD_YAW_RANGE: float = 6.0        # +/- yaw wobble
+TALKING_HEAD_ROLL_RANGE: float = 3.0       # +/- roll wobble
+TALKING_HEAD_VELOCITY: float = 30.0        # gentle move velocity
+TALKING_HEAD_INTERVAL_S: float = 0.8       # seconds between micro-movements

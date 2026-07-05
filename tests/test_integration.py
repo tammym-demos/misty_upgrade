@@ -2281,7 +2281,8 @@ class TestSpeakMoveIntegration(unittest.TestCase):
         self.ctrl.hazard_lock = threading.Lock()
         self.ctrl.last_activity_time = time.time()
         self.ctrl._wake_word_listener = None
-        self.ctrl._face_animator = None
+        self.ctrl._face_animator = unittest.mock.MagicMock()
+        self.ctrl._talking_head = unittest.mock.MagicMock()
         self.ctrl.misty_post = mock_post
         self.ctrl.DRIVE_MAX_DURATION_MS = 3000
         self.ctrl.MOVEMENT_SETTLE_MS = 100  # fast for tests
