@@ -24,7 +24,10 @@ phrase "Hey Misty" spoken into the companion laptop's microphone. It is used by 
 
 ## Configuration
 
-Set the following in `src/windows-orchestration/.env`:
+The repository bundles `models/hey_misty.onnx`, and startup uses it by default
+when `OWW_CUSTOM_MODEL_PATH` is empty. Set the following in
+`src/windows-orchestration/.env` only when you want to override the bundled
+model with a retrained or alternate artifact:
 
 ```env
 OWW_CUSTOM_MODEL_PATH=C:\path\to\misty_upgrade\models\hey_misty.onnx

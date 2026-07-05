@@ -61,10 +61,37 @@ Foundry Local quirks:
   1. `POST /api/audio/keyphrase/stop`
   2. `POST /api/audio/record/stop`
   3. `POST /api/skills/cancel`
-  4. `POST /api/led {"red":0,"green":0,"blue":0}`
+  4. `POST /api/halt`
+  5. `POST /api/images/display {"FileName":"face_idle.gif","Alpha":1}`
+  6. `POST /api/led {"red":0,"green":0,"blue":0}`
+- Treat this stop-cycle sequence as Misty's safe sleep/rest state. Do not call undocumented sleep/power endpoints unless they have been validated on the target firmware.
 - At very low battery, mic/audio APIs can return success but produce no useful data. Keep operation above ~10%; movement has stricter battery cutoffs in code.
 
 ## Service startup and validation
+
+At the start of every live robot session, resolve Misty's current IP before starting or testing services. Do not assume the default IP is current.
+
+Preferred IP sources, in order:
+
+1. `src\windows-orchestration\.env` if it contains `MISTY_IP=<ip>`.
+2. `.misty-services.json` if a previous `npx . start` discovered and persisted `misty.ipAddress`.
+3. An explicit user-provided IP, passed with `npx . start --misty-ip <ip>` or `MISTY_IP=<ip>`.
+4. CLI auto-discovery from `npx . start`, which scans local private `/24` networks when the configured IP is stale.
+
+Useful IP checks:
+
+```powershell
+# Read persistent local config, if present.
+Select-String -Path src\windows-orchestration\.env -Pattern '^MISTY_IP\s*='
+
+# Read the last auto-discovered IP, if present.
+Get-Content .misty-services.json | ConvertFrom-Json | Select-Object -ExpandProperty misty
+
+# Verify the resolved IP before live testing.
+curl http://<MISTY_IP>/api/device
+```
+
+If Misty moved networks, prefer `npx . start --misty-ip <ip>` once; the CLI will persist the reachable robot in `.misty-services.json` for future sessions.
 
 Manual startup:
 
@@ -145,6 +172,7 @@ Base URL: `http://<MISTY_IP>/api/`
 | POST | `/api/led` | Set LED. |
 | POST | `/api/images/display` | Set face image. |
 | POST | `/api/skills/cancel` | Cancel running on-robot skills. |
+| POST | `/api/halt` | Halt robot motion during stop/safety cleanup. |
 | POST | `/api/reboot` | Full safe reboot with both Core and SensoryServices true. |
 | POST | `/api/head` | Move head. |
 | POST | `/api/arms` | Move arms. |

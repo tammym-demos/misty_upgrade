@@ -24,7 +24,13 @@ const DEFAULTS = {
   chatModelId: "Phi-3.5-mini-instruct-generic-cpu:2",
   chatModelAlias: "phi-3.5-mini",
   modelTtlSeconds: 3600,
+  wakeWordModelPath: path.join(REPO_ROOT, "models", "hey_misty.onnx"),
 };
+
+const WAKE_WORD_PYTHON_MODULES = ["numpy", "sounddevice", "openwakeword"];
+const ORCHESTRATION_PYTHON_MODULES = ["faster_whisper", "kokoro_onnx", "soundfile"];
+const OPENWAKEWORD_RESOURCE_MODELS = ["melspectrogram.onnx", "embedding_model.onnx"];
+const KOKORO_MODEL_FILES = ["kokoro-v1.0.int8.onnx", "voices-v1.0.bin"];
 
 function usage() {
   console.log(`Usage: npx . <command> [options]
@@ -462,6 +468,189 @@ function redactSensitive(value) {
     .replace(/(https?:\/\/[^:\s]+:)[^@\s]+@/gi, "$1<redacted>@");
 }
 
+function envFlagEnabled(value, defaultValue) {
+  if (value === undefined || value === null || value === "") {
+    return defaultValue;
+  }
+
+  return ["1", "true", "yes", "on"].includes(String(value).trim().toLowerCase());
+}
+
+function parseImportFailures(stdout) {
+  return parseJsonMarker(stdout, "MISTY_IMPORT_CHECK=");
+}
+
+function parseJsonMarker(stdout, marker) {
+  const line = stdout.split(/\r?\n/).find((entry) => entry.startsWith(marker));
+  if (!line) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(line.slice(marker.length));
+  } catch {
+    return null;
+  }
+}
+
+function checkPythonImports(options, env, modules, label) {
+  const script = `
+import importlib
+import json
+import sys
+
+failures = {}
+for module in ${JSON.stringify(modules)}:
+    try:
+        importlib.import_module(module)
+    except Exception as exc:
+        failures[module] = f"{type(exc).__name__}: {exc}"
+
+print("MISTY_IMPORT_CHECK=" + json.dumps(failures, sort_keys=True))
+sys.exit(1 if failures else 0)
+`;
+  const result = run(options.python, ["-c", script], { cwd: ORCH_DIR, env, timeout: 30000 });
+  if (result.ok) {
+    return;
+  }
+
+  const failures = parseImportFailures(result.stdout);
+  const details = failures
+    ? Object.entries(failures).map(([module, error]) => `  - ${module}: ${error}`).join("\n")
+    : redactSensitive(result.stderr || result.stdout || result.error?.message || `exit code ${result.status}`);
+  throw new Error(
+    `${label} prerequisites are not ready:\n${details}\n\n` +
+    "Install runtime dependencies, then retry startup:\n" +
+    `  cd ${ORCH_DIR}\n` +
+    `  ${options.python} -m pip install -r requirements.txt\n\n` +
+    "On Windows ARM64, faster-whisper/PyAV wheels may be unavailable for ARM64 Python. " +
+    "Use x64 Python for live services, for example:\n" +
+    "  npx . start --python C:\\Users\\<you>\\AppData\\Local\\Programs\\Python\\Python312-x64\\python.exe",
+  );
+}
+
+function warnIfLikelyArm64Python(options, env) {
+  const script = `
+import json
+import platform
+import sys
+
+print("MISTY_PYTHON_RUNTIME=" + json.dumps({
+    "executable": sys.executable,
+    "machine": platform.machine(),
+    "platform": sys.platform,
+}, sort_keys=True))
+`;
+  const result = run(options.python, ["-c", script], { cwd: ORCH_DIR, env, timeout: 30000 });
+  const payload = parseJsonMarker(result.stdout, "MISTY_PYTHON_RUNTIME=");
+  const executable = String(payload?.executable || options.python);
+  if (process.platform === "win32" && /arm64/i.test(executable)) {
+    console.warn(
+      "Preflight warning: Python path appears to be Windows ARM64. " +
+      "Live STT uses faster-whisper, which may require x64 Python on this companion device. " +
+      "If startup or STT fails, retry with --python pointing at Python312-x64\\python.exe.",
+    );
+  }
+}
+
+function checkWakeWordModelPath(env) {
+  const configuredPath = env.OWW_CUSTOM_MODEL_PATH?.trim();
+  if (!configuredPath) {
+    if (fs.existsSync(DEFAULTS.wakeWordModelPath)) {
+      env.OWW_CUSTOM_MODEL_PATH = DEFAULTS.wakeWordModelPath;
+      return;
+    }
+
+    throw new Error(
+      "Laptop wake-word prerequisites are not ready:\n" +
+      `  - Bundled wake-word model is missing: ${DEFAULTS.wakeWordModelPath}\n` +
+      "  - OWW_CUSTOM_MODEL_PATH is not configured.\n\n" +
+      "The supported wake path requires a trained custom OpenWakeWord model for \"Hey Misty\"; " +
+      "Misty's built-in keyphrase is unsupported.\n" +
+      "Restore models\\hey_misty.onnx or set OWW_CUSTOM_MODEL_PATH in " +
+      "src\\windows-orchestration\\.env or the environment, then retry startup.",
+    );
+  }
+
+  const modelPath = path.isAbsolute(configuredPath)
+    ? configuredPath
+    : path.resolve(ORCH_DIR, configuredPath);
+  if (!fs.existsSync(modelPath)) {
+    throw new Error(
+      "Laptop wake-word prerequisites are not ready:\n" +
+      `  - OWW_CUSTOM_MODEL_PATH does not exist: ${modelPath}\n\n` +
+      "Set OWW_CUSTOM_MODEL_PATH to a trained custom \"Hey Misty\" OpenWakeWord model artifact, " +
+      "or unset it to use the bundled models\\hey_misty.onnx artifact.",
+    );
+  }
+}
+
+function checkOpenWakeWordResources(options, env) {
+  const script = `
+import json
+import sys
+from pathlib import Path
+
+import openwakeword
+
+resource_dir = Path(openwakeword.__file__).resolve().parent / "resources" / "models"
+missing = [
+    model
+    for model in ${JSON.stringify(OPENWAKEWORD_RESOURCE_MODELS)}
+    if not (resource_dir / model).exists()
+]
+
+print("MISTY_OWW_RESOURCE_CHECK=" + json.dumps({
+    "resource_dir": str(resource_dir),
+    "missing": missing,
+}, sort_keys=True))
+sys.exit(1 if missing else 0)
+`;
+  const result = run(options.python, ["-c", script], { cwd: ORCH_DIR, env, timeout: 30000 });
+  if (result.ok) {
+    return;
+  }
+
+  const payload = parseJsonMarker(result.stdout, "MISTY_OWW_RESOURCE_CHECK=");
+  const missing = payload?.missing?.length ? payload.missing.join(", ") : "unknown";
+  const resourceDir = payload?.resource_dir || "unknown";
+  throw new Error(
+    "Laptop wake-word prerequisites are not ready:\n" +
+    `  - OpenWakeWord resource models are missing: ${missing}\n` +
+    `  - Resource directory: ${resourceDir}\n\n` +
+    "Download the bundled OpenWakeWord resource models, then retry startup:\n" +
+    `  ${options.python} -c "from openwakeword.utils import download_models; download_models()"`,
+  );
+}
+
+function preflightPythonRuntime(options, env) {
+  warnIfLikelyArm64Python(options, env);
+  checkPythonImports(options, env, ORCHESTRATION_PYTHON_MODULES, "Orchestration STT/TTS");
+  checkKokoroAssets();
+  if (envFlagEnabled(env.USE_LAPTOP_WAKE_WORD, true)) {
+    checkPythonImports(options, env, WAKE_WORD_PYTHON_MODULES, "Laptop wake-word");
+    checkOpenWakeWordResources(options, env);
+    checkWakeWordModelPath(env);
+  }
+}
+
+function checkKokoroAssets() {
+  const missing = KOKORO_MODEL_FILES.filter((fileName) => !fs.existsSync(path.join(ORCH_DIR, fileName)));
+  if (!missing.length) {
+    return;
+  }
+
+  throw new Error(
+    "Kokoro TTS prerequisites are not ready:\n" +
+    missing.map((fileName) => `  - Missing ${path.join(ORCH_DIR, fileName)}`).join("\n") +
+    "\n\nDownload the Kokoro model files into src\\windows-orchestration, then retry startup:\n" +
+    "  cd src\\windows-orchestration\n" +
+    "  curl.exe -L --fail --output kokoro-v1.0.int8.onnx https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx\n" +
+    "  curl.exe -L --fail --output voices-v1.0.bin https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin\n\n" +
+    "Without these files the service falls back to pyttsx3/SAPI5, which can be slow enough to trigger controller timeouts.",
+  );
+}
+
 function foundryIsRunning() {
   const result = run("foundry", ["service", "status"], { timeout: 15000 });
   const output = `${result.stdout}\n${result.stderr}`.toLowerCase();
@@ -811,6 +1000,7 @@ async function start(options) {
 
   const state = readState();
   const env = serviceEnv(options, state);
+  preflightPythonRuntime(options, env);
   state.version = 1;
   state.startedAt = state.startedAt || new Date().toISOString();
 
@@ -918,6 +1108,8 @@ async function cleanupMisty(env) {
     ["POST", "/api/audio/keyphrase/stop", undefined],
     ["POST", "/api/audio/record/stop", undefined],
     ["POST", "/api/skills/cancel", undefined],
+    ["POST", "/api/halt", undefined],
+    ["POST", "/api/images/display", JSON.stringify({ FileName: "face_idle.gif", Alpha: 1 })],
     ["POST", "/api/led", JSON.stringify({ red: 0, green: 0, blue: 0 })],
   ];
 

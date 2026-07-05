@@ -177,7 +177,9 @@ pip install kokoro-onnx soundfile
 ```
 
 If Kokoro is not installed or fails at runtime, the service automatically falls
-back to pyttsx3 with no manual intervention required.
+back to pyttsx3. For live robot runs, keep Kokoro installed and both model
+files present; the startup preflight fails early when these assets are missing
+because SAPI5 fallback can be slow enough to trigger controller timeouts.
 
 ---
 

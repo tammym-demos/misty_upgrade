@@ -48,6 +48,7 @@ RECORDING_DURATION_S = float(os.getenv("RECORDING_DURATION_S", str(config_defaul
 RECORDING_FILENAME = "foundry_input.wav"
 RESPONSE_FILENAME = "foundry_response.wav"
 REARM_DELAY_S = 3.0  # delay after playback before re-arming wake word (increased from 1.0 for reliability)
+FOLLOWUP_ENABLED = os.getenv("FOLLOWUP_ENABLED", str(config_defaults.FOLLOWUP_ENABLED)).lower() in ("1", "true", "yes")
 FOLLOWUP_LISTEN_S = float(os.getenv("FOLLOWUP_LISTEN_S", str(config_defaults.FOLLOWUP_LISTEN_S)))  # seconds to listen for follow-up
 FOLLOWUP_TIMEOUT_S = float(os.getenv("FOLLOWUP_TIMEOUT_S", str(config_defaults.FOLLOWUP_TIMEOUT_S)))  # max follow-up window (extended from 60)
 FOLLOWUP_SILENCE_THRESHOLD = 1000  # audio bytes below this = silence (no speech)
@@ -988,6 +989,10 @@ class MistyController:
         """
         result = self.misty_get("/api/images")
         if not result:
+            logger.warning(
+                "Could not list Misty image inventory; required face assets will be "
+                "checked by upload path"
+            )
             return set()
         images = result.get("result", []) or []
         names: set[str] = set()
@@ -2157,12 +2162,17 @@ class MistyController:
                 logger.info(f"[Turn {turn}] Conversation cycle {self._conversation_cycles}/{PROACTIVE_REBOOT_AFTER_CYCLES}")
             else:
                 logger.info(f"[Turn {turn}] No speech — not counting toward reboot cycles")
+                return
 
             # Execute voice movement if requested (#56) — after ack audio has played
             if movement:
                 logger.info(f"[Turn {turn}] Executing voice movement: {movement.get('command')}")
                 self._execute_voice_movement(turn, movement)
                 # After movement, skip follow-up listening — re-arm and wait for next wake word
+                return
+
+            if not FOLLOWUP_ENABLED:
+                logger.info(f"[Turn {turn}] Follow-up listening disabled — re-arming wake word")
                 return
 
             # Follow-up listening loop — listen for continued conversation
@@ -2879,7 +2889,10 @@ class MistyController:
             f"source={wake_status['source']} model={wake_status['model_name'] or 'unconfigured'} "
             f"path={wake_status['model_path'] or 'n/a'} threshold={wake_status['threshold'] or 'n/a'}"
         )
-        logger.info(f"  Follow-up:     {FOLLOWUP_TIMEOUT_S}s window, max {FOLLOWUP_MAX_TURNS} turns")
+        logger.info(
+            f"  Follow-up:     {'enabled' if FOLLOWUP_ENABLED else 'disabled'} "
+            f"({FOLLOWUP_TIMEOUT_S}s window, max {FOLLOWUP_MAX_TURNS} turns)"
+        )
         logger.info(f"  Proactive reboot: every {PROACTIVE_REBOOT_AFTER_CYCLES} conversations or {PROACTIVE_REBOOT_AFTER_RECORDINGS} recordings")
         logger.info("=" * 60)
 

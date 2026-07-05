@@ -26,11 +26,18 @@ import os
 # Foundry Local
 FOUNDRY_API_TIMEOUT: float = 10.0
 SERVICE_TIMEOUT: float = 15.0
+CHAT_MODEL_ID: str = "Phi-3.5-mini-instruct-generic-cpu:2"
 
 # TTS (Kokoro-ONNX)
 KOKORO_VOICE: str = "af_sky"
 KOKORO_SPEED: float = 1.2
 TTS_CACHE_MAX: int = 200
+
+# STT (faster-whisper)
+STT_DEVICE: str = "cpu"
+STT_COMPUTE_TYPE: str = "int8"
+STT_MIN_RMS: float = 0.002
+STT_MIN_PEAK: float = 0.02
 
 # LLM prompt-length limits
 MAX_USER_CHARS: int = 400
@@ -48,6 +55,7 @@ ORCHESTRATION_URL: str = "http://localhost:5000"
 RECORDING_DURATION_S: float = 6.0
 
 # Follow-up conversation
+FOLLOWUP_ENABLED: bool = False
 FOLLOWUP_LISTEN_S: float = 5.0
 FOLLOWUP_TIMEOUT_S: float = 90.0
 FOLLOWUP_MAX_TURNS: int = 12
@@ -66,6 +74,16 @@ PROACTIVE_REBOOT_AFTER_RECORDINGS: int = 15
 # Laptop mic recording mode during conversations (issue #44)
 LAPTOP_MISTY_RECORDING_MODE: str = "fallback"
 LAPTOP_MISTY_TALLY_RECORDING_S: float = 1.0
+
+# Laptop OpenWakeWord wake phrase (issue #72).
+# The repository includes the trained "Hey Misty" model, so startup can use it
+# by default while still allowing OWW_CUSTOM_MODEL_PATH to override it.
+OWW_CUSTOM_MODEL_PATH: str = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "models", "hey_misty.onnx")
+)
+OWW_MODEL_NAME: str = "hey_misty"
+OWW_THRESHOLD: float = 0.7
+LAPTOP_MIC_DEVICE: str = ""
 
 # Face recognition (issue #16)
 FACE_RECOGNITION_TIMEOUT_S: float = 3.0
