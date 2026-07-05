@@ -228,6 +228,7 @@ Common environment variables:
 | `KOKORO_SPEED` | `1.2` | Kokoro speech speed; synthesis latency scales mostly with response length. |
 | `MAX_USER_CHARS` | `400` | Per-utterance prompt character cap. |
 | `MAX_CONTEXT_CHARS` | `5000` | Total LLM context character budget. |
+| `FOLLOWUP_ENABLED` | `false` | Enables automatic follow-up listening after an answer. Disabled by default to avoid echo/noise-triggered hallucinated responses. |
 | `FOLLOWUP_TIMEOUT_S` | `90` | Follow-up conversation window. |
 | `FOLLOWUP_MAX_TURNS` | `12` | Max follow-up recording cycles in one session. |
 | `PROACTIVE_REBOOT_AFTER_CYCLES` | `5` | Full reboot after this many successful conversation cycles. |

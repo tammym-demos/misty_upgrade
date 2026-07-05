@@ -55,6 +55,7 @@ ORCHESTRATION_URL: str = "http://localhost:5000"
 RECORDING_DURATION_S: float = 6.0
 
 # Follow-up conversation
+FOLLOWUP_ENABLED: bool = False
 FOLLOWUP_LISTEN_S: float = 5.0
 FOLLOWUP_TIMEOUT_S: float = 90.0
 FOLLOWUP_MAX_TURNS: int = 12
