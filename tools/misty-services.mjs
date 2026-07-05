@@ -37,7 +37,7 @@ function usage() {
 
 Commands:
   start     Start Foundry Local, orchestration_service.py, and misty_controller.py
-  stop      Gracefully stop the controller, orchestration service, and owned Foundry service
+  stop      Gracefully stop the controller, orchestration service, and Foundry Local
   restart   Stop then start all services
   status    Show service status
 
@@ -689,8 +689,9 @@ function stopFoundry(state, options) {
     return;
   }
 
-  if (!state.foundry?.managed) {
-    console.log("Foundry Local: not owned by this CLI run; leaving it running");
+  if (!foundryIsRunning()) {
+    console.log("Foundry Local: not running");
+    delete state.foundry;
     return;
   }
 
