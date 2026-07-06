@@ -100,7 +100,23 @@ mirrored in `.env.example`.
 ## 5. Integration
 
 The coordinator takes injected callables so it stays decoupled and testable
-without hardware:
+without hardware. It is wired into `MistyController.__init__`: always
+constructed (a no-op when `USE_EMBODIED_EXPRESSIONS=false`), with
+
+- `set_led` / `move_head` / `move_arms` bound to the controller helpers,
+- a `face_callback` that delegates to the #73 `FaceAnimator.set_emotion(...)`
+  and falls back to `controller.show_face(static_fallback)` when the animator is
+  unavailable,
+- a `safety_gate` (`MistyController._expressions_safe_to_move`) that permits
+  motor gestures only in the safe states
+  (`SAFE_EXPRESSION_STATES = {IDLE, PROCESSING, PLAYING}`) and only while the
+  controller is running, and
+- cancellation on shutdown (`_shutdown()` calls `cancel()` before other cleanup).
+
+State transitions drive a small, unambiguous subset of expressions via
+`STATE_EXPRESSION_MAP` (`PROCESSING → thinking`, `CHARGING → sleepy`,
+`ERROR → error`); richer triggers (wake, sensors, movement outcomes) can build
+on the same `express()` / `express_for_sensor()` API:
 
 ```python
 from expression_coordinator import ExpressionCoordinator, Expression
@@ -116,7 +132,7 @@ coord = ExpressionCoordinator(
         face_animator.set_emotion(emotion)
         if face_animator is not None else controller.show_face(fallback)
     ),
-    safety_gate=lambda: controller.state not in UNSAFE_STATES,
+    safety_gate=controller._expressions_safe_to_move,
     enabled=cfg.USE_EMBODIED_EXPRESSIONS,
     head_velocity=cfg.EXPRESSION_HEAD_VELOCITY,
     arm_velocity=cfg.EXPRESSION_ARM_VELOCITY,

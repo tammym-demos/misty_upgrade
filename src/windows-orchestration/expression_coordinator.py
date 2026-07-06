@@ -338,11 +338,16 @@ class ExpressionCoordinator:
             self._thread = None
         if stop_event is not None:
             stop_event.set()
+        stopped = True
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=self.STOP_TIMEOUT_S)
             if thread.is_alive():
+                # Actuator call may be hung; do NOT issue a re-center from this
+                # thread while the prior choreography thread is still running, to
+                # avoid concurrent/overlapping motor commands.
+                stopped = False
                 logger.debug("ExpressionCoordinator thread did not stop within timeout")
-        if center:
+        if center and stopped:
             self._recenter_body()
 
     def _run_choreography(self, expr: Expression, spec: ChoreographySpec, stop_event: threading.Event) -> None:
