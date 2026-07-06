@@ -4,7 +4,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
 from PIL import Image, ImageStat
 
 
@@ -30,14 +29,48 @@ def _mean_luma(path: Path) -> float:
     return sum(stat.mean) / 3
 
 
-def test_sprite_frame_crops_match_misty_display_aspect():
+def test_vector_frame_renders_at_misty_display_size():
     generator = _load_generator()
-    target = generator.WIDTH / generator.HEIGHT
 
-    for name, box in generator.SPRITE_FRAMES.items():
-        x1, y1, x2, y2 = box
-        aspect = (x2 - x1) / (y2 - y1)
-        assert aspect == pytest.approx(target, abs=0.01), name
+    frame = generator.render_face_frame(emotion="happy", openness=0.5, pulse=0.8)
+
+    assert frame.size == (generator.WIDTH, generator.HEIGHT)
+    assert generator.TARGET_ASPECT == generator.WIDTH / generator.HEIGHT
+
+
+def test_single_mouth_anchor_is_centered_and_bounded():
+    generator = _load_generator()
+
+    closed = generator.mouth_bounds(0.0)
+    open_mouth = generator.mouth_bounds(1.0)
+
+    assert closed[0] == open_mouth[0]
+    assert closed[2] == open_mouth[2]
+    assert open_mouth[1] < generator.MOUTH_CENTER[1] < open_mouth[3]
+    assert open_mouth[2] - open_mouth[0] == generator.MOUTH_MAX_WIDTH
+    assert open_mouth[3] - open_mouth[1] <= generator.MOUTH_MAX_HEIGHT
+
+
+def test_mouth_uses_magenta_crescent_lower_region():
+    generator = _load_generator()
+    frame = generator.render_face_frame(emotion="happy", openness=0.7, pulse=0.8).convert("RGB")
+    x1, y1, x2, y2 = generator.mouth_bounds(0.7)
+    lower_mouth = frame.crop((x1 + 20, y1 + 24, x2 - 20, y2 + 16))
+    stat = ImageStat.Stat(lower_mouth)
+
+    assert stat.mean[0] > stat.mean[1] + 30
+    assert stat.mean[2] > stat.mean[1] + 15
+
+
+def test_happy_talking_accent_is_blue_not_yellow():
+    generator = _load_generator()
+
+    accent = generator.EMOTION_ACCENT["happy"]
+    eye = generator.EMOTION_EYE["happy"]
+
+    assert accent[2] > accent[0]
+    assert eye[2] > eye[0]
+    assert accent[0] < 120
 
 
 def test_required_face_assets_are_misty_display_sized():
@@ -57,8 +90,18 @@ def test_generated_talking_gifs_have_expected_frame_count():
                 assert image.n_frames == 4, filename
 
 
-def test_extracted_frames_are_bright_enough_for_misty_display():
-    frames_dir = REPO_ROOT / "assets" / "frames"
+def test_generated_faces_are_readable_without_washing_out():
+    assets_dir = REPO_ROOT / "assets"
 
-    for frame in frames_dir.glob("frame_*.png"):
-        assert _mean_luma(frame) >= 105, frame.name
+    for filename in config_defaults.REQUIRED_FACE_ASSETS:
+        luma = _mean_luma(assets_dir / filename)
+        assert 25 <= luma <= 180, filename
+
+
+def test_preview_contact_sheet_is_generated():
+    assets_dir = REPO_ROOT / "assets"
+    contact_sheet = assets_dir / _load_generator().PREVIEW_CONTACT_SHEET
+
+    assert contact_sheet.exists()
+    with Image.open(contact_sheet) as image:
+        assert image.size == (480, 544)
