@@ -113,7 +113,7 @@ class TestCoerceExpression:
 
 class TestChoreographyMap:
     def test_every_expression_has_spec(self):
-        for expr in Expression:
+        for expr in list(Expression):
             assert expr in EXPRESSION_CHOREOGRAPHY
             assert isinstance(EXPRESSION_CHOREOGRAPHY[expr], ChoreographySpec)
 
@@ -177,7 +177,7 @@ class TestEnabledChoreography:
         assert rec.snapshot()["led"] == []
 
     def test_all_expressions_stay_within_limits(self):
-        for expr in Expression:
+        for expr in list(Expression):
             coord, rec = _make(enabled=True)
             coord.express(expr)
             _drain(coord)

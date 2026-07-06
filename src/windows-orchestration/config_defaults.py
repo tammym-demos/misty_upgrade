@@ -146,9 +146,10 @@ TALKING_HEAD_INTERVAL_S: float = 0.8       # seconds between micro-movements
 # confused, thinking, sassy, annoyed, angry, sad, startled, sleepy, error) to
 # bounded face/LED/head/arm choreography. Face rendering is delegated to #73's
 # FaceAnimator with a static built-in-face fallback; choreography is cancellable,
-# non-blocking, safety-gated (never runs during MOVING/CHARGING/ERROR/shutdown or
-# movement preemption), and sensor triggers are rate-limited. It never issues
-# drive/tread commands.
+# non-blocking and sensor rate-limited. Motor head/arm gestures are safety-gated
+# (suppressed during MOVING/CHARGING/ERROR/reboot/re-arm/recording/listening,
+# shutdown, and movement preemption); non-motor face/LED cues may still apply in
+# those states. It never issues drive/tread commands.
 USE_EMBODIED_EXPRESSIONS: bool = False
 # Gentle move velocities for expression gestures (percent).
 EXPRESSION_HEAD_VELOCITY: float = 40.0

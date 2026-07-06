@@ -114,6 +114,19 @@ USE_TALKING_HEAD_MOTION = os.getenv(
 USE_EMBODIED_EXPRESSIONS = os.getenv(
     "USE_EMBODIED_EXPRESSIONS", str(config_defaults.USE_EMBODIED_EXPRESSIONS)
 ).lower() in ("1", "true", "yes")
+# Tunable expression gesture parameters (env-overridable, defaults from config).
+EXPRESSION_HEAD_VELOCITY = float(
+    os.getenv("EXPRESSION_HEAD_VELOCITY", str(config_defaults.EXPRESSION_HEAD_VELOCITY))
+)
+EXPRESSION_ARM_VELOCITY = float(
+    os.getenv("EXPRESSION_ARM_VELOCITY", str(config_defaults.EXPRESSION_ARM_VELOCITY))
+)
+EXPRESSION_SENSOR_MIN_INTERVAL_S = float(
+    os.getenv(
+        "EXPRESSION_SENSOR_MIN_INTERVAL_S",
+        str(config_defaults.EXPRESSION_SENSOR_MIN_INTERVAL_S),
+    )
+)
 
 # Keyphrase watchdog — detects silent failures and auto-recovers
 WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", str(config_defaults.WATCHDOG_IDLE_TIMEOUT_S)))  # 90s after rearm with no wake event
@@ -364,9 +377,9 @@ class MistyController:
             ),
             safety_gate=self._expressions_safe_to_move,
             enabled=USE_EMBODIED_EXPRESSIONS,
-            head_velocity=config_defaults.EXPRESSION_HEAD_VELOCITY,
-            arm_velocity=config_defaults.EXPRESSION_ARM_VELOCITY,
-            sensor_min_interval_s=config_defaults.EXPRESSION_SENSOR_MIN_INTERVAL_S,
+            head_velocity=EXPRESSION_HEAD_VELOCITY,
+            arm_velocity=EXPRESSION_ARM_VELOCITY,
+            sensor_min_interval_s=EXPRESSION_SENSOR_MIN_INTERVAL_S,
         )
 
     # States in which expressive head/arm gestures are allowed. Motor gestures
