@@ -121,9 +121,11 @@ def test_profile_store_list_and_delete(tmp_path):
     store.save(frs.FaceProfile(name="Tammy", embeddings=np.vstack([TAMMY, TAMMY])))
     store.save(frs.FaceProfile(name="Alex", embeddings=np.vstack([ALEX, ALEX])))
     assert store.list_names() == ["Alex", "Tammy"]
-    assert store.delete("Alex") is True
+    deleted = store.delete("Alex")
+    assert deleted is True
     assert store.list_names() == ["Tammy"]
-    assert store.delete("Alex") is False
+    deleted_again = store.delete("Alex")
+    assert deleted_again is False
 
 
 def test_load_all_skips_corrupt_files(tmp_path):
