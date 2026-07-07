@@ -93,6 +93,40 @@ LAPTOP_MIC_DEVICE: str = ""
 # Face recognition (issue #16)
 FACE_RECOGNITION_TIMEOUT_S: float = 3.0
 
+# Laptop-side face recognition (issue #125).
+# Replaces Misty's unreliable on-chip /api/faces pipeline (documented as
+# effectively non-functional on this Snapdragon 410 unit in
+# docs/lessons-learned.md) with a laptop-side recognizer that produces a
+# speaker_name for the existing orchestration path. Off by default; enable only
+# after enrolling a profile (see tools/enroll_face.py). Keep the deprecated
+# USE_FACE_RECOGNITION (#16) path disabled when this is enabled.
+USE_LAPTOP_FACE_RECOGNITION: bool = False
+# Directory holding enrolled face profiles (embeddings + metadata only, never
+# photos). Gitignored. Defaults to the repo-level data/face_profiles directory
+# (config_defaults.py lives in src/windows-orchestration/, so ../../data/... is
+# the repo root).
+FACE_PROFILE_DIR: str = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "data", "face_profiles")
+)
+# Frame source used for recognition during conversations: "misty_camera",
+# "webcam", or "image_file".
+FACE_RECOGNITION_SOURCE: str = "misty_camera"
+# Cosine-distance match threshold (lower = stricter). A probe matches a profile
+# only when its distance to the profile centroid is <= this value. Conservative
+# defaults reduce false positives (a wrong name is worse than no name).
+FACE_RECOGNITION_THRESHOLD: float = 0.4
+# Minimum number of frames that must agree on the same name before recognition
+# returns it (single-frame false-positive guard).
+FACE_RECOGNITION_MIN_CONSISTENT_FRAMES: int = 2
+# Minimum number of valid face samples required to enroll a profile.
+FACE_RECOGNITION_MIN_SAMPLES: int = 5
+# Optional paths to the OpenCV/ONNX face detector and embedding models used by
+# OnnxFaceEmbedder. Empty by default; laptop recognition raises a clear
+# FaceModelUnavailable error until these are set. Models are not bundled in git
+# (*.onnx is gitignored) — see the README for how to obtain them.
+FACE_DETECTOR_MODEL_PATH: str = os.environ.get("FACE_DETECTOR_MODEL_PATH", "")
+FACE_EMBEDDER_MODEL_PATH: str = os.environ.get("FACE_EMBEDDER_MODEL_PATH", "")
+
 # Face animation (issue #73, Phase 2)
 USE_FACE_ANIMATION: bool = False
 FACE_ANIMATION_MAX_FPS: float = 4.0
