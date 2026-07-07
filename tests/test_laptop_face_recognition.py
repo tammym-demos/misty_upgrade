@@ -158,6 +158,15 @@ def test_cosine_distance_identity_and_orthogonal():
     assert frs.cosine_distance(TAMMY, ALEX) == pytest.approx(1.0, abs=1e-6)
 
 
+def test_recognition_result_confidence_is_bounded():
+    # Negative distance (fp error / cosine > 1) must not push confidence above 1.
+    over = frs.RecognitionResult(name="X", distance=-0.01, threshold=0.4)
+    assert 0.0 <= over.confidence <= 1.0
+    # Distance beyond threshold must not push confidence below 0.
+    under = frs.RecognitionResult(name="X", distance=1.0, threshold=0.4)
+    assert 0.0 <= under.confidence <= 1.0
+
+
 # ---------------------------------------------------------------------------
 # Enrollment
 # ---------------------------------------------------------------------------

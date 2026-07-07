@@ -168,8 +168,11 @@ class RecognitionResult:
     confidence: float = field(default=0.0)
 
     def __post_init__(self):
-        # Map cosine distance to a bounded, monotonic confidence for logging.
-        self.confidence = max(0.0, 1.0 - (self.distance / max(self.threshold, 1e-6)))
+        # Map cosine distance to a bounded [0, 1] confidence for logging. Clamp
+        # both ends so floating-point error (or distance > threshold) cannot
+        # produce a value outside [0, 1].
+        raw = 1.0 - (self.distance / max(self.threshold, 1e-6))
+        self.confidence = min(1.0, max(0.0, raw))
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +247,7 @@ class OnnxFaceEmbedder(FaceEmbedder):
         except Exception as exc:  # pragma: no cover - depends on host env
             raise FaceModelUnavailable(
                 "OpenCV (cv2) is required for laptop face recognition; install "
-                "opencv-python. Original error: " + str(exc)
+                "opencv-python-headless (or opencv-python). Original error: " + str(exc)
             )
         for path, label in (
             (self.detector_model_path, "detector"),
@@ -308,9 +311,9 @@ class FaceProfileStore:
     def _safe_path(self, name: str) -> str:
         safe = validate_profile_name(name)
         path = os.path.abspath(os.path.join(self.directory, safe + self.SUFFIX))
-        # Defense in depth: ensure the resolved path is inside the directory.
-        base = self.directory + os.sep
-        if not (path + "").startswith(base) and os.path.dirname(path) != self.directory:
+        # Defense in depth: the resolved path must live directly inside the
+        # profile directory (single path segment, no traversal).
+        if os.path.dirname(path) != self.directory:
             raise ProfileNameError("resolved profile path escapes profile directory")
         return path
 
@@ -325,6 +328,8 @@ class FaceProfileStore:
         """Persist ``profile`` and return the file path."""
         self.ensure_dir()
         path = self._safe_path(profile.name)
+        # ``path`` already ends with ``.npz``, so np.savez writes exactly this
+        # file (it only appends the suffix when missing).
         np.savez(
             path,
             name=profile.name,
@@ -335,9 +340,6 @@ class FaceProfileStore:
             sample_count=profile.sample_count,
             embedding_dim=profile.embedding_dim,
         )
-        # numpy appends .npz automatically only when missing; normalize.
-        if not os.path.isfile(path) and os.path.isfile(path + self.SUFFIX):
-            os.replace(path + self.SUFFIX, path)
         return path
 
     def load(self, name: str) -> FaceProfile:
@@ -574,7 +576,7 @@ class ImageFileFrameSource(FrameSource):
             import cv2
         except Exception as exc:
             raise FaceModelUnavailable(
-                "OpenCV (cv2) is required to read image files; install opencv-python. "
+                "OpenCV (cv2) is required to read image files; install opencv-python-headless (or opencv-python). "
                 + str(exc)
             )
         img = cv2.imread(path)
@@ -605,7 +607,7 @@ class WebcamFrameSource(FrameSource):  # pragma: no cover - needs a camera
             import cv2
         except Exception as exc:
             raise FaceModelUnavailable(
-                "OpenCV (cv2) is required for webcam capture; install opencv-python. "
+                "OpenCV (cv2) is required for webcam capture; install opencv-python-headless (or opencv-python). "
                 + str(exc)
             )
         cap = cv2.VideoCapture(self.device_index)
@@ -655,7 +657,7 @@ class MistyCameraFrameSource(FrameSource):  # pragma: no cover - needs Misty + c
         except Exception as exc:
             raise FaceModelUnavailable(
                 "OpenCV (cv2) is required to decode Misty camera frames; install "
-                "opencv-python. " + str(exc)
+                "opencv-python-headless (or opencv-python). " + str(exc)
             )
         try:
             resp = requests.get(self.url, params={"base64": "false"}, timeout=self.timeout_s)
