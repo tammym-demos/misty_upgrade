@@ -54,6 +54,8 @@ The **face detection ML pipeline** on the Snapdragon 410 sensory processor is no
 
 Move face recognition to the companion laptop (same pattern as wake word → openWakeWord, same pattern as STT → faster-whisper). Use OpenCV + ONNX Runtime for detection and embeddings via the laptop webcam. The `speaker_name` pipeline (PR #64) is camera-agnostic — only the source of the name changes.
 
+> **Implemented (#125).** `src/windows-orchestration/face_recognition_service.py` provides a laptop-side `FaceRecognizer` (enroll/recognize with local, gitignored embedding profiles) fronted by `tools/enroll_face.py` and `tools/recognize_face.py`, and wired into `misty_controller.py` behind `USE_LAPTOP_FACE_RECOGNITION`. It captures from Misty's RGB camera or the laptop webcam, requires multi-frame agreement to avoid false positives, and fails open (no name) when a face is unknown or the model/camera is unavailable. The deprecated Misty-native `USE_FACE_RECOGNITION` (#16) path is kept disabled. See the README "Laptop-side face recognition" section for enrollment, testing, enabling, privacy behavior, and the live validation checklist.
+
 ### Broader Lesson
 
 **Every ML-dependent feature on the Snapdragon 410 should be assumed fragile.** The chip's ML capabilities are degrading:

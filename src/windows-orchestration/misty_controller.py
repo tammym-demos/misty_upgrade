@@ -71,6 +71,19 @@ LAPTOP_MISTY_TALLY_RECORDING_S = float(os.getenv("LAPTOP_MISTY_TALLY_RECORDING_S
 USE_FACE_RECOGNITION = os.getenv("USE_FACE_RECOGNITION", "").lower() in ("1", "true", "yes")
 FACE_RECOGNITION_TIMEOUT_S = float(os.getenv("FACE_RECOGNITION_TIMEOUT_S", str(config_defaults.FACE_RECOGNITION_TIMEOUT_S)))
 
+# Laptop-side face recognition (#125) — replaces Misty's unreliable on-chip
+# /api/faces pipeline with a laptop-side recognizer that identifies enrolled
+# people and feeds the existing speaker_name path. Off by default; enable
+# INSTEAD of USE_FACE_RECOGNITION after enrolling a profile (tools/enroll_face.py).
+USE_LAPTOP_FACE_RECOGNITION = os.getenv("USE_LAPTOP_FACE_RECOGNITION", "").lower() in ("1", "true", "yes")
+FACE_PROFILE_DIR = os.getenv("FACE_PROFILE_DIR", config_defaults.FACE_PROFILE_DIR)
+FACE_RECOGNITION_SOURCE = os.getenv("FACE_RECOGNITION_SOURCE", config_defaults.FACE_RECOGNITION_SOURCE).strip().lower()
+FACE_RECOGNITION_THRESHOLD = float(os.getenv("FACE_RECOGNITION_THRESHOLD", str(config_defaults.FACE_RECOGNITION_THRESHOLD)))
+FACE_RECOGNITION_MIN_CONSISTENT_FRAMES = int(os.getenv("FACE_RECOGNITION_MIN_CONSISTENT_FRAMES", str(config_defaults.FACE_RECOGNITION_MIN_CONSISTENT_FRAMES)))
+FACE_RECOGNITION_MIN_SAMPLES = int(os.getenv("FACE_RECOGNITION_MIN_SAMPLES", str(config_defaults.FACE_RECOGNITION_MIN_SAMPLES)))
+FACE_DETECTOR_MODEL_PATH = os.getenv("FACE_DETECTOR_MODEL_PATH", config_defaults.FACE_DETECTOR_MODEL_PATH)
+FACE_EMBEDDER_MODEL_PATH = os.getenv("FACE_EMBEDDER_MODEL_PATH", config_defaults.FACE_EMBEDDER_MODEL_PATH)
+
 # Face animation (#73) — state-driven animated expressions
 USE_FACE_ANIMATION = os.getenv("USE_FACE_ANIMATION", "").lower() in ("1", "true", "yes")
 FACE_ANIMATION_MAX_FPS = float(os.getenv("FACE_ANIMATION_MAX_FPS", str(config_defaults.FACE_ANIMATION_MAX_FPS)))
@@ -327,6 +340,11 @@ class MistyController:
         self._face_recognition_event = threading.Event()  # signaled when face recognized
         self._face_event_name: str | None = None  # WebSocket event name for face recognition
         self._trained_faces: list[str] = []  # cached list of trained face IDs
+
+        # Laptop-side face recognition (#125) — lazily-built recognizer that
+        # replaces Misty's unreliable on-chip pipeline. None until first use;
+        # set to False if construction fails so we don't retry every turn.
+        self._laptop_face_recognizer = None
 
         # Face animation (#73) — state-driven animated expressions.
         # The FaceAnimator is ALWAYS constructed so custom face identity, emotion
@@ -1278,6 +1296,97 @@ class MistyController:
                 return None
         finally:
             self.stop_face_recognition()
+
+    # --- Laptop-side face recognition (#125) ------------------------------
+    def _build_laptop_face_recognizer(self):
+        """Lazily construct the laptop-side FaceRecognizer, or None on failure.
+
+        Imports the recognition module lazily so the heavy/optional face
+        dependencies are only touched when USE_LAPTOP_FACE_RECOGNITION is on.
+        Caches the constructed recognizer; on a genuine construction error
+        (import/params) it caches ``False`` so we do not retry (and spam logs)
+        every turn. Profile presence is intentionally NOT checked here — it is
+        re-evaluated per turn in ``recognize_face_laptop`` so a profile enrolled
+        while the controller is running is picked up without a restart. Fail-open.
+        """
+        if self._laptop_face_recognizer is not None:
+            return self._laptop_face_recognizer or None
+        try:
+            import face_recognition_service as frs
+
+            store = frs.FaceProfileStore(FACE_PROFILE_DIR)
+            embedder = frs.OnnxFaceEmbedder(
+                detector_model_path=FACE_DETECTOR_MODEL_PATH,
+                embedder_model_path=FACE_EMBEDDER_MODEL_PATH,
+            )
+            recognizer = frs.FaceRecognizer(
+                store=store,
+                embedder=embedder,
+                threshold=FACE_RECOGNITION_THRESHOLD,
+                min_samples=FACE_RECOGNITION_MIN_SAMPLES,
+                min_consistent_frames=FACE_RECOGNITION_MIN_CONSISTENT_FRAMES,
+            )
+            self._laptop_face_recognizer = recognizer
+            return recognizer
+        except Exception as exc:
+            logger.warning("[Face #125] Could not initialize laptop recognizer: %s", exc)
+            self._laptop_face_recognizer = False
+            return None
+
+    def _build_laptop_frame_source(self):
+        """Build the configured frame source for laptop recognition, or None."""
+        try:
+            import face_recognition_service as frs
+
+            if FACE_RECOGNITION_SOURCE == "webcam":
+                return frs.WebcamFrameSource(device_index=0)
+            if FACE_RECOGNITION_SOURCE != "misty_camera":
+                # Surface misconfiguration (typos, or the CLI-only "image_file")
+                # instead of silently using the wrong source.
+                logger.warning(
+                    "[Face #125] Unsupported FACE_RECOGNITION_SOURCE=%r for live "
+                    "conversation; supported values are 'misty_camera' and 'webcam'. "
+                    "Falling back to Misty's camera.",
+                    FACE_RECOGNITION_SOURCE,
+                )
+            return frs.MistyCameraFrameSource(MISTY_IP, timeout_s=FACE_RECOGNITION_TIMEOUT_S)
+        except Exception as exc:
+            logger.warning("[Face #125] Could not build frame source: %s", exc)
+            return None
+
+    def recognize_face_laptop(self) -> str | None:
+        """Return a recognized speaker name using laptop-side recognition.
+
+        Fully fail-open: any missing model, camera failure, unknown face, or
+        low-confidence match returns None so the conversation continues without
+        a name. Never raises.
+        """
+        recognizer = self._build_laptop_face_recognizer()
+        if recognizer is None:
+            return None
+        try:
+            import face_recognition_service as frs
+
+            # Refresh profiles each turn so a profile enrolled while the
+            # controller is running is picked up without a restart.
+            if not recognizer.load_profiles(force=True):
+                logger.debug(
+                    "[Face #125] No enrolled profiles in %s — skipping (enroll with "
+                    "tools/enroll_face.py).",
+                    FACE_PROFILE_DIR,
+                )
+                return None
+            source = self._build_laptop_frame_source()
+            if source is None:
+                return None
+            with source:
+                name = frs.recognize_speaker(recognizer, source)
+            if name:
+                logger.info("[Face #125] Laptop recognition identified: %s", name)
+            return name
+        except Exception as exc:
+            logger.debug("[Face #125] Laptop recognition failed (continuing): %s", exc)
+            return None
 
     def _handle_face_recognition_event(self, data: dict):
         """Handle a FaceRecognition WebSocket event."""
@@ -2327,9 +2436,17 @@ class MistyController:
         self.show_face("face_listening.png")  # wide-eyed, attentive
         self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # look up slightly — eye contact
 
-        # Start face recognition concurrently with recording (#16)
+        # Start face recognition concurrently with recording.
         face_result = [None]  # mutable container for thread result
-        if USE_FACE_RECOGNITION and self._trained_faces:
+        if USE_LAPTOP_FACE_RECOGNITION:
+            # Laptop-side recognition (#125) — preferred; replaces Misty's
+            # unreliable on-chip pipeline. Fail-open inside recognize_face_laptop.
+            def _face_check():
+                face_result[0] = self.recognize_face_laptop()
+            face_thread = threading.Thread(target=_face_check, daemon=True)
+            face_thread.start()
+        elif USE_FACE_RECOGNITION and self._trained_faces:
+            # Deprecated Misty-native path (#16).
             def _face_check():
                 face_result[0] = self.recognize_face_quick()
             face_thread = threading.Thread(target=_face_check, daemon=True)

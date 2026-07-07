@@ -4,6 +4,10 @@
 # Exception: trained wake word model (small, ~14KB)
 !models/hey_misty.onnx
 
+# Local face profiles — biometric embeddings, never commit (#125)
+data/face_profiles/*.npz
+data/face_profiles/*.npy
+
 # Logs
 *.log
 logs/services/

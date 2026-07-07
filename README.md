@@ -284,8 +284,77 @@ and camera quality.
 > is effectively non-functional — `training/start` returns `Success` but the
 > face is never stored and `FaceRecognition` events never fire (a Snapdragon 410
 > limitation). This tool exercises the documented REST API and helps re-verify
-> that behavior, but the durable path is laptop-side recognition. Do not expect
-> on-robot training to persist until this is re-validated on hardware.
+> that behavior, but the durable path is laptop-side recognition (below). Do not
+> expect on-robot training to persist until this is re-validated on hardware.
+
+### Laptop-side face recognition (`tools/enroll_face.py`, `tools/recognize_face.py`) — #125
+
+Because Misty's on-chip `/api/faces` pipeline is effectively dead on this unit,
+the **durable, recommended** path for identifying a speaker is laptop-side
+recognition. It is opt-in (off by default; enable with
+`USE_LAPTOP_FACE_RECOGNITION=true`). It captures frames from Misty's RGB camera
+or the laptop webcam, computes face embeddings on the companion laptop (OpenCV +
+ONNX Runtime), and feeds the existing `speaker_name` orchestration path. The
+deprecated Misty-native `USE_FACE_RECOGNITION` (#16) path should stay disabled.
+
+**Enroll a person** (embeddings + metadata are stored locally, never photos):
+
+```powershell
+# From Misty's camera
+python tools\enroll_face.py --name Tammy --source misty --misty-ip 10.0.0.15 --samples 10
+
+# Or from the laptop webcam
+python tools\enroll_face.py --name Tammy --source webcam --samples 10
+
+# Manage profiles
+python tools\enroll_face.py --list
+python tools\enroll_face.py --delete Tammy
+```
+
+**Test recognition** (non-zero exit code when no known face is recognized):
+
+```powershell
+python tools\recognize_face.py --source misty --misty-ip 10.0.0.15
+python tools\recognize_face.py --source webcam
+```
+
+**Enable it in conversations** by setting `USE_LAPTOP_FACE_RECOGNITION=true` in
+`src/windows-orchestration/.env` and configuring the detector/embedder model
+paths. When enabled, the controller runs recognition concurrently with recording
+at the start of a turn; a confident match sets `speaker_name` (persisted through
+follow-up turns). If recognition fails, times out, or no profile exists, the
+controller logs the reason and continues without a name (**fail-open**).
+
+**Models:** the OpenCV/ONNX detector and embedding models are **not bundled**
+(`*.onnx` is gitignored). Point `FACE_DETECTOR_MODEL_PATH` (e.g. YuNet) and
+`FACE_EMBEDDER_MODEL_PATH` (e.g. SFace/ArcFace) at locally downloaded model files.
+Until these are set, laptop recognition reports a clear "model unavailable" error
+and stays idle rather than crashing.
+
+**Privacy:** enrolled profiles live in `data/face_profiles/` and contain only
+numeric embeddings and metadata (name, timestamp, model name/version, sample
+count, embedding dimensions). Face embeddings are **biometric data**, kept local
+only and **gitignored**. User-supplied names are validated so they cannot escape
+the profile directory. See [`data/face_profiles/README.md`](data/face_profiles/README.md).
+
+Key settings (`config_defaults.py` is the single source of truth):
+
+| Setting | Default | Purpose |
+|---|---|---|
+| `USE_LAPTOP_FACE_RECOGNITION` | `false` | Enable laptop-side recognition (replaces #16). |
+| `FACE_PROFILE_DIR` | `data/face_profiles` | Local, gitignored profile storage. |
+| `FACE_RECOGNITION_SOURCE` | `misty_camera` | Conversation-time frame source: `misty_camera` \| `webcam`. (The CLIs also support an `image` source for offline testing.) |
+| `FACE_RECOGNITION_THRESHOLD` | `0.4` | Cosine-distance match threshold (lower = stricter). |
+| `FACE_RECOGNITION_MIN_CONSISTENT_FRAMES` | `2` | Frames that must agree before a name is used. |
+| `FACE_RECOGNITION_MIN_SAMPLES` | `5` | Minimum valid samples to enroll a profile. |
+| `FACE_DETECTOR_MODEL_PATH` / `FACE_EMBEDDER_MODEL_PATH` | *(empty)* | OpenCV/ONNX model file paths (not bundled). |
+
+**Live validation checklist** (requires hardware/camera; not run in CI):
+
+1. `python tools\enroll_face.py --name Tammy --source misty --misty-ip <MISTY_IP> --samples 10`
+2. `python tools\recognize_face.py --source misty --misty-ip <MISTY_IP>` → prints `RECOGNIZED: Tammy` with distance below threshold.
+3. Set `USE_LAPTOP_FACE_RECOGNITION=true`, start the services, and confirm Misty naturally uses Tammy's name in conversation.
+4. Confirm an unknown face falls back gracefully (no name injected, conversation continues).
 
 ---
 
