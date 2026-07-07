@@ -2372,9 +2372,31 @@ class TestSpeakMoveIntegration(unittest.TestCase):
         self.ctrl._wake_word_listener = None
         self.ctrl._face_animator = unittest.mock.MagicMock()
         self.ctrl._talking_head = unittest.mock.MagicMock()
+        self.ctrl._expression_coordinator = None
         self.ctrl.misty_post = mock_post
         self.ctrl.DRIVE_MAX_DURATION_MS = 3000
         self.ctrl.MOVEMENT_SETTLE_MS = 100  # fast for tests
+
+    def test_move_arms_uses_firmware_arm_payload_for_both_arms(self):
+        """Misty's /api/arms endpoint requires Arm/Position, not left/right fields."""
+        self.ctrl.move_arms(left=-10, right=-10, velocity=40)
+
+        self.assertEqual(
+            self._post_calls,
+            [("/api/arms", {"Arm": "both", "Position": -10, "Velocity": 40})],
+        )
+
+    def test_move_arms_splits_different_left_right_positions(self):
+        """Different arm positions must be sent as one request per arm."""
+        self.ctrl.move_arms(left=30, right=80, velocity=40)
+
+        self.assertEqual(
+            self._post_calls,
+            [
+                ("/api/arms", {"Arm": "left", "Position": 30, "Velocity": 40}),
+                ("/api/arms", {"Arm": "right", "Position": 80, "Velocity": 40}),
+            ],
+        )
 
     # --- _do_orchestrate_and_respond movement detection ---
 
@@ -2432,6 +2454,52 @@ class TestSpeakMoveIntegration(unittest.TestCase):
 
         self.assertTrue(result)
         self.assertNotIsInstance(result, dict)
+
+    def test_normal_excited_response_triggers_body_expression(self):
+        """Excited spoken responses should trigger safe embodied choreography."""
+        normal_result = {
+            "status": "ok",
+            "transcribedText": "celebrate",
+            "inferenceResponse": "Wow, that's amazing!",
+            "responseAudio": "/api/audio/resp.wav",
+            "latencyMs": 500,
+            "emotion": "excited",
+        }
+        import unittest.mock as mock
+        mock_post_resp = mock.MagicMock()
+        mock_post_resp.json.return_value = normal_result
+        mock_post_resp.status_code = 200
+
+        mock_get_resp = mock.MagicMock()
+        mock_get_resp.content = b"\x00" * 1000
+        mock_get_resp.raise_for_status = mock.MagicMock()
+
+        expression = mock.MagicMock()
+        expression.enabled = True
+        expression.express.return_value = True
+        self.ctrl._expression_coordinator = expression
+        self.ctrl.upload_and_play_audio = mock.MagicMock(return_value=0.1)
+        self.ctrl.set_led = mock.MagicMock()
+        self.ctrl.display_image = mock.MagicMock()
+        self.ctrl.move_head = mock.MagicMock()
+
+        with mock.patch("requests.post", return_value=mock_post_resp), \
+             mock.patch("requests.get", return_value=mock_get_resp), \
+             mock.patch("time.sleep"):
+            result = self.ctrl._do_orchestrate_and_respond(1, b"fake", time.time())
+
+        self.assertTrue(result)
+        expression.express.assert_called_once_with("joy", source="response")
+        expression.cancel.assert_called_once()
+
+    def test_neutral_response_does_not_trigger_body_expression(self):
+        """Neutral speech should not add arm/head choreography noise."""
+        expression = unittest.mock.MagicMock()
+        expression.enabled = True
+        self.ctrl._expression_coordinator = expression
+
+        self.assertFalse(self.ctrl._express_for_response_emotion("neutral"))
+        expression.express.assert_not_called()
 
     def test_empty_stt_returns_false(self):
         """Empty STT should return False."""

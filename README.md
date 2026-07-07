@@ -105,8 +105,8 @@ See:
 5. Controller posts WAV audio to `/api/orchestrate`.
 6. Orchestration service runs STT -> LLM -> TTS.
 7. Controller downloads the generated WAV and uploads it to Misty for playback.
-8. Misty enters follow-up listening for continued conversation without requiring another wake word.
-9. Silence, movement completion, timeout, or max turn count ends the session and re-arms wake word detection.
+8. If `FOLLOWUP_ENABLED=true`, Misty enters follow-up listening for continued conversation without requiring another wake word.
+9. Silence, movement completion, timeout, max turn count, or disabled follow-up mode ends the session and re-arms wake word detection.
 
 Misty's conversation state machine is:
 
@@ -216,6 +216,7 @@ Common environment variables:
 | `OWW_CUSTOM_MODEL_PATH` | `models\hey_misty.onnx` | Optional override path to a custom "Hey Misty" OpenWakeWord model artifact. |
 | `OWW_MODEL_NAME` | `hey_misty` | Model label for the configured wake-word artifact. |
 | `OWW_THRESHOLD` | `0.7` | Confidence threshold for wake-word inference. |
+| `OWW_TRIGGER_FRAMES` | `2` | Consecutive above-threshold OpenWakeWord frames required before triggering; suppresses single-frame false positives. |
 | `LAPTOP_MIC_DEVICE` | OS default | Optional `sounddevice` input device index or name for laptop wake-word/STT capture. |
 | `CHAT_MODEL_ID` | `Phi-3.5-mini-instruct-generic-cpu:2` | Foundry Local chat model ID used for `/v1/chat/completions`. |
 | `STT_DEVICE` | `cpu` | faster-whisper device; default avoids accidental CUDA selection on non-CUDA Windows laptops. |
@@ -229,16 +230,28 @@ Common environment variables:
 | `MAX_USER_CHARS` | `400` | Per-utterance prompt character cap. |
 | `MAX_CONTEXT_CHARS` | `5000` | Total LLM context character budget. |
 | `FOLLOWUP_ENABLED` | `false` | Enables automatic follow-up listening after an answer. Disabled by default to avoid echo/noise-triggered hallucinated responses. |
+| `FOLLOWUP_LISTEN_S` | `5.0` | Per follow-up listen duration before silence/no-speech handling. |
 | `FOLLOWUP_TIMEOUT_S` | `90` | Follow-up conversation window. |
 | `FOLLOWUP_MAX_TURNS` | `12` | Max follow-up recording cycles in one session. |
 | `PROACTIVE_REBOOT_AFTER_CYCLES` | `5` | Full reboot after this many successful conversation cycles. |
 | `PROACTIVE_REBOOT_AFTER_RECORDINGS` | `15` | Full reboot after this many recording cycles. |
 | `LAPTOP_MISTY_RECORDING_MODE` | `fallback` | Misty recorder behavior during conversations: `fallback` keeps full Misty audio as a safe fallback, `tally` records only a short tally-light pulse, and `off` disables Misty-side recording. |
 | `LAPTOP_MISTY_TALLY_RECORDING_S` | `1.0` | Length of the tally-light-only Misty recording pulse when `LAPTOP_MISTY_RECORDING_MODE=tally`. |
+| `USE_FACE_ANIMATION` | `false` | Enables the continuous face animation frame loop. Custom face identity, emotion selection, and fallback resolution still work when this is `false`. |
+| `FACE_ASSETS_DIR` | `assets` | Directory containing required custom face files such as `face_idle.gif` and `face_talking_happy.gif`. |
+| `FACE_ASSETS_SYNC_MODE` | `missing` | Custom face sync mode: `missing` uploads only absent assets; `overwrite` force re-uploads all required face assets for intentional replacement. |
+| `FACE_ASSETS_FORCE_UPLOAD` | `false` | Convenience flag equivalent to one startup with `FACE_ASSETS_SYNC_MODE=overwrite`. Return to normal idempotent startup afterward. |
+| `USE_TALKING_HEAD_MOTION` | `false` | Enables subtle, emotion-aware head movement only while Misty is speaking (`PLAYING`), then re-centers afterward. |
+| `USE_EMBODIED_EXPRESSIONS` | `false` | Enables bounded face/LED/head/arm choreography for safe expression intents. Off by default until live hardware validation is desired. |
+| `EXPRESSION_HEAD_VELOCITY` | `40.0` | Gentle head velocity used by embodied expression gestures. |
+| `EXPRESSION_ARM_VELOCITY` | `40.0` | Gentle arm velocity used by embodied expression gestures. |
+| `EXPRESSION_SENSOR_MIN_INTERVAL_S` | `3.0` | Rate limit for repeated sensor-triggered embodied expressions. |
 
 Copy `src\windows-orchestration\.env.example` to `.env` if you want persistent local settings for the orchestration service. For the supported wake path, the repo bundles `models\hey_misty.onnx`, so `OWW_CUSTOM_MODEL_PATH` can stay empty unless you want to use a retrained or alternate model. Set `LAPTOP_MIC_DEVICE` when the OS default input is muted or wrong. Startup fails before the controller is launched if required runtime imports, OpenWakeWord resources, Kokoro assets, or the wake-word model are missing.
 
 If `LAPTOP_MISTY_RECORDING_MODE` is `tally` or `off` and laptop mic capture returns no usable audio, the controller raises a clear retryable error instead of silently falling back to Misty. Check the laptop microphone or switch back to `fallback` when robot-side backup audio is needed.
+
+For live visual/body testing, enable only the modes you want to validate. `USE_TALKING_HEAD_MOTION=true` adds small head movements during spoken responses. `USE_EMBODIED_EXPRESSIONS=true` allows safe expression choreography such as joy/happy arm raises; motor gestures are suppressed during unsafe states like recording, moving, charging, rebooting, and shutdown. To replace Misty's custom face assets, put the required files in `FACE_ASSETS_DIR`, start once with `FACE_ASSETS_SYNC_MODE=overwrite`, then return to `missing` for normal startup.
 
 ---
 

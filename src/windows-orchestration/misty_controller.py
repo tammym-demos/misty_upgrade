@@ -403,6 +403,13 @@ class MistyController:
         State.ERROR: "error",
     }
 
+    RESPONSE_EMOTION_EXPRESSION_MAP = {
+        "excited": "joy",
+        "happy": "joy",
+        "curious": "curious",
+        "sad": "sad",
+    }
+
     def _express_for_state(self, new_state: State) -> None:
         """Drive a bounded expression for a state transition. No-op if disabled."""
         coord = getattr(self, "_expression_coordinator", None)
@@ -411,6 +418,16 @@ class MistyController:
         intent = self.STATE_EXPRESSION_MAP.get(new_state)
         if intent:
             coord.express(intent, source="state")
+
+    def _express_for_response_emotion(self, emotion: str) -> bool:
+        """Drive bounded body expression from a spoken response emotion."""
+        coord = getattr(self, "_expression_coordinator", None)
+        if coord is None or not coord.enabled:
+            return False
+        intent = self.RESPONSE_EMOTION_EXPRESSION_MAP.get(str(emotion or "").lower())
+        if not intent:
+            return False
+        return coord.express(intent, source="response")
 
     # --- State transitions ---
 
@@ -505,12 +522,15 @@ class MistyController:
 
     def move_arms(self, left: float = None, right: float = None, velocity: float = 50):
         """Move arms. Position: -29(up) to 90(down)."""
-        body = {"Velocity": velocity}
+        if left is None and right is None:
+            return
+        if left is not None and right is not None and left == right:
+            self.misty_post("/api/arms", {"Arm": "both", "Position": left, "Velocity": velocity})
+            return
         if left is not None:
-            body["LeftArmPosition"] = left
+            self.misty_post("/api/arms", {"Arm": "left", "Position": left, "Velocity": velocity})
         if right is not None:
-            body["RightArmPosition"] = right
-        self.misty_post("/api/arms", body)
+            self.misty_post("/api/arms", {"Arm": "right", "Position": right, "Velocity": velocity})
 
     # --- Drive / Locomotion (#48) ---
 
@@ -2577,6 +2597,7 @@ class MistyController:
         self.set_state(State.PLAYING)
         self.set_led(148, 0, 211)  # purple = speaking
         self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # face forward — eye contact
+        self._express_for_response_emotion(emotion)
         self._talking_head.start(emotion)  # gentle emotion-aware motion while speaking (#116)
 
         play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
@@ -2584,6 +2605,8 @@ class MistyController:
         # Wait for playback to finish (generous buffer — no completion callback from Misty)
         time.sleep(play_duration + 2.0)
         self._talking_head.stop()  # halt + re-center head when playback ends (#116)
+        if getattr(self, "_expression_coordinator", None):
+            self._expression_coordinator.cancel()  # lower arms/re-center after response gesture
 
         elapsed = time.time() - turn_start
         logger.info(f"[Turn {turn}] Exchange complete in {elapsed:.1f}s")
