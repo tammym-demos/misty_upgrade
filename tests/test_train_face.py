@@ -123,9 +123,79 @@ def test_main_requires_name_or_list():
 
 def test_main_list_uses_env_default_ip(monkeypatch):
     mod = load_train_face_module()
+    # No --misty-ip passed: the CLI must fall back to the MISTY_IP env var.
+    monkeypatch.setenv("MISTY_IP", "10.9.9.9")
+    captured = {}
+
+    def fake_init(self, misty_ip, timeout=10.0):
+        captured["ip"] = misty_ip
+        self.misty_ip = misty_ip
+        self.base_url = f"http://{misty_ip}/api"
+        self.timeout = timeout
+
+    monkeypatch.setattr(mod.MistyFaceTrainer, "__init__", fake_init)
     monkeypatch.setattr(mod.MistyFaceTrainer, "check_connectivity", lambda self: True)
     monkeypatch.setattr(mod.MistyFaceTrainer, "list_faces", lambda self: ["Tammy"])
-    assert mod.main(["--list", "--misty-ip", "127.0.0.1"]) == 0
+    assert mod.main(["--list"]) == 0
+    assert captured["ip"] == "10.9.9.9"
+
+
+def test_main_errors_when_no_ip_available(monkeypatch):
+    mod = load_train_face_module()
+    monkeypatch.delenv("MISTY_IP", raising=False)
+    try:
+        mod.main(["--list"])
+        assert False, "expected SystemExit when no IP is available"
+    except SystemExit as exc:
+        assert exc.code != 0
+
+
+def test_wait_type_rejects_negative():
+    mod = load_train_face_module()
+    parser = mod.build_parser()
+    try:
+        parser.parse_args(["--name", "Tammy", "--misty-ip", "127.0.0.1", "--wait", "-1"])
+        assert False, "expected SystemExit for negative --wait"
+    except SystemExit as exc:
+        assert exc.code != 0
+
+
+def test_recognize_once_extracts_label(monkeypatch):
+    mod = load_train_face_module()
+    trainer = mod.MistyFaceTrainer("127.0.0.1")
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(trainer, "_post", lambda ep, body=None: {"status": "Success"})
+    monkeypatch.setattr(
+        trainer, "_get", lambda ep: {"result": {"label": "Tammy"}}
+    )
+    assert trainer.recognize_once(timeout_s=5.0) == "Tammy"
+
+
+def test_recognize_once_unsupported_get_returns_empty(monkeypatch, capsys):
+    mod = load_train_face_module()
+    trainer = mod.MistyFaceTrainer("127.0.0.1")
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(trainer, "_post", lambda ep, body=None: {"status": "Success"})
+
+    def unsupported(ep):
+        raise RuntimeError("404 Not Found")
+
+    monkeypatch.setattr(trainer, "_get", unsupported)
+    assert trainer.recognize_once(timeout_s=5.0) == ""
+    out = capsys.readouterr().out
+    assert "not available" in out
+
+
+def test_recognize_once_ignores_unknown_person(monkeypatch):
+    mod = load_train_face_module()
+    trainer = mod.MistyFaceTrainer("127.0.0.1")
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+    monkeypatch.setattr(trainer, "_post", lambda ep, body=None: {"status": "Success"})
+    monkeypatch.setattr(
+        trainer, "_get", lambda ep: {"result": {"label": mod.UNKNOWN_LABEL}}
+    )
+    # Only unknown_person seen before timeout → no recognized label.
+    assert trainer.recognize_once(timeout_s=0.0) == ""
 
 
 def test_main_returns_one_when_unreachable(monkeypatch):

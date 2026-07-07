@@ -35,6 +35,15 @@ Note:
     reliability depends on lighting and camera quality. This tool drives the
     on-robot pipeline; end-to-end conversational recognition additionally
     requires ``USE_FACE_RECOGNITION=true`` in the orchestration ``.env``.
+
+Important hardware caveat:
+    ``docs/lessons-learned.md`` records that on this unit Misty's on-chip face
+    detection/training is effectively non-functional — ``training/start``
+    returns "Success" but the face is never stored and ``FaceRecognition``
+    events never fire. This tool exercises the documented REST API and is
+    useful for (re)verifying that behavior, but if training does not persist,
+    that is the known Snapdragon 410 limitation, not a bug in this CLI. The
+    durable path is laptop-side recognition (see lessons-learned).
 """
 
 import argparse
@@ -130,11 +139,15 @@ class MistyFaceTrainer:
     def recognize_once(self, timeout_s: float = 5.0) -> str:
         """Run recognition briefly; return a recognized label or ``""``.
 
-        Uses REST polling of ``/faces/recognition`` events surfaced through
-        ``GET /faces`` is not sufficient, so this polls the recognition start
-        endpoint and reads back detected faces. Recognition events normally
-        arrive over WebSocket in the live pipeline; for a simple CLI verify we
-        start recognition and poll for a known label.
+        Starts recognition, then polls ``GET /faces/recognition`` for a known
+        (non-``unknown_person``) label until ``timeout_s`` elapses. Recognition
+        events normally arrive over WebSocket in the live pipeline; this CLI
+        uses simple REST polling instead.
+
+        If the firmware does not expose ``GET /faces/recognition``, this method
+        prints a clear warning and returns ``""`` (it cannot poll for a label).
+        Callers should treat an empty result as "no known face recognized OR
+        polling unavailable", not as a definitive absence of a face.
         """
         try:
             self._post("/faces/recognition/start")
@@ -147,8 +160,17 @@ class MistyFaceTrainer:
             while time.monotonic() < deadline:
                 try:
                     result = self._get("/faces/recognition")
-                except Exception:
-                    # Not all firmware exposes a GET; fall back to catalog check.
+                except Exception as exc:
+                    # Not all firmware exposes GET /faces/recognition. Warn so
+                    # the operator can distinguish "unsupported endpoint" from
+                    # "no face recognized" rather than silently reporting the
+                    # latter.
+                    print(
+                        "  WARNING: GET /faces/recognition not available on this "
+                        f"firmware ({exc}); cannot poll for a recognized label. "
+                        "Recognition events fire over WebSocket in the live "
+                        "pipeline, not this CLI verify."
+                    )
                     break
                 label = ""
                 if isinstance(result, dict):
@@ -219,6 +241,14 @@ def run_training(trainer: MistyFaceTrainer, name: str, wait_s: float, verify: bo
     return 0 if name in faces_after else 1
 
 
+def _nonneg_float(value: str) -> float:
+    """argparse type: reject negative --wait values (would crash time.sleep)."""
+    parsed = float(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
@@ -227,7 +257,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Examples:\n"
+            "Examples (run from the repository root):\n"
             "  python tools/train_face.py --list\n"
             "  python tools/train_face.py --name Tammy\n"
             "  python tools/train_face.py --name Tammy --verify\n"
@@ -249,12 +279,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--misty-ip",
-        default=os.environ.get("MISTY_IP", "10.0.0.44"),
-        help="Misty robot IP address (default: MISTY_IP env or 10.0.0.44).",
+        default=os.environ.get("MISTY_IP"),
+        help=(
+            "Misty robot IP address. Defaults to the MISTY_IP environment "
+            "variable; required if MISTY_IP is unset (no hard-coded fallback, "
+            "to avoid commanding the wrong robot on a shared network)."
+        ),
     )
     parser.add_argument(
         "--wait",
-        type=float,
+        type=_nonneg_float,
         default=DEFAULT_TRAINING_WAIT_S,
         help=f"Seconds to wait for training to complete (default: {DEFAULT_TRAINING_WAIT_S:.0f}).",
     )
@@ -267,6 +301,12 @@ def main(argv=None) -> int:
 
     if not args.list and not args.name:
         parser.error("provide --name NAME to train, or --list to list faces")
+
+    if not args.misty_ip:
+        parser.error(
+            "no Misty IP available: pass --misty-ip ADDRESS or set the MISTY_IP "
+            "environment variable"
+        )
 
     trainer = MistyFaceTrainer(args.misty_ip)
     print(f"  Misty target: {args.misty_ip}")
