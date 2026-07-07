@@ -373,7 +373,8 @@ class MistyController:
             move_arms=self.move_arms,
             face_callback=lambda emotion, fallback: (
                 self._face_animator.set_emotion(emotion)
-                if self._face_animator is not None else self.show_face(fallback)
+                if (self._face_animator is not None and self.state == State.PLAYING)
+                else self.show_face(fallback)
             ),
             safety_gate=self._expressions_safe_to_move,
             enabled=USE_EMBODIED_EXPRESSIONS,
