@@ -286,6 +286,11 @@ class ExpressionCoordinator:
         spec = EXPRESSION_CHOREOGRAPHY[expr]
         # Newest intent wins: cancel any running gesture without re-centering.
         self._stop_thread(center=False)
+        if self.is_active:
+            logger.debug(
+                "ExpressionCoordinator: previous gesture did not stop within timeout; skipping new expression"
+            )
+            return False
         with self._lock:
             self._stop_event = threading.Event()
             self._thread = threading.Thread(
