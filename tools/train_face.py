@@ -163,6 +163,9 @@ class MistyFaceTrainer:
             try:
                 self._post("/faces/recognition/stop")
             except Exception:
+                # Best-effort cleanup: recognition may already be stopped or
+                # Misty may be unreachable. Nothing actionable to do here, so
+                # suppress rather than mask the primary result/return path.
                 pass
         return recognized
 
