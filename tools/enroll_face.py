@@ -60,7 +60,7 @@ def build_recognizer(args) -> frs.FaceRecognizer:
         store=store,
         embedder=embedder,
         threshold=args.threshold,
-        min_samples=args.samples if args.samples else config_defaults.FACE_RECOGNITION_MIN_SAMPLES,
+        min_samples=args.min_samples,
         min_consistent_frames=config_defaults.FACE_RECOGNITION_MIN_CONSISTENT_FRAMES,
     )
 
@@ -190,7 +190,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--samples",
         type=_positive_int,
         default=10,
-        help="Number of frames to capture (default: 10).",
+        help="Number of frames to CAPTURE (default: 10).",
+    )
+    parser.add_argument(
+        "--min-samples",
+        type=_positive_int,
+        default=config_defaults.FACE_RECOGNITION_MIN_SAMPLES,
+        help=(
+            "Minimum number of VALID single-face samples required to enroll "
+            f"(default: {config_defaults.FACE_RECOGNITION_MIN_SAMPLES}). Frames with "
+            "no face or multiple faces are skipped, so this is independent of --samples."
+        ),
     )
     parser.add_argument(
         "--interval",

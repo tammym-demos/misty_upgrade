@@ -108,8 +108,9 @@ USE_LAPTOP_FACE_RECOGNITION: bool = False
 FACE_PROFILE_DIR: str = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "data", "face_profiles")
 )
-# Frame source used for recognition during conversations: "misty_camera",
-# "webcam", or "image_file".
+# Frame source used for recognition during conversations: "misty_camera" or
+# "webcam". (The enrollment/recognition CLIs additionally support an "image"
+# source for offline use; the live controller uses the robot camera or webcam.)
 FACE_RECOGNITION_SOURCE: str = "misty_camera"
 # Cosine-distance match threshold (lower = stricter). A probe matches a profile
 # only when its distance to the profile centroid is <= this value. Conservative

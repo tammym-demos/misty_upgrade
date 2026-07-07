@@ -290,11 +290,12 @@ and camera quality.
 ### Laptop-side face recognition (`tools/enroll_face.py`, `tools/recognize_face.py`) — #125
 
 Because Misty's on-chip `/api/faces` pipeline is effectively dead on this unit,
-the **durable, default** path for identifying a speaker is laptop-side
-recognition. It captures frames from Misty's RGB camera or the laptop webcam,
-computes face embeddings on the companion laptop (OpenCV + ONNX Runtime), and
-feeds the existing `speaker_name` orchestration path. The deprecated Misty-native
-`USE_FACE_RECOGNITION` (#16) path should stay disabled.
+the **durable, recommended** path for identifying a speaker is laptop-side
+recognition. It is opt-in (off by default; enable with
+`USE_LAPTOP_FACE_RECOGNITION=true`). It captures frames from Misty's RGB camera
+or the laptop webcam, computes face embeddings on the companion laptop (OpenCV +
+ONNX Runtime), and feeds the existing `speaker_name` orchestration path. The
+deprecated Misty-native `USE_FACE_RECOGNITION` (#16) path should stay disabled.
 
 **Enroll a person** (embeddings + metadata are stored locally, never photos):
 
@@ -342,7 +343,7 @@ Key settings (`config_defaults.py` is the single source of truth):
 |---|---|---|
 | `USE_LAPTOP_FACE_RECOGNITION` | `false` | Enable laptop-side recognition (replaces #16). |
 | `FACE_PROFILE_DIR` | `data/face_profiles` | Local, gitignored profile storage. |
-| `FACE_RECOGNITION_SOURCE` | `misty_camera` | `misty_camera` \| `webcam` \| `image_file`. |
+| `FACE_RECOGNITION_SOURCE` | `misty_camera` | Conversation-time frame source: `misty_camera` \| `webcam`. (The CLIs also support an `image` source for offline testing.) |
 | `FACE_RECOGNITION_THRESHOLD` | `0.4` | Cosine-distance match threshold (lower = stricter). |
 | `FACE_RECOGNITION_MIN_CONSISTENT_FRAMES` | `2` | Frames that must agree before a name is used. |
 | `FACE_RECOGNITION_MIN_SAMPLES` | `5` | Minimum valid samples to enroll a profile. |

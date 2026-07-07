@@ -511,10 +511,14 @@ class FaceRecognizer:
             prev = best_by_name.get(result.name)
             if prev is None or result.distance < prev.distance:
                 best_by_name[result.name] = result
-        for name, count in counts.items():
-            if count >= self.min_consistent_frames:
-                return best_by_name[name]
-        return None
+        # Among identities that meet the consistency threshold, pick the
+        # strongest evidence: highest agreeing-frame count, then lowest distance.
+        # This makes the outcome independent of frame order.
+        qualified = [name for name, count in counts.items() if count >= self.min_consistent_frames]
+        if not qualified:
+            return None
+        winner = min(qualified, key=lambda n: (-counts[n], best_by_name[n].distance))
+        return best_by_name[winner]
 
 
 # ---------------------------------------------------------------------------

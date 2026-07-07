@@ -1345,7 +1345,15 @@ class MistyController:
 
             if FACE_RECOGNITION_SOURCE == "webcam":
                 return frs.WebcamFrameSource(device_index=0)
-            # Default to Misty's RGB camera.
+            if FACE_RECOGNITION_SOURCE != "misty_camera":
+                # Surface misconfiguration (typos, or the CLI-only "image_file")
+                # instead of silently using the wrong source.
+                logger.warning(
+                    "[Face #125] Unsupported FACE_RECOGNITION_SOURCE=%r for live "
+                    "conversation; supported values are 'misty_camera' and 'webcam'. "
+                    "Falling back to Misty's camera.",
+                    FACE_RECOGNITION_SOURCE,
+                )
             return frs.MistyCameraFrameSource(MISTY_IP, timeout_s=FACE_RECOGNITION_TIMEOUT_S)
         except Exception as exc:
             logger.warning("[Face #125] Could not build frame source: %s", exc)

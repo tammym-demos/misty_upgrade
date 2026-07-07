@@ -240,6 +240,18 @@ def test_recognize_consistent_requires_min_frames(tmp_path):
     assert result is not None and result.name == "Tammy"
 
 
+def test_recognize_consistent_prefers_strongest_evidence(tmp_path):
+    rec = make_recognizer(tmp_path, min_samples=3, min_consistent_frames=2)
+    rec.enroll("Tammy", [make_frame(TAMMY)] * 3)
+    rec.enroll("Alex", [make_frame(ALEX)] * 3)
+    # Both clear min_consistent_frames=2; Tammy has more agreeing frames and
+    # must win regardless of frame order.
+    frames = [make_frame(ALEX), make_frame(TAMMY), make_frame(ALEX),
+              make_frame(TAMMY), make_frame(TAMMY)]
+    result = rec.recognize_consistent(frames)
+    assert result is not None and result.name == "Tammy"
+
+
 # ---------------------------------------------------------------------------
 # Controller integration helper (recognize_speaker)
 # ---------------------------------------------------------------------------

@@ -24,6 +24,8 @@ Pillow
 bleak
 # Laptop-side face recognition: OpenCV detector/embedder (issue #125).
 # onnxruntime (above) runs the ONNX face models; numpy (above) stores embeddings.
-# Optional at runtime — laptop recognition stays idle with a clear error if the
+# Headless build keeps CI/server installs light (no GUI libs); we only use
+# VideoCapture / imdecode / FaceDetectorYN, never cv2 highgui windows. Optional
+# at runtime — laptop recognition stays idle with a clear error if the
 # models/deps are missing; not required for the cloud-safe unit tests.
-opencv-python
+opencv-python-headless
