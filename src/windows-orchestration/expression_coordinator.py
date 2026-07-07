@@ -286,6 +286,11 @@ class ExpressionCoordinator:
         spec = EXPRESSION_CHOREOGRAPHY[expr]
         # Newest intent wins: cancel any running gesture without re-centering.
         self._stop_thread(center=False)
+        if self.is_active:
+            logger.debug(
+                "ExpressionCoordinator: previous gesture did not stop within timeout; skipping new expression"
+            )
+            return False
         with self._lock:
             self._stop_event = threading.Event()
             self._thread = threading.Thread(
@@ -335,18 +340,20 @@ class ExpressionCoordinator:
         with self._lock:
             thread = self._thread
             stop_event = self._stop_event
-            self._thread = None
         if stop_event is not None:
             stop_event.set()
         stopped = True
         if thread is not None and thread.is_alive() and thread is not threading.current_thread():
             thread.join(timeout=self.STOP_TIMEOUT_S)
             if thread.is_alive():
-                # Actuator call may be hung; do NOT issue a re-center from this
-                # thread while the prior choreography thread is still running, to
-                # avoid concurrent/overlapping motor commands.
+                # Actuator call may be hung; keep tracking the thread so callers
+                # can observe it via is_active and avoid overlapping gestures.
                 stopped = False
                 logger.debug("ExpressionCoordinator thread did not stop within timeout")
+        if stopped:
+            with self._lock:
+                if self._thread is thread:
+                    self._thread = None
         if center and stopped:
             self._recenter_body()
 
