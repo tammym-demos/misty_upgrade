@@ -139,3 +139,21 @@ TALKING_HEAD_YAW_RANGE: float = 6.0        # +/- yaw wobble
 TALKING_HEAD_ROLL_RANGE: float = 3.0       # +/- roll wobble
 TALKING_HEAD_VELOCITY: float = 30.0        # gentle move velocity
 TALKING_HEAD_INTERVAL_S: float = 0.8       # seconds between micro-movements
+
+# Embodied expression coordinator (issue #74). Off by default and gated by
+# config until hardware validation passes. When enabled, an optional
+# companion-side coordinator maps constrained expression intents (joy, curious,
+# confused, thinking, sassy, annoyed, angry, sad, startled, sleepy, error) to
+# bounded face/LED/head/arm choreography. Face rendering is delegated to #73's
+# FaceAnimator with a static built-in-face fallback; choreography is cancellable,
+# non-blocking and sensor rate-limited. Motor head/arm gestures are safety-gated
+# (suppressed during MOVING/CHARGING/ERROR/reboot/re-arm/recording/listening,
+# shutdown, and movement preemption); non-motor face/LED cues may still apply in
+# those states. It never issues drive/tread commands.
+USE_EMBODIED_EXPRESSIONS: bool = False
+# Gentle move velocities for expression gestures (percent).
+EXPRESSION_HEAD_VELOCITY: float = 40.0
+EXPRESSION_ARM_VELOCITY: float = 40.0
+# Minimum seconds between repeats of the same sensor-triggered expression
+# (rate-limit guard against sensor spam from bump/ToF/hazard streams).
+EXPRESSION_SENSOR_MIN_INTERVAL_S: float = 3.0

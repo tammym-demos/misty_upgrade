@@ -107,6 +107,27 @@ USE_TALKING_HEAD_MOTION = os.getenv(
     "USE_TALKING_HEAD_MOTION", str(config_defaults.USE_TALKING_HEAD_MOTION)
 ).lower() in ("1", "true", "yes")
 
+# Embodied expression coordinator (#74) — off by default, gated here. Maps
+# constrained expression intents to bounded face/LED/head/arm choreography.
+# Cancellable, non-blocking, safety-gated (motor gestures only in safe states),
+# and sensor rate-limited; never issues drive/tread commands.
+USE_EMBODIED_EXPRESSIONS = os.getenv(
+    "USE_EMBODIED_EXPRESSIONS", str(config_defaults.USE_EMBODIED_EXPRESSIONS)
+).lower() in ("1", "true", "yes")
+# Tunable expression gesture parameters (env-overridable, defaults from config).
+EXPRESSION_HEAD_VELOCITY = float(
+    os.getenv("EXPRESSION_HEAD_VELOCITY", str(config_defaults.EXPRESSION_HEAD_VELOCITY))
+)
+EXPRESSION_ARM_VELOCITY = float(
+    os.getenv("EXPRESSION_ARM_VELOCITY", str(config_defaults.EXPRESSION_ARM_VELOCITY))
+)
+EXPRESSION_SENSOR_MIN_INTERVAL_S = float(
+    os.getenv(
+        "EXPRESSION_SENSOR_MIN_INTERVAL_S",
+        str(config_defaults.EXPRESSION_SENSOR_MIN_INTERVAL_S),
+    )
+)
+
 # Keyphrase watchdog — detects silent failures and auto-recovers
 WATCHDOG_IDLE_TIMEOUT_S = float(os.getenv("WATCHDOG_IDLE_TIMEOUT_S", str(config_defaults.WATCHDOG_IDLE_TIMEOUT_S)))  # 90s after rearm with no wake event
 WATCHDOG_ESCALATE_TIMEOUT_S = float(os.getenv("WATCHDOG_ESCALATE_TIMEOUT_S", str(config_defaults.WATCHDOG_ESCALATE_TIMEOUT_S)))  # 60s after recovery attempt
@@ -339,6 +360,58 @@ class MistyController:
             interval_s=config_defaults.TALKING_HEAD_INTERVAL_S,
         )
 
+        # Embodied expression coordinator (#74) — always constructed; a no-op
+        # when disabled (USE_EMBODIED_EXPRESSIONS=false). Maps constrained
+        # expression intents to bounded face/LED/head/arm choreography. Face
+        # rendering is delegated to the FaceAnimator (with its own built-in
+        # fallback); motor gestures are gated to safe states only and drive/tread
+        # movement is never issued here.
+        from expression_coordinator import ExpressionCoordinator
+        self._expression_coordinator = ExpressionCoordinator(
+            set_led=self.set_led,
+            move_head=self.move_head,
+            move_arms=self.move_arms,
+            face_callback=lambda emotion, fallback: (
+                self._face_animator.set_emotion(emotion)
+                if (self._face_animator is not None and self.state == State.PLAYING)
+                else self.show_face(fallback)
+            ),
+            safety_gate=self._expressions_safe_to_move,
+            enabled=USE_EMBODIED_EXPRESSIONS,
+            head_velocity=EXPRESSION_HEAD_VELOCITY,
+            arm_velocity=EXPRESSION_ARM_VELOCITY,
+            sensor_min_interval_s=EXPRESSION_SENSOR_MIN_INTERVAL_S,
+        )
+
+    # States in which expressive head/arm gestures are allowed. Motor gestures
+    # are suppressed everywhere else (movement, charging, error, reboot, re-arm,
+    # recording/listening audio capture, disconnected, and during shutdown) so
+    # gestures never interfere with safety-critical behavior or audio (#74).
+    SAFE_EXPRESSION_STATES = frozenset({State.IDLE, State.PROCESSING, State.PLAYING})
+
+    def _expressions_safe_to_move(self) -> bool:
+        """Safety gate for the ExpressionCoordinator's motor gestures (#74)."""
+        return bool(getattr(self, "running", False)) and self.state in self.SAFE_EXPRESSION_STATES
+
+    # Representative state -> expression intent mapping (#74). Only a small,
+    # unambiguous subset drives expressions from state transitions; richer
+    # trigger wiring (wake, sensors, movement outcomes) can build on this.
+    # Values are intent strings coerced by the coordinator.
+    STATE_EXPRESSION_MAP = {
+        State.PROCESSING: "thinking",
+        State.CHARGING: "sleepy",
+        State.ERROR: "error",
+    }
+
+    def _express_for_state(self, new_state: State) -> None:
+        """Drive a bounded expression for a state transition. No-op if disabled."""
+        coord = getattr(self, "_expression_coordinator", None)
+        if coord is None or not coord.enabled:
+            return
+        intent = self.STATE_EXPRESSION_MAP.get(new_state)
+        if intent:
+            coord.express(intent, source="state")
+
     # --- State transitions ---
 
     def set_state(self, new_state: State):
@@ -354,9 +427,11 @@ class MistyController:
             # reboot/re-arm or any other state (#116).
             if new_state != State.PLAYING and getattr(self, "_talking_head", None):
                 self._talking_head.stop()
+            self._express_for_state(new_state)
 
     def try_set_state(self, expected: State, new_state: State) -> bool:
         """Atomic compare-and-swap for state transitions. Returns True if successful."""
+        transitioned = False
         with self.state_lock:
             if self.state == expected:
                 old = self.state
@@ -366,8 +441,13 @@ class MistyController:
                     self._face_animator.set_state(new_state)
                 if new_state != State.PLAYING and getattr(self, "_talking_head", None):
                     self._talking_head.stop()
-                return True
-            return False
+                transitioned = True
+        if transitioned:
+            # Outside the state lock: the coordinator is non-blocking but may join
+            # a prior bounded gesture thread; keep that off the state lock.
+            self._express_for_state(new_state)
+            return True
+        return False
 
     def get_state(self) -> State:
         with self.state_lock:
@@ -1660,6 +1740,8 @@ class MistyController:
         logger.info("Shutting down...")
         self.running = False
         # Stop face animator first (§6.3 — before existing cleanup sequence)
+        if getattr(self, "_expression_coordinator", None):
+            self._expression_coordinator.cancel()  # halt any in-flight gesture (#74)
         if self._talking_head:
             self._talking_head.stop()  # halt + re-center head motion (#116)
         if self._face_animator:
