@@ -662,13 +662,13 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
             logger.debug(f"Audio stats failed: {e}")
 
         audio_io = BytesIO(audio_bytes)
-        # First try WITHOUT VAD to see if whisper can find any speech
+        # Use VAD and no prompt bias so background noise does not get coerced
+        # into plausible short phrases.
         segments, info = model.transcribe(
             audio_io,
             language="en",
             beam_size=5,
-            vad_filter=False,
-            initial_prompt="Hey Misty, tell me about science, history, math, geography, and fun facts.",
+            vad_filter=True,
         )
         segment_list = list(segments)
         text = " ".join(seg.text.strip() for seg in segment_list).strip()
@@ -688,12 +688,30 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
                 )
                 return {"status": "empty", "text": "", "latency_ms": 0}
 
+        if _looks_like_repeated_short_hallucination(text):
+            logger.info("Rejecting repeated short STT hallucination: text=%r", text)
+            return {"status": "empty", "text": "", "latency_ms": 0}
+
         logger.debug(f"STT result: {text}")
         return {"status": "ok", "text": text}
 
     except Exception as e:
         logger.error(f"STT failed: {e}")
         return {"status": "error", "error": "stt_failure"}
+
+
+def _looks_like_repeated_short_hallucination(text: str) -> bool:
+    """Detect common Whisper noise artifacts such as "Wow. Wow."."""
+    chunks = [
+        re.sub(r"[^a-z0-9']+", " ", chunk.lower()).strip()
+        for chunk in re.split(r"[.!?]+", text or "")
+    ]
+    chunks = [chunk for chunk in chunks if chunk]
+    if len(chunks) < 2:
+        return False
+    if len(set(chunks)) != 1:
+        return False
+    return len(chunks[0].split()) <= 2
 
 # ============================================================================
 # STEP 2: LANGUAGE MODEL INFERENCE
