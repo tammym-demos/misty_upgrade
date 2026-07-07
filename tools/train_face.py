@@ -23,7 +23,8 @@ Usage:
     # Train and then run a quick recognition verify afterwards
     python tools/train_face.py --name Tammy --verify
 
-    # Point at a specific robot (otherwise MISTY_IP env, then default)
+    # Point at a specific robot (otherwise uses the MISTY_IP env var;
+    # required if MISTY_IP is unset — there is no hard-coded default)
     python tools/train_face.py --name Tammy --misty-ip 10.0.0.44
 
 Exit codes:
@@ -34,7 +35,8 @@ Note:
     Misty's built-in face recognition only works with human faces and its
     reliability depends on lighting and camera quality. This tool drives the
     on-robot pipeline; end-to-end conversational recognition additionally
-    requires ``USE_FACE_RECOGNITION=true`` in the orchestration ``.env``.
+    requires ``USE_FACE_RECOGNITION=true`` in the controller's
+    ``src/windows-orchestration/.env`` (read by ``misty_controller.py``).
 
 Important hardware caveat:
     ``docs/lessons-learned.md`` records that on this unit Misty's on-chip face
