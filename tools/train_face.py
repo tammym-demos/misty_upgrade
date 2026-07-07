@@ -47,6 +47,7 @@ Important hardware caveat:
 """
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -242,8 +243,10 @@ def run_training(trainer: MistyFaceTrainer, name: str, wait_s: float, verify: bo
 
 
 def _nonneg_float(value: str) -> float:
-    """argparse type: reject negative --wait values (would crash time.sleep)."""
+    """argparse type: reject negative/non-finite --wait (would crash time.sleep)."""
     parsed = float(value)
+    if not math.isfinite(parsed):
+        raise argparse.ArgumentTypeError("must be a finite number")
     if parsed < 0:
         raise argparse.ArgumentTypeError("must be >= 0")
     return parsed
@@ -301,6 +304,12 @@ def main(argv=None) -> int:
 
     if not args.list and not args.name:
         parser.error("provide --name NAME to train, or --list to list faces")
+
+    if args.list and args.name:
+        parser.error("--list and --name are mutually exclusive; choose one action")
+
+    if args.verify and not args.name:
+        parser.error("--verify only applies when training with --name")
 
     if not args.misty_ip:
         parser.error(

@@ -190,12 +190,52 @@ def test_recognize_once_ignores_unknown_person(monkeypatch):
     mod = load_train_face_module()
     trainer = mod.MistyFaceTrainer("127.0.0.1")
     monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+    # Guarantee exactly one polling iteration: deadline uses the first value (0),
+    # first while-check (1.0) is < deadline (5.0) so the body runs once, second
+    # check (100.0) exits the loop.
+    monotonic_values = iter([0.0, 1.0, 100.0])
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(monotonic_values))
     monkeypatch.setattr(trainer, "_post", lambda ep, body=None: {"status": "Success"})
-    monkeypatch.setattr(
-        trainer, "_get", lambda ep: {"result": {"label": mod.UNKNOWN_LABEL}}
-    )
-    # Only unknown_person seen before timeout → no recognized label.
-    assert trainer.recognize_once(timeout_s=0.0) == ""
+    seen = {"gets": 0}
+
+    def only_unknown(ep):
+        seen["gets"] += 1
+        return {"result": {"label": mod.UNKNOWN_LABEL}}
+
+    monkeypatch.setattr(trainer, "_get", only_unknown)
+    assert trainer.recognize_once(timeout_s=5.0) == ""
+    assert seen["gets"] == 1  # the ignore-logic branch actually executed
+
+
+def test_wait_type_rejects_nonfinite():
+    mod = load_train_face_module()
+    parser = mod.build_parser()
+    for bad in ("nan", "inf", "-inf"):
+        try:
+            parser.parse_args(
+                ["--name", "Tammy", "--misty-ip", "127.0.0.1", "--wait", bad]
+            )
+            assert False, f"expected SystemExit for --wait {bad}"
+        except SystemExit as exc:
+            assert exc.code != 0
+
+
+def test_main_rejects_list_and_name_together(monkeypatch):
+    mod = load_train_face_module()
+    try:
+        mod.main(["--list", "--name", "Tammy", "--misty-ip", "127.0.0.1"])
+        assert False, "expected SystemExit for mutually exclusive actions"
+    except SystemExit as exc:
+        assert exc.code != 0
+
+
+def test_main_rejects_verify_without_name(monkeypatch):
+    mod = load_train_face_module()
+    try:
+        mod.main(["--list", "--verify", "--misty-ip", "127.0.0.1"])
+        assert False, "expected SystemExit for --verify without --name"
+    except SystemExit as exc:
+        assert exc.code != 0
 
 
 def test_main_returns_one_when_unreachable(monkeypatch):
