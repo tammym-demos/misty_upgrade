@@ -177,7 +177,7 @@ Tests unique to the laptop mic wake word mode:
 | Response too long/wordy | Brevity drift past 35 words | Post-truncation should catch this; check max_tokens=60 |
 | Response too short | Old behavior persisted | Verify running updated code; check system prompt |
 | Follow-up doesn't work | Silence threshold too aggressive | Check `FOLLOWUP_SILENCE_THRESHOLD` (default 1000 bytes) |
-| Laptop wake word false positives | Threshold too low | Increase threshold: `OWW_THRESHOLD=0.7` |
+| Laptop wake word false positives | Threshold too low or single-frame noise spike | Increase threshold above current value or require more sustained evidence with `OWW_TRIGGER_FRAMES=2` |
 | Laptop wake word misses | Threshold too high or mic issue | Decrease `OWW_THRESHOLD` or check `sounddevice` mic selection |
 | Self-wake (Misty triggers herself) | Pause/resume not working | Check `wake_word_listener.py` pause/resume flow in logs |
 

@@ -46,6 +46,10 @@ OWW_CUSTOM_MODEL_PATH = os.getenv(
     "OWW_CUSTOM_MODEL_PATH",
     config_defaults.OWW_CUSTOM_MODEL_PATH,
 ).strip() or config_defaults.OWW_CUSTOM_MODEL_PATH
+OWW_TRIGGER_FRAMES = max(
+    1,
+    int(os.getenv("OWW_TRIGGER_FRAMES", str(config_defaults.OWW_TRIGGER_FRAMES))),
+)
 
 # Audio capture settings (laptop mic)
 _LAPTOP_MIC_DEVICE_RAW = os.getenv("LAPTOP_MIC_DEVICE", config_defaults.LAPTOP_MIC_DEVICE).strip()
@@ -88,6 +92,7 @@ class WakeWordListener:
         self.model_name = model_name
         self.threshold = threshold
         self.custom_model_path = custom_model_path
+        self.trigger_frames = OWW_TRIGGER_FRAMES
 
         self._running = False
         self._paused = False
@@ -103,6 +108,7 @@ class WakeWordListener:
         self._last_detection_time = 0.0
         self._start_time = 0.0
         self._resume_time = 0.0  # for self-wake cooldown
+        self._detection_streaks: dict[str, int] = {}
 
         # Speech monitor state (for VAD-controlled recording)
         self._speech_monitor_active = False
@@ -160,7 +166,7 @@ class WakeWordListener:
 
             logger.info(
                 f"openWakeWord ready (models={list(self._oww_model.models.keys())}, "
-                f"threshold={self.threshold})"
+                f"threshold={self.threshold}, trigger_frames={self.trigger_frames})"
             )
             return True
         except ImportError:
@@ -258,6 +264,7 @@ class WakeWordListener:
                 self._audio_queue.get_nowait()
             except queue.Empty:
                 break
+        self._detection_streaks.clear()
         logger.debug("Wake word listener paused (self-wake prevention)")
 
     def resume(self):
@@ -265,6 +272,7 @@ class WakeWordListener:
         self._paused = False
         self._resume_time = time.time()
         self._pause_event.set()
+        self._detection_streaks.clear()
         # Reset openWakeWord state to avoid stale activations
         if self._oww_model:
             self._oww_model.reset()
@@ -400,6 +408,7 @@ class WakeWordListener:
             "uptime_s": round(uptime),
             "model": self.model_name,
             "threshold": self.threshold,
+            "trigger_frames": self.trigger_frames,
             "source": "laptop_mic",
             "custom_model_path": self.custom_model_path or None,
             "model_source": "custom" if self.custom_model_path else "missing_config",
@@ -470,22 +479,9 @@ class WakeWordListener:
                 # Run openWakeWord inference
                 if self._oww_model and not in_cooldown:
                     predictions = self._oww_model.predict(pcm)
-                    for model_name, score in predictions.items():
-                        if score >= self.threshold:
-                            self._total_detections += 1
-                            self._last_detection_time = time.time()
-                            logger.info(
-                                f"Wake word '{model_name}' detected! "
-                                f"score={score:.3f} (threshold={self.threshold})"
-                            )
-                            # Reset model to prevent repeated triggers
-                            self._oww_model.reset()
-                            # Fire callback
-                            try:
-                                self.on_wake_word()
-                            except Exception as e:
-                                logger.error(f"Wake word callback error: {e}")
-                            break
+                    self._handle_wake_predictions(predictions)
+                elif in_cooldown:
+                    self._detection_streaks.clear()
 
                 self._consecutive_errors = 0
 
@@ -504,6 +500,41 @@ class WakeWordListener:
                     self._consecutive_errors = 0
 
         logger.info("Wake word processing loop ended")
+
+    def _handle_wake_predictions(self, predictions: dict[str, float]) -> bool:
+        """Handle openWakeWord scores and fire only after sustained evidence."""
+        for model_name, score in predictions.items():
+            if score < self.threshold:
+                self._detection_streaks[model_name] = 0
+                continue
+
+            streak = self._detection_streaks.get(model_name, 0) + 1
+            self._detection_streaks[model_name] = streak
+            if streak < self.trigger_frames:
+                logger.debug(
+                    f"Wake word '{model_name}' candidate score={score:.3f} "
+                    f"({streak}/{self.trigger_frames} frames)"
+                )
+                continue
+
+            self._total_detections += 1
+            self._last_detection_time = time.time()
+            logger.info(
+                f"Wake word '{model_name}' detected! score={score:.3f} "
+                f"(threshold={self.threshold}, frames={streak}/{self.trigger_frames})"
+            )
+            self._detection_streaks.clear()
+            # Reset model to prevent repeated triggers
+            if self._oww_model:
+                self._oww_model.reset()
+            # Fire callback
+            try:
+                self.on_wake_word()
+            except Exception as e:
+                logger.error(f"Wake word callback error: {e}")
+            return True
+
+        return False
 
     # --- Speech monitor helpers ---
 

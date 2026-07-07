@@ -86,6 +86,26 @@ class TestOrchestrationSttConfidence(unittest.TestCase):
         self.assertEqual(result["status"], "empty")
         self.assertEqual(result["text"], "")
 
+    def test_repeated_short_noise_phrase_is_treated_as_empty_stt(self):
+        """Common Whisper noise loops such as 'Wow. Wow.' should not reach the LLM."""
+        model = unittest.mock.MagicMock()
+        model.transcribe.return_value = (
+            [
+                SimpleNamespace(
+                    text="Wow. Wow.",
+                    avg_logprob=-0.25,
+                    no_speech_prob=0.01,
+                )
+            ],
+            SimpleNamespace(),
+        )
+
+        with unittest.mock.patch.object(self._svc, "_get_whisper_model", return_value=model):
+            result = self._svc.speech_to_text(b"not-a-real-wav", time.time())
+
+        self.assertEqual(result["status"], "empty")
+        self.assertEqual(result["text"], "")
+
 
 class TestLaptopMistyRecordingConfig(unittest.TestCase):
     """Unit tests for laptop-mode Misty recording configuration (#66)."""
@@ -305,6 +325,27 @@ class TestWakeWordConfiguration(unittest.TestCase):
 
         self.assertEqual(ctrl._wake_word_source, "error")
         self.assertIn("unsupported", ctrl._wake_word_config_error)
+
+    def test_wake_word_requires_consecutive_above_threshold_frames(self):
+        """Single-frame OpenWakeWord spikes should not trigger a conversation."""
+        if self._listener_module is None:
+            self.skipTest("wake_word_listener could not be imported")
+
+        callback = unittest.mock.MagicMock()
+        listener = self._listener_module.WakeWordListener(
+            on_wake_word=callback,
+            threshold=0.7,
+            custom_model_path=__file__,
+        )
+        listener.trigger_frames = 2
+        listener._oww_model = unittest.mock.MagicMock()
+
+        self.assertFalse(listener._handle_wake_predictions({"hey_misty": 0.82}))
+        callback.assert_not_called()
+
+        self.assertTrue(listener._handle_wake_predictions({"hey_misty": 0.81}))
+        callback.assert_called_once()
+        listener._oww_model.reset.assert_called_once()
 
 
 class TestLaptopFastRearm(unittest.TestCase):
@@ -2911,7 +2952,8 @@ class TestCanonicalDefaults(unittest.TestCase):
             "FOLLOWUP_MAX_TURNS", "WATCHDOG_IDLE_TIMEOUT_S", "WATCHDOG_ESCALATE_TIMEOUT_S",
             "IDLE_TIMEOUT_S", "PROACTIVE_REBOOT_AFTER_CYCLES",
             "PROACTIVE_REBOOT_AFTER_RECORDINGS", "LAPTOP_MISTY_RECORDING_MODE",
-            "LAPTOP_MISTY_TALLY_RECORDING_S", "FACE_RECOGNITION_TIMEOUT_S",
+            "LAPTOP_MISTY_TALLY_RECORDING_S", "OWW_TRIGGER_FRAMES",
+            "FACE_RECOGNITION_TIMEOUT_S",
         ):
             self.assertTrue(hasattr(self._cfg, attr), f"config_defaults missing: {attr}")
 
