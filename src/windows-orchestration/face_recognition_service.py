@@ -429,6 +429,23 @@ class FaceRecognizer:
         return path
 
     # --- embedding --------------------------------------------------------
+    def count_valid_samples(self, frames: Sequence[Frame]) -> tuple[int, int]:
+        """Return ``(valid, rejected)`` single-face sample counts for ``frames``.
+
+        A public, side-effect-free helper for dry-run/preview flows: it does not
+        persist anything. A frame counts as valid only when exactly one face is
+        detected (no face or multiple faces are rejected).
+        """
+        valid = 0
+        rejected = 0
+        for frame in frames:
+            try:
+                self._single_face_embedding(frame)
+                valid += 1
+            except FaceRecognitionError:
+                rejected += 1
+        return valid, rejected
+
     def _single_face_embedding(self, frame: Frame) -> np.ndarray:
         """Return exactly one embedding for ``frame`` or raise a typed error."""
         embeddings = self.embedder.extract_embeddings(frame)

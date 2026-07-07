@@ -1303,8 +1303,11 @@ class MistyController:
 
         Imports the recognition module lazily so the heavy/optional face
         dependencies are only touched when USE_LAPTOP_FACE_RECOGNITION is on.
-        Caches the result; on any construction error it caches ``False`` so we
-        do not retry (and spam logs) every conversation turn. Fail-open.
+        Caches the constructed recognizer; on a genuine construction error
+        (import/params) it caches ``False`` so we do not retry (and spam logs)
+        every turn. Profile presence is intentionally NOT checked here — it is
+        re-evaluated per turn in ``recognize_face_laptop`` so a profile enrolled
+        while the controller is running is picked up without a restart. Fail-open.
         """
         if self._laptop_face_recognizer is not None:
             return self._laptop_face_recognizer or None
@@ -1323,14 +1326,6 @@ class MistyController:
                 min_samples=FACE_RECOGNITION_MIN_SAMPLES,
                 min_consistent_frames=FACE_RECOGNITION_MIN_CONSISTENT_FRAMES,
             )
-            if not recognizer.load_profiles():
-                logger.info(
-                    "[Face #125] No enrolled profiles in %s — laptop recognition idle "
-                    "(enroll with tools/enroll_face.py).",
-                    FACE_PROFILE_DIR,
-                )
-                self._laptop_face_recognizer = False
-                return None
             self._laptop_face_recognizer = recognizer
             return recognizer
         except Exception as exc:
@@ -1369,12 +1364,21 @@ class MistyController:
         recognizer = self._build_laptop_face_recognizer()
         if recognizer is None:
             return None
-        source = self._build_laptop_frame_source()
-        if source is None:
-            return None
         try:
             import face_recognition_service as frs
 
+            # Refresh profiles each turn so a profile enrolled while the
+            # controller is running is picked up without a restart.
+            if not recognizer.load_profiles(force=True):
+                logger.debug(
+                    "[Face #125] No enrolled profiles in %s — skipping (enroll with "
+                    "tools/enroll_face.py).",
+                    FACE_PROFILE_DIR,
+                )
+                return None
+            source = self._build_laptop_frame_source()
+            if source is None:
+                return None
             with source:
                 name = frs.recognize_speaker(recognizer, source)
             if name:

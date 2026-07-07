@@ -131,14 +131,7 @@ def run_enroll(args) -> int:
 
     if args.preview_only:
         # Dry run: count valid single-face frames without persisting.
-        valid = 0
-        rejected = 0
-        for frame in frames:
-            try:
-                recognizer._single_face_embedding(frame)
-                valid += 1
-            except frs.FaceRecognitionError:
-                rejected += 1
+        valid, rejected = recognizer.count_valid_samples(frames)
         print(f"  PREVIEW: {valid} valid sample(s), {rejected} rejected. Nothing saved.")
         return 0 if valid >= recognizer.min_samples else 1
 

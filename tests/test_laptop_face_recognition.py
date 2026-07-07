@@ -93,7 +93,7 @@ def test_store_path_never_escapes_directory(tmp_path):
     with pytest.raises(frs.ProfileNameError):
         store.path_for("../../etc/passwd")
     good = store.path_for("Tammy")
-    assert os.path.abspath(good).startswith(os.path.abspath(str(tmp_path)))
+    assert os.path.commonpath([os.path.abspath(good), os.path.abspath(str(tmp_path))]) == os.path.abspath(str(tmp_path))
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +194,16 @@ def test_enroll_validates_name(tmp_path):
     rec = make_recognizer(tmp_path)
     with pytest.raises(frs.ProfileNameError):
         rec.enroll("../evil", [make_frame(TAMMY)] * 5)
+
+
+def test_count_valid_samples(tmp_path):
+    rec = make_recognizer(tmp_path)
+    frames = [make_frame(TAMMY), make_frame(), make_frame(TAMMY, ALEX), make_frame(ALEX)]
+    valid, rejected = rec.count_valid_samples(frames)
+    assert valid == 2  # two single-face frames
+    assert rejected == 2  # one no-face + one multi-face
+    # Pure dry run: nothing persisted.
+    assert rec.store.list_names() == []
 
 
 # ---------------------------------------------------------------------------
