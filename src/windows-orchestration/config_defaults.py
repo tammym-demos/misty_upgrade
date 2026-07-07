@@ -85,6 +85,9 @@ OWW_CUSTOM_MODEL_PATH: str = os.path.normpath(
 )
 OWW_MODEL_NAME: str = "hey_misty"
 OWW_THRESHOLD: float = 0.7
+# Require the wake model to cross threshold on consecutive audio frames before
+# firing. This suppresses single-frame background false positives.
+OWW_TRIGGER_FRAMES: int = 2
 LAPTOP_MIC_DEVICE: str = ""
 
 # Face recognition (issue #16)
