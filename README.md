@@ -253,6 +253,40 @@ If `LAPTOP_MISTY_RECORDING_MODE` is `tally` or `off` and laptop mic capture retu
 
 For live visual/body testing, enable only the modes you want to validate. `USE_TALKING_HEAD_MOTION=true` adds small head movements during spoken responses. `USE_EMBODIED_EXPRESSIONS=true` allows safe expression choreography such as joy/happy arm raises; motor gestures are suppressed during unsafe states like recording, moving, charging, rebooting, and shutdown. To replace Misty's custom face assets, put the required files in `FACE_ASSETS_DIR`, start once with `FACE_ASSETS_SYNC_MODE=overwrite`, then return to `missing` for normal startup.
 
+### Face recognition training (`tools/train_face.py`)
+
+`USE_FACE_RECOGNITION=true` lets the controller identify the speaker during a
+conversation and personalize LLM responses, but it only helps once at least one
+face is trained on the robot. Use the standalone CLI to manage Misty's on-robot
+face catalog over REST (requires Misty on the network; no orchestration service).
+Run these from the repository root:
+
+```powershell
+# List currently trained faces
+python tools/train_face.py --list
+
+# Train a face (stand in front of Misty and slowly turn your head)
+python tools/train_face.py --name Tammy
+
+# Train, then run a quick recognition verify
+python tools/train_face.py --name Tammy --verify
+```
+
+The tool reads `MISTY_IP` from the environment (override with `--misty-ip`, which
+is required if `MISTY_IP` is unset) and uses the same `/api/faces` endpoints as
+the controller, so trained labels match what the live pipeline recognizes. Run
+`python tools/train_face.py --help` for all options. Misty's built-in face
+recognition works only with human faces and its reliability depends on lighting
+and camera quality.
+
+> **Hardware caveat:** [`docs/lessons-learned.md`](docs/lessons-learned.md)
+> documents that on this Misty unit the on-chip face detection/training pipeline
+> is effectively non-functional — `training/start` returns `Success` but the
+> face is never stored and `FaceRecognition` events never fire (a Snapdragon 410
+> limitation). This tool exercises the documented REST API and helps re-verify
+> that behavior, but the durable path is laptop-side recognition. Do not expect
+> on-robot training to persist until this is re-validated on hardware.
+
 ---
 
 ## Orchestration API
