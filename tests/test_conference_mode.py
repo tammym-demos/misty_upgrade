@@ -243,11 +243,15 @@ def test_manifest_round_trip(tmp_path):
     assert loaded.cues[0].wav_path == manifest.cues[0].wav_path
 
 
-def test_verify_manifest_flags_missing_and_zero_duration(tmp_path):
+def test_verify_manifest_flags_missing_and_unreadable(tmp_path):
     script = parse_script(FIXTURE, is_text=True)
     manifest = prepare_assets(script, str(tmp_path), FakeTts())
     manifest.cues[0].wav_path = str(tmp_path / "does-not-exist.wav")
-    manifest.cues[1].duration_s = 0.0
+    # A file that exists but is not a valid/non-empty WAV must still be flagged,
+    # even though the manifest recorded a positive duration when it was written.
+    empty = tmp_path / "empty.wav"
+    empty.write_bytes(b"")
+    manifest.cues[1].wav_path = str(empty)
     problems = verify_manifest(manifest)
     assert any("does-not-exist" in p for p in problems)
     assert any("non-positive duration" in p for p in problems)
@@ -270,6 +274,16 @@ def test_disabled_controller_is_a_noop(tmp_path):
     assert controller.play_next() is None
     assert controller.replay() is None
     assert recorder.played == []
+
+
+def test_playback_requires_explicit_start(tmp_path):
+    # Enabled but never armed: IDLE is inert until start() is called.
+    controller, recorder, _ = build_ready_controller(tmp_path)
+    assert controller.status is ConferenceStatus.IDLE
+    assert controller.play_next() is None
+    assert recorder.played == []
+    assert controller.start() is True
+    assert controller.play_next().cue_id == "slide01-misty01"
 
 
 def test_play_next_advances_in_order(tmp_path):

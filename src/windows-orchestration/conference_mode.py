@@ -449,15 +449,29 @@ def prepare_assets(
 
 
 def verify_manifest(manifest: ConferenceManifest) -> list[str]:
-    """Return a list of human-readable problems; empty means showtime-ready."""
+    """Return a list of human-readable problems; empty means showtime-ready.
+
+    Duration is recomputed from the current on-disk WAV rather than trusting the
+    manifest's stored value, so a cue that became unreadable or empty after the
+    manifest was written is still reported.
+    """
     problems: list[str] = []
     if not manifest.cues:
         problems.append("manifest contains no cues")
     for asset in manifest.cues:
         if not asset.wav_path or not os.path.isfile(asset.wav_path):
             problems.append(f"{asset.cue_id}: missing WAV at {asset.wav_path!r}")
-        elif asset.duration_s <= 0:
-            problems.append(f"{asset.cue_id}: non-positive duration {asset.duration_s}")
+            continue
+        try:
+            with open(asset.wav_path, "rb") as fh:
+                actual = wav_duration(fh.read())
+        except OSError as exc:
+            problems.append(f"{asset.cue_id}: unreadable WAV at {asset.wav_path!r} ({exc})")
+            continue
+        if actual <= 0:
+            problems.append(
+                f"{asset.cue_id}: WAV at {asset.wav_path!r} has non-positive duration"
+            )
     return problems
 
 
@@ -558,7 +572,11 @@ class ConferenceController:
         return True
 
     def _active(self) -> bool:
-        return self.enabled and self.status != ConferenceStatus.STOPPED
+        # Requires an explicit start(): IDLE (never armed) and STOPPED are inert.
+        return self.enabled and self.status not in (
+            ConferenceStatus.IDLE,
+            ConferenceStatus.STOPPED,
+        )
 
     @property
     def total(self) -> int:
@@ -803,7 +821,10 @@ def _build_presenter_wait(listener, max_wait_s):  # pragma: no cover - live audi
 
     def _wait() -> bool:
         done = threading.Event()
-        listener.start_speech_monitor(on_speech_end=lambda *a, **k: done.set())
+        listener.start_speech_monitor(
+            on_speech_end=lambda *a, **k: done.set(),
+            max_duration=max_wait_s,
+        )
         try:
             return done.wait(timeout=max_wait_s)
         finally:
@@ -833,7 +854,15 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         time.sleep(max(0.0, float(duration or 0.0)))
         return duration
 
+    def _release_audio():
+        # First safe-shutdown step: release the mic/audio stack so keyphrase and
+        # recording stop holding the device.
+        listener = getattr(robot, "_wake_word_listener", None)
+        if listener is not None:
+            listener.pause()
+
     hooks = ShutdownHooks(
+        release_audio=_release_audio,
         stop_recording=robot.stop_recording,
         cancel_skills=robot._cancel_all_skills,
         halt_movement=robot.halt,
@@ -842,13 +871,12 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
 
     wait_fn = None
     if getattr(args, "auto", False):
-        listener = getattr(robot, "wake_word_listener", None) or getattr(
-            robot, "listener", None
-        )
+        listener = getattr(robot, "_wake_word_listener", None)
         if listener is None:
             raise ConferenceError(
                 "Auto-advance requested but no wake-word listener is available on "
-                "the controller; run without --auto and use manual controls."
+                "the controller (laptop wake-word mode required); run with "
+                "--no-auto and use manual controls."
             )
         wait_fn = _build_presenter_wait(
             listener, config_defaults.CONFERENCE_PRESENTER_MAX_WAIT_S
@@ -878,18 +906,21 @@ def _cmd_run(args) -> int:  # pragma: no cover - requires Misty + live services
     )
     try:
         while controller.status != ConferenceStatus.STOPPED:
-            key = input("> ").strip().lower()
-            if key in ("n", "next", ""):
+            raw = input("> ")
+            key = raw.strip().lower()
+            # A single space toggles pause/resume (handled before stripping,
+            # since a bare space would otherwise strip to "" == next).
+            if raw == " " or key in ("pause", "resume"):
+                if controller.status == ConferenceStatus.PAUSED:
+                    controller.resume()
+                else:
+                    controller.pause()
+            elif key in ("n", "next", ""):
                 controller.play_next()
             elif key in ("r", "replay"):
                 controller.replay()
             elif key in ("p", "prev", "previous"):
                 controller.previous()
-            elif key in ("pause", "resume", " "):
-                if controller.status == ConferenceStatus.PAUSED:
-                    controller.resume()
-                else:
-                    controller.pause()
             elif key in ("a", "auto"):
                 controller.run_auto()
             elif key in ("s", "stop", "q", "quit"):
@@ -937,7 +968,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser("run", help="Live interactive runner (requires Misty).")
     p_run.add_argument("--manifest",
                        default=os.path.join(default_out, default_manifest))
-    p_run.add_argument("--auto", action="store_true")
+    p_run.add_argument("--auto", action=argparse.BooleanOptionalAction,
+                       default=config_defaults.CONFERENCE_AUTO_ADVANCE,
+                       help="Enable silence-triggered auto-advance (default from "
+                            "CONFERENCE_AUTO_ADVANCE); use --no-auto for manual only.")
     p_run.set_defaults(func=_cmd_run)
 
     return parser
