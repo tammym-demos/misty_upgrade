@@ -456,6 +456,8 @@ def prepare_assets(
                 try:
                     with open(hash_path, "r", encoding="utf-8") as fh:
                         need_generate = fh.read().strip() != text_hash
+                    if not need_generate and _wav_file_duration(gen_path) <= 0:
+                        need_generate = True
                 except OSError:
                     need_generate = True
             if need_generate:

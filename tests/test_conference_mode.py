@@ -229,6 +229,20 @@ def test_prepare_regenerates_when_text_hash_changes(tmp_path):
     assert tts.calls == ["Hello altered humans. I am awake."]
 
 
+def test_prepare_regenerates_corrupted_cached_wav(tmp_path):
+    script = parse_script(FIXTURE, is_text=True)
+    out = str(tmp_path)
+    prepare_assets(script, out, FakeTts())
+    (tmp_path / "slide01-misty01.wav").write_bytes(b"")
+
+    tts = FakeTts()
+    manifest = prepare_assets(script, out, tts, reuse=True)
+
+    assert tts.calls == ["Hello humans. I am awake."]
+    assert manifest.cues[0].duration_s > 0
+    assert verify_manifest(manifest) == []
+
+
 def test_prepare_prefers_recorded_override(tmp_path):
     script = parse_script(FIXTURE, is_text=True)
     recorded = tmp_path / "recorded"
