@@ -193,6 +193,14 @@ def test_prepare_generates_wavs_and_manifest(tmp_path):
     assert verify_manifest(manifest) == []
 
 
+def test_prepare_default_misty_prefix_uses_config(tmp_path, monkeypatch):
+    monkeypatch.setattr(cm, "CONFERENCE_MISTY_FILENAME_PREFIX", "stage_")
+
+    manifest = prepare_assets(parse_script(FIXTURE, is_text=True), str(tmp_path), FakeTts())
+
+    assert manifest.cues[0].misty_filename == "stage_slide01-misty01.wav"
+
+
 def test_prepare_reuses_unchanged_and_regenerates_on_no_reuse(tmp_path):
     script = parse_script(FIXTURE, is_text=True)
     out = str(tmp_path)
@@ -258,6 +266,15 @@ def test_verify_manifest_flags_missing_and_unreadable(tmp_path):
     problems = verify_manifest(manifest)
     assert any("does-not-exist" in p for p in problems)
     assert any("non-positive duration" in p for p in problems)
+
+
+def test_verify_manifest_allows_missing_audio_only_for_explicit_fallback(tmp_path):
+    script = parse_script(FIXTURE, is_text=True)
+    manifest = prepare_assets(script, str(tmp_path), FakeTts())
+    manifest.cues[0].wav_path = str(tmp_path / "does-not-exist.wav")
+
+    assert verify_manifest(manifest) != []
+    assert verify_manifest(manifest, allow_audio_fallback=True) == []
 
 
 def test_wav_duration_roundtrip():
@@ -453,8 +470,8 @@ def test_missing_asset_with_explicit_fallback_uses_llm(tmp_path):
 def test_live_controller_wires_llm_fallback_flag(tmp_path, monkeypatch):
     _, _, manifest = build_ready_controller(tmp_path)
     manifest_path = tmp_path / "manifest.json"
-    manifest.save(str(manifest_path))
     manifest.cues[0].wav_path = str(tmp_path / "missing.wav")
+    manifest.save(str(manifest_path))
 
     class FakeRobot:
         def __init__(self):
@@ -489,7 +506,6 @@ def test_live_controller_wires_llm_fallback_flag(tmp_path, monkeypatch):
     controller = cm._build_live_controller(
         types.SimpleNamespace(manifest=str(manifest_path), auto=False)
     )
-    controller.manifest.cues[0].wav_path = str(tmp_path / "missing.wav")
 
     controller.start()
     controller.play_next()
@@ -497,6 +513,23 @@ def test_live_controller_wires_llm_fallback_flag(tmp_path, monkeypatch):
     assert controller.use_llm_fallback is True
     assert controller.llm_calls == 1
     assert robot.played[0][1] == "conference_fallback.wav"
+
+
+def test_live_controller_rejects_missing_manifest_without_fallback(tmp_path, monkeypatch):
+    _, _, manifest = build_ready_controller(tmp_path)
+    manifest.cues[0].wav_path = str(tmp_path / "missing.wav")
+    manifest_path = tmp_path / "manifest.json"
+    manifest.save(str(manifest_path))
+
+    monkeypatch.setitem(
+        sys.modules,
+        "misty_controller",
+        types.SimpleNamespace(MistyController=lambda: object()),
+    )
+    monkeypatch.setattr(cm, "CONFERENCE_LLM_FALLBACK", False)
+
+    with pytest.raises(cm.ConferenceError, match="Manifest is not showtime-ready"):
+        cm._build_live_controller(types.SimpleNamespace(manifest=str(manifest_path), auto=False))
 
 
 # ---------------------------------------------------------------------------

@@ -416,7 +416,7 @@ def prepare_assets(
     *,
     recorded_dir: Optional[str] = None,
     reuse: bool = True,
-    misty_prefix: str = "conf_",
+    misty_prefix: Optional[str] = None,
 ) -> ConferenceManifest:
     """Generate, import, or reuse a predetermined WAV for every Misty cue.
 
@@ -430,6 +430,8 @@ def prepare_assets(
 
     Returns a :class:`ConferenceManifest`; the caller decides where to save it.
     """
+    if misty_prefix is None:
+        misty_prefix = CONFERENCE_MISTY_FILENAME_PREFIX
     os.makedirs(out_dir, exist_ok=True)
     assets: list[CueAsset] = []
 
@@ -499,30 +501,39 @@ def prepare_assets(
     )
 
 
-def verify_manifest(manifest: ConferenceManifest) -> list[str]:
+def _wav_file_duration(path: str) -> float:
+    try:
+        with open(path, "rb") as fh:
+            return wav_duration(fh.read())
+    except OSError:
+        return 0.0
+
+
+def verify_manifest(
+    manifest: ConferenceManifest, *, allow_audio_fallback: bool = False
+) -> list[str]:
     """Return a list of human-readable problems; empty means showtime-ready.
 
     Duration is recomputed from the current on-disk WAV rather than trusting the
     manifest's stored value, so a cue that became unreadable or empty after the
-    manifest was written is still reported.
+    manifest was written is still reported. When explicit fallback is enabled,
+    missing/unplayable cue audio is allowed because the live runner will route
+    that cue through the injected fallback callable instead.
     """
     problems: list[str] = []
     if not manifest.cues:
         problems.append("manifest contains no cues")
     for asset in manifest.cues:
         if not asset.wav_path or not os.path.isfile(asset.wav_path):
-            problems.append(f"{asset.cue_id}: missing WAV at {asset.wav_path!r}")
+            if not allow_audio_fallback:
+                problems.append(f"{asset.cue_id}: missing WAV at {asset.wav_path!r}")
             continue
-        try:
-            with open(asset.wav_path, "rb") as fh:
-                actual = wav_duration(fh.read())
-        except OSError as exc:
-            problems.append(f"{asset.cue_id}: unreadable WAV at {asset.wav_path!r} ({exc})")
-            continue
+        actual = _wav_file_duration(asset.wav_path)
         if actual <= 0:
-            problems.append(
-                f"{asset.cue_id}: WAV at {asset.wav_path!r} has non-positive duration"
-            )
+            if not allow_audio_fallback:
+                problems.append(
+                    f"{asset.cue_id}: WAV at {asset.wav_path!r} has non-positive duration"
+                )
     return problems
 
 
@@ -652,7 +663,7 @@ class ConferenceController:
         if not (0 <= index < self.total):
             return None
         asset = self.manifest.cues[index]
-        resolvable = bool(asset.wav_path) and os.path.isfile(asset.wav_path)
+        resolvable = bool(asset.wav_path) and _wav_file_duration(asset.wav_path) > 0
         if not resolvable:
             if self.use_llm_fallback and self._llm_fallback_fn is not None:
                 logger.warning(
@@ -890,7 +901,9 @@ def _build_presenter_wait(listener, max_wait_s, silence_s):  # pragma: no cover 
 def _build_live_controller(args):  # pragma: no cover - requires Misty + services
     """Wire the state machine to a live MistyController for on-stage use."""
     manifest = ConferenceManifest.load(args.manifest)
-    problems = verify_manifest(manifest)
+    problems = verify_manifest(
+        manifest, allow_audio_fallback=CONFERENCE_LLM_FALLBACK
+    )
     if problems:
         raise ConferenceError(
             "Manifest is not showtime-ready: " + "; ".join(problems)
