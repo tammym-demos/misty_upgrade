@@ -183,6 +183,42 @@ because SAPI5 fallback can be slow enough to trigger controller timeouts.
 
 ---
 
+### 5. Conference Mode (scripted stage dialog)
+<a id="conference-mode"></a>
+
+**Conference Mode** (`src/windows-orchestration/conference_mode.py`, issue #128)
+lets Misty play *predetermined* audio cues parsed from a talk script (e.g.
+`talks/20260710-2.md`) for on-stage scripted dialog, instead of routing scripted
+lines through the live STT → LLM → TTS conversation path. It is companion-side
+only, gated by `CONFERENCE_MODE_ENABLED` (default off), and does not change
+normal wake-word conversation behavior when disabled. See
+[`docs/conference-mode.md`](conference-mode.md) for the full design and usage.
+
+Quick start (companion laptop):
+
+```powershell
+cd src/windows-orchestration
+
+# 1. Preview the ordered cue plan (no Misty, no Foundry needed)
+python conference_mode.py dry-run --script ../../talks/20260710-2.md
+
+# 2. Prepare predetermined WAV cues + manifest (needs the orchestration
+#    /api/tts endpoint running; reuses cached cues on repeat runs)
+python conference_mode.py prepare --script ../../talks/20260710-2.md
+
+# 3. Confirm every cue has playable audio before showtime
+python conference_mode.py verify
+
+# 4. Run the live interactive stage runner (requires Misty hardware)
+python conference_mode.py run
+```
+
+Manual override controls (next / replay / previous / pause-resume / stop) are
+available at all times for stage safety; auto-advance plays the next cue once
+the presenter finishes speaking.
+
+---
+
 ## Setup Instructions
 
 ### Phase 1: Windows Companion Setup

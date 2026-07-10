@@ -195,3 +195,39 @@ EXPRESSION_ARM_VELOCITY: float = 40.0
 # Minimum seconds between repeats of the same sensor-triggered expression
 # (rate-limit guard against sensor spam from bump/ToF/hazard streams).
 EXPRESSION_SENSOR_MIN_INTERVAL_S: float = 3.0
+
+# Conference Mode for scripted on-stage dialog (issue #128). Off by default and
+# gated by config. When enabled, a companion-side conference runner plays
+# predetermined Misty WAV cues parsed from a talk script (e.g.
+# talks/20260710-2.md) instead of routing scripted lines through the live
+# STT -> LLM -> TTS conversation path. Normal wake-word conversation behavior is
+# unchanged whenever this flag is off. Runtime never invokes the LLM for a
+# scripted Misty cue unless CONFERENCE_LLM_FALLBACK is explicitly enabled.
+CONFERENCE_MODE_ENABLED: bool = False
+# Default talk script parsed into ordered presenter/Misty cue pairs.
+CONFERENCE_SCRIPT_PATH: str = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "talks", "20260710-2.md")
+)
+# Directory holding the prepared companion-side cue cache and manifest. Defaults
+# to the repo-level data/conference directory (config_defaults.py lives in
+# src/windows-orchestration/, so ../../data/conference is the repo root path).
+CONFERENCE_ASSET_DIR: str = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "data", "conference")
+)
+# Manifest filename written under CONFERENCE_ASSET_DIR mapping cue IDs to text,
+# asset source, local WAV path, duration, and optional Misty filename.
+CONFERENCE_MANIFEST_NAME: str = "conference_manifest.json"
+# Prefix for the on-Misty audio filename when a cue is pre-uploaded to the robot.
+CONFERENCE_MISTY_FILENAME_PREFIX: str = "conf_"
+# Auto-advance: listen while the presenter speaks and play the next predetermined
+# cue once the presenter finishes speaking. Manual override controls remain
+# available at all times regardless of this setting.
+CONFERENCE_AUTO_ADVANCE: bool = True
+# Seconds of trailing presenter silence that mark end-of-speech for auto-advance.
+CONFERENCE_PRESENTER_SILENCE_S: float = 1.5
+# Maximum seconds to wait for the presenter to finish before an auto-advance
+# attempt gives up and yields to manual control (stage-safety timeout).
+CONFERENCE_PRESENTER_MAX_WAIT_S: float = 45.0
+# Explicit fallback to the live LLM for a scripted cue whose predetermined audio
+# is missing. Off by default so scripted lines never hit the LLM at showtime.
+CONFERENCE_LLM_FALLBACK: bool = False
