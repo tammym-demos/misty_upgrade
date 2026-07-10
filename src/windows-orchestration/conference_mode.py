@@ -884,14 +884,22 @@ def _build_presenter_wait(listener, max_wait_s, silence_s):  # pragma: no cover 
 
     def _wait() -> bool:
         done = threading.Event()
+        result = {"presenter_finished": False}
+
+        def _on_speech_end(*a, **k) -> None:
+            result["presenter_finished"] = bool(
+                getattr(listener, "_speech_detected", False)
+            )
+            done.set()
+
         listener.start_speech_monitor(
-            on_speech_end=lambda *a, **k: done.set(),
+            on_speech_end=_on_speech_end,
             min_duration=silence_s,
             max_duration=max_wait_s + max(1.0, silence_s),
             silence_duration=silence_s,
         )
         try:
-            return done.wait(timeout=max_wait_s)
+            return done.wait(timeout=max_wait_s) and result["presenter_finished"]
         finally:
             listener.stop_speech_monitor()
 
