@@ -62,7 +62,55 @@ except ImportError:  # pragma: no cover - very old/unusual runtimes
 
 import config_defaults  # noqa: E402 - path may be adjusted above
 
+try:  # Load .env so documented CONFERENCE_* settings apply (repo convention).
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:  # pragma: no cover - dotenv is optional for unit tests
+    pass
+
 logger = logging.getLogger("conference_mode")
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    return os.getenv(name, str(default)).strip().lower() in ("1", "true", "yes")
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+# Environment-overridable Conference Mode settings (env var -> config default),
+# following the same pattern as misty_controller.py / orchestration_service.py so
+# the values documented in .env.example actually take effect.
+CONFERENCE_MODE_ENABLED = _env_bool(
+    "CONFERENCE_MODE_ENABLED", config_defaults.CONFERENCE_MODE_ENABLED
+)
+CONFERENCE_SCRIPT_PATH = os.getenv(
+    "CONFERENCE_SCRIPT_PATH", config_defaults.CONFERENCE_SCRIPT_PATH
+)
+CONFERENCE_ASSET_DIR = os.getenv(
+    "CONFERENCE_ASSET_DIR", config_defaults.CONFERENCE_ASSET_DIR
+)
+CONFERENCE_MANIFEST_NAME = os.getenv(
+    "CONFERENCE_MANIFEST_NAME", config_defaults.CONFERENCE_MANIFEST_NAME
+)
+CONFERENCE_MISTY_FILENAME_PREFIX = os.getenv(
+    "CONFERENCE_MISTY_FILENAME_PREFIX", config_defaults.CONFERENCE_MISTY_FILENAME_PREFIX
+)
+CONFERENCE_AUTO_ADVANCE = _env_bool(
+    "CONFERENCE_AUTO_ADVANCE", config_defaults.CONFERENCE_AUTO_ADVANCE
+)
+CONFERENCE_PRESENTER_MAX_WAIT_S = _env_float(
+    "CONFERENCE_PRESENTER_MAX_WAIT_S", config_defaults.CONFERENCE_PRESENTER_MAX_WAIT_S
+)
+CONFERENCE_LLM_FALLBACK = _env_bool(
+    "CONFERENCE_LLM_FALLBACK", config_defaults.CONFERENCE_LLM_FALLBACK
+)
+ORCHESTRATION_URL = os.getenv("ORCHESTRATION_URL", config_defaults.ORCHESTRATION_URL)
 
 MANIFEST_VERSION = 1
 
@@ -815,7 +863,13 @@ def _build_presenter_wait(listener, max_wait_s):  # pragma: no cover - live audi
 
     Returns a callable that starts RMS-based end-of-speech detection on the
     laptop mic, blocks until the presenter finishes speaking (or ``max_wait_s``
-    elapses), and returns True only when end-of-speech was detected.
+    elapses), and returns True only when end-of-speech was signaled.
+
+    Note: ``WakeWordListener`` fires ``on_speech_end`` both on detected silence
+    *and* when ``max_duration`` (the hard safety cap) is reached, so ``max_wait_s``
+    doubles as the stage-safety ceiling. Distinguishing a genuine end-of-speech
+    from the cap is part of the manual on-stage rehearsal calibration documented
+    in docs/conference-mode.md; manual override controls remain available.
     """
     import threading
 
@@ -879,7 +933,7 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
                 "--no-auto and use manual controls."
             )
         wait_fn = _build_presenter_wait(
-            listener, config_defaults.CONFERENCE_PRESENTER_MAX_WAIT_S
+            listener, CONFERENCE_PRESENTER_MAX_WAIT_S
         )
 
     return ConferenceController(
@@ -887,7 +941,7 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         play_fn,
         wait_for_presenter_fn=wait_fn,
         shutdown_hooks=hooks,
-        enabled=True,
+        enabled=CONFERENCE_MODE_ENABLED,
     )
 
 
@@ -899,6 +953,12 @@ def _cmd_run(args) -> int:  # pragma: no cover - requires Misty + live services
     hardware during rehearsal.
     """
     controller = _build_live_controller(args)
+    if not controller.enabled:
+        print(
+            "Conference Mode is disabled (CONFERENCE_MODE_ENABLED=false). "
+            "Set CONFERENCE_MODE_ENABLED=true in your environment or .env to run."
+        )
+        return 2
     controller.start()
     print(
         "Conference Mode live. Controls: [n]ext [r]eplay [p]revious "
@@ -938,10 +998,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    default_script = config_defaults.CONFERENCE_SCRIPT_PATH
-    default_out = config_defaults.CONFERENCE_ASSET_DIR
-    default_manifest = config_defaults.CONFERENCE_MANIFEST_NAME
-    default_prefix = config_defaults.CONFERENCE_MISTY_FILENAME_PREFIX
+    default_script = CONFERENCE_SCRIPT_PATH
+    default_out = CONFERENCE_ASSET_DIR
+    default_manifest = CONFERENCE_MANIFEST_NAME
+    default_prefix = CONFERENCE_MISTY_FILENAME_PREFIX
 
     p_dry = sub.add_parser("dry-run", help="Print the ordered cue plan (no hardware).")
     p_dry.add_argument("--script", default=default_script)
@@ -954,7 +1014,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_prep.add_argument("--recorded", default=None,
                         help="Directory of pre-recorded {cue_id}.wav overrides.")
     p_prep.add_argument("--orchestration-url",
-                        default=config_defaults.ORCHESTRATION_URL)
+                        default=ORCHESTRATION_URL)
     p_prep.add_argument("--misty-prefix", default=default_prefix)
     p_prep.add_argument("--no-reuse", action="store_true",
                         help="Regenerate every cue even if a cached WAV exists.")
@@ -969,7 +1029,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--manifest",
                        default=os.path.join(default_out, default_manifest))
     p_run.add_argument("--auto", action=argparse.BooleanOptionalAction,
-                       default=config_defaults.CONFERENCE_AUTO_ADVANCE,
+                       default=CONFERENCE_AUTO_ADVANCE,
                        help="Enable silence-triggered auto-advance (default from "
                             "CONFERENCE_AUTO_ADVANCE); use --no-auto for manual only.")
     p_run.set_defaults(func=_cmd_run)
