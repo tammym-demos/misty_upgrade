@@ -52,10 +52,15 @@ from enum import Enum
 from typing import Callable, Optional
 
 try:  # Allow use both as a package module and as a stand-alone script.
-    import config_defaults
-except ImportError:  # pragma: no cover - fallback for unusual sys.path setups
+    import importlib.util as _importlib_util
+
+    if _importlib_util.find_spec("config_defaults") is None:  # pragma: no cover
+        # Stand-alone script: make the module's own directory importable.
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+except ImportError:  # pragma: no cover - very old/unusual runtimes
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    import config_defaults
+
+import config_defaults  # noqa: E402 - path may be adjusted above
 
 logger = logging.getLogger("conference_mode")
 

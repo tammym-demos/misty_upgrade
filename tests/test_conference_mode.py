@@ -25,7 +25,6 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration"))
 
-import conference_mode as cm
 from conference_mode import (
     ConferenceAssetMissing,
     ConferenceController,
@@ -428,7 +427,13 @@ def test_shutdown_invokes_hooks_in_order_and_is_idempotent(tmp_path):
     assert controller.status == ConferenceStatus.STOPPED
     # Idempotent: a second shutdown does not re-run hooks.
     assert controller.shutdown() == []
-    assert order == invoked
+    assert order == [
+        "release_audio",
+        "stop_recording",
+        "cancel_skills",
+        "halt_movement",
+        "rest_state",
+    ]
 
 
 def test_shutdown_isolates_failing_hook(tmp_path):
