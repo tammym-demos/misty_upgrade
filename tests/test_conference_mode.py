@@ -524,7 +524,7 @@ def test_live_controller_rejects_missing_manifest_without_fallback(tmp_path, mon
     monkeypatch.setitem(
         sys.modules,
         "misty_controller",
-        types.SimpleNamespace(MistyController=lambda: object()),
+        types.SimpleNamespace(MistyController=object),
     )
     monkeypatch.setattr(cm, "CONFERENCE_LLM_FALLBACK", False)
 
