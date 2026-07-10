@@ -104,6 +104,9 @@ CONFERENCE_MISTY_FILENAME_PREFIX = os.getenv(
 CONFERENCE_AUTO_ADVANCE = _env_bool(
     "CONFERENCE_AUTO_ADVANCE", config_defaults.CONFERENCE_AUTO_ADVANCE
 )
+CONFERENCE_PRESENTER_SILENCE_S = _env_float(
+    "CONFERENCE_PRESENTER_SILENCE_S", config_defaults.CONFERENCE_PRESENTER_SILENCE_S
+)
 CONFERENCE_PRESENTER_MAX_WAIT_S = _env_float(
     "CONFERENCE_PRESENTER_MAX_WAIT_S", config_defaults.CONFERENCE_PRESENTER_MAX_WAIT_S
 )
@@ -858,18 +861,13 @@ def _cmd_verify(args) -> int:
     return 0
 
 
-def _build_presenter_wait(listener, max_wait_s):  # pragma: no cover - live audio
+def _build_presenter_wait(listener, max_wait_s, silence_s):  # pragma: no cover - live audio
     """Wrap the wake-word speech monitor into a blocking presenter-wait.
 
     Returns a callable that starts RMS-based end-of-speech detection on the
-    laptop mic, blocks until the presenter finishes speaking (or ``max_wait_s``
-    elapses), and returns True only when end-of-speech was signaled.
-
-    Note: ``WakeWordListener`` fires ``on_speech_end`` both on detected silence
-    *and* when ``max_duration`` (the hard safety cap) is reached, so ``max_wait_s``
-    doubles as the stage-safety ceiling. Distinguishing a genuine end-of-speech
-    from the cap is part of the manual on-stage rehearsal calibration documented
-    in docs/conference-mode.md; manual override controls remain available.
+    laptop mic, blocks until the presenter finishes speaking, and returns
+    False when the stage-safety timeout elapses so auto-advance yields to manual
+    control instead of treating a hard cap as end-of-speech.
     """
     import threading
 
@@ -877,7 +875,9 @@ def _build_presenter_wait(listener, max_wait_s):  # pragma: no cover - live audi
         done = threading.Event()
         listener.start_speech_monitor(
             on_speech_end=lambda *a, **k: done.set(),
-            max_duration=max_wait_s,
+            min_duration=silence_s,
+            max_duration=max_wait_s + max(1.0, silence_s),
+            silence_duration=silence_s,
         )
         try:
             return done.wait(timeout=max_wait_s)
@@ -908,6 +908,11 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         time.sleep(max(0.0, float(duration or 0.0)))
         return duration
 
+    def llm_fallback_fn(text: str):
+        wav_bytes = http_tts(ORCHESTRATION_URL)(text)
+        duration = robot.upload_and_play_audio(wav_bytes, "conference_fallback.wav")
+        time.sleep(max(0.0, float(duration or 0.0)))
+
     def _release_audio():
         # First safe-shutdown step: release the mic/audio stack so keyphrase and
         # recording stop holding the device.
@@ -933,7 +938,7 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
                 "--no-auto and use manual controls."
             )
         wait_fn = _build_presenter_wait(
-            listener, CONFERENCE_PRESENTER_MAX_WAIT_S
+            listener, CONFERENCE_PRESENTER_MAX_WAIT_S, CONFERENCE_PRESENTER_SILENCE_S
         )
 
     return ConferenceController(
@@ -942,6 +947,8 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         wait_for_presenter_fn=wait_fn,
         shutdown_hooks=hooks,
         enabled=CONFERENCE_MODE_ENABLED,
+        llm_fallback_fn=llm_fallback_fn,
+        use_llm_fallback=CONFERENCE_LLM_FALLBACK,
     )
 
 

@@ -19,11 +19,14 @@ Foundry Local, or Windows audio:
 import io
 import os
 import sys
+import types
 import wave
 
 import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration"))
+
+import conference_mode as cm
 
 from conference_mode import (
     ConferenceAssetMissing,
@@ -371,6 +374,40 @@ def test_run_auto_plays_through(tmp_path):
     assert len(recorder.played) == 4
 
 
+def test_presenter_wait_passes_silence_setting_and_yields_on_timeout():
+    class Listener:
+        def __init__(self):
+            self.kwargs = None
+            self.stopped = False
+
+        def start_speech_monitor(self, **kwargs):
+            self.kwargs = kwargs
+
+        def stop_speech_monitor(self):
+            self.stopped = True
+
+    listener = Listener()
+    wait = cm._build_presenter_wait(listener, max_wait_s=0.01, silence_s=0.25)
+
+    assert wait() is False
+    assert listener.kwargs["min_duration"] == 0.25
+    assert listener.kwargs["silence_duration"] == 0.25
+    assert listener.kwargs["max_duration"] > 0.01
+    assert listener.stopped is True
+
+
+def test_presenter_wait_returns_true_only_when_monitor_signals_speech_end():
+    class Listener:
+        def start_speech_monitor(self, **kwargs):
+            kwargs["on_speech_end"]()
+
+        def stop_speech_monitor(self):
+            pass
+
+    wait = cm._build_presenter_wait(Listener(), max_wait_s=1.0, silence_s=0.25)
+    assert wait() is True
+
+
 # ---------------------------------------------------------------------------
 # LLM bypass
 # ---------------------------------------------------------------------------
@@ -411,6 +448,55 @@ def test_missing_asset_with_explicit_fallback_uses_llm(tmp_path):
     assert controller.llm_calls == 1
     assert len(llm_calls) == 1
     assert recorder.played == []  # LLM path, not scripted playback
+
+
+def test_live_controller_wires_llm_fallback_flag(tmp_path, monkeypatch):
+    _, _, manifest = build_ready_controller(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest.save(str(manifest_path))
+    manifest.cues[0].wav_path = str(tmp_path / "missing.wav")
+
+    class FakeRobot:
+        def __init__(self):
+            self.played = []
+
+        def upload_and_play_audio(self, wav_bytes, filename):
+            self.played.append((wav_bytes, filename))
+            return 0.0
+
+        def stop_recording(self):
+            pass
+
+        def _cancel_all_skills(self):
+            pass
+
+        def halt(self):
+            pass
+
+        def move_head(self, **kwargs):
+            pass
+
+    robot = FakeRobot()
+    monkeypatch.setitem(
+        sys.modules,
+        "misty_controller",
+        types.SimpleNamespace(MistyController=lambda: robot),
+    )
+    monkeypatch.setattr(cm, "CONFERENCE_MODE_ENABLED", True)
+    monkeypatch.setattr(cm, "CONFERENCE_LLM_FALLBACK", True)
+    monkeypatch.setattr(cm, "http_tts", lambda url: lambda text: make_wav_bytes())
+
+    controller = cm._build_live_controller(
+        types.SimpleNamespace(manifest=str(manifest_path), auto=False)
+    )
+    controller.manifest.cues[0].wav_path = str(tmp_path / "missing.wav")
+
+    controller.start()
+    controller.play_next()
+
+    assert controller.use_llm_fallback is True
+    assert controller.llm_calls == 1
+    assert robot.played[0][1] == "conference_fallback.wav"
 
 
 # ---------------------------------------------------------------------------
