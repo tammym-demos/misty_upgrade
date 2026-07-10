@@ -27,9 +27,10 @@ with manual override controls available at all times for stage safety.
   hardware/live dependencies (Misty playback, presenter voice-activity
   detection, Foundry Local TTS) are injected callables, so the logic is fully
   unit-testable without a robot, Foundry Local, or Windows audio.
-- **No LLM at showtime.** Runtime never invokes the LLM for a scripted cue unless
-  `CONFERENCE_LLM_FALLBACK` is explicitly enabled *and* a cue's predetermined
-  audio is missing.
+- **No LLM at showtime.** Runtime never invokes the LLM for a scripted cue.
+  If `CONFERENCE_TTS_FALLBACK` is explicitly enabled and a cue's predetermined
+  audio is missing, the runner re-synthesizes the known scripted text through
+  TTS only.
 
 ## Talk-script format
 

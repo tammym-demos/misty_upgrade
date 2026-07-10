@@ -11,7 +11,7 @@ Foundry Local, or Windows audio:
 - manifest verification flags missing/zero-duration assets
 - the control state machine supports enable/disable, next/replay/previous,
   jump-to-slide, pause/resume, silence-triggered auto-advance, run-auto
-- scripted playback never invokes the LLM unless explicit fallback is enabled
+- scripted playback never invokes the LLM; explicit fallback uses scripted TTS
 - safe shutdown releases resources in the documented order and is idempotent
 - a disabled controller is a strict no-op (normal behavior unchanged when off)
 """
@@ -442,22 +442,22 @@ def test_presenter_wait_does_not_advance_on_no_speech_timeout():
 
 
 # ---------------------------------------------------------------------------
-# LLM bypass
+# LLM bypass / TTS fallback
 # ---------------------------------------------------------------------------
 
 
 def test_scripted_playback_never_calls_llm(tmp_path):
-    llm_calls = []
+    fallback_calls = []
     controller, recorder, _ = build_ready_controller(
         tmp_path,
-        llm_fallback_fn=lambda text: llm_calls.append(text),
-        use_llm_fallback=True,
+        tts_fallback_fn=lambda text: fallback_calls.append(text),
+        use_tts_fallback=True,
     )
     controller.start()
     while controller.play_next() is not None:
         pass
-    assert controller.llm_calls == 0
-    assert llm_calls == []
+    assert controller.tts_fallback_calls == 0
+    assert fallback_calls == []
 
 
 def test_missing_asset_without_fallback_raises(tmp_path):
@@ -468,30 +468,42 @@ def test_missing_asset_without_fallback_raises(tmp_path):
         controller.play_next()
 
 
-def test_missing_asset_with_explicit_fallback_uses_llm(tmp_path):
-    llm_calls = []
+def test_missing_asset_with_explicit_fallback_uses_tts(tmp_path):
+    fallback_calls = []
     controller, recorder, manifest = build_ready_controller(
         tmp_path,
-        llm_fallback_fn=lambda text: llm_calls.append(text),
-        use_llm_fallback=True,
+        tts_fallback_fn=lambda text: fallback_calls.append(text),
+        use_tts_fallback=True,
     )
     manifest.cues[0].wav_path = str(tmp_path / "missing.wav")
     controller.start()
     controller.play_next()
-    assert controller.llm_calls == 1
-    assert len(llm_calls) == 1
-    assert recorder.played == []  # LLM path, not scripted playback
+    assert controller.tts_fallback_calls == 1
+    assert len(fallback_calls) == 1
+    assert recorder.played == []  # TTS fallback path, not predetermined playback
 
 
-def test_live_controller_wires_llm_fallback_flag(tmp_path, monkeypatch):
+def test_live_controller_wires_tts_fallback_flag_and_releases_listener(tmp_path, monkeypatch):
     _, _, manifest = build_ready_controller(tmp_path)
     manifest_path = tmp_path / "manifest.json"
     manifest.cues[0].wav_path = str(tmp_path / "missing.wav")
     manifest.save(str(manifest_path))
 
+    class FakeListener:
+        def __init__(self):
+            self.speech_monitor_stopped = False
+            self.stopped = False
+
+        def stop_speech_monitor(self):
+            self.speech_monitor_stopped = True
+
+        def stop(self):
+            self.stopped = True
+
     class FakeRobot:
         def __init__(self):
             self.played = []
+            self._wake_word_listener = FakeListener()
 
         def upload_and_play_audio(self, wav_bytes, filename):
             self.played.append((wav_bytes, filename))
@@ -516,7 +528,7 @@ def test_live_controller_wires_llm_fallback_flag(tmp_path, monkeypatch):
         types.SimpleNamespace(MistyController=lambda: robot),
     )
     monkeypatch.setattr(cm, "CONFERENCE_MODE_ENABLED", True)
-    monkeypatch.setattr(cm, "CONFERENCE_LLM_FALLBACK", True)
+    monkeypatch.setattr(cm, "CONFERENCE_TTS_FALLBACK", True)
     monkeypatch.setattr(cm, "http_tts", lambda url: lambda text: make_wav_bytes())
 
     controller = cm._build_live_controller(
@@ -525,10 +537,13 @@ def test_live_controller_wires_llm_fallback_flag(tmp_path, monkeypatch):
 
     controller.start()
     controller.play_next()
+    controller.shutdown()
 
-    assert controller.use_llm_fallback is True
-    assert controller.llm_calls == 1
+    assert controller.use_tts_fallback is True
+    assert controller.tts_fallback_calls == 1
     assert robot.played[0][1] == "conference_fallback.wav"
+    assert robot._wake_word_listener.speech_monitor_stopped is True
+    assert robot._wake_word_listener.stopped is True
 
 
 def test_live_controller_rejects_missing_manifest_without_fallback(tmp_path, monkeypatch):
@@ -542,7 +557,7 @@ def test_live_controller_rejects_missing_manifest_without_fallback(tmp_path, mon
         "misty_controller",
         types.SimpleNamespace(MistyController=object),
     )
-    monkeypatch.setattr(cm, "CONFERENCE_LLM_FALLBACK", False)
+    monkeypatch.setattr(cm, "CONFERENCE_TTS_FALLBACK", False)
 
     with pytest.raises(cm.ConferenceError, match="Manifest is not showtime-ready"):
         cm._build_live_controller(types.SimpleNamespace(manifest=str(manifest_path), auto=False))

@@ -21,9 +21,9 @@ Design goals
   hardware/live dependencies (Misty playback, presenter voice-activity
   detection, Foundry Local TTS) are injected callables, so the logic is fully
   unit-testable in the cloud without a robot, Foundry Local or Windows audio.
-* **No LLM at showtime.** Runtime never invokes the LLM for a scripted cue
-  unless an explicit fallback is enabled and a cue's predetermined audio is
-  missing.
+* **No LLM at showtime.** Runtime never invokes the LLM for a scripted cue.
+  When explicitly enabled, the fallback path synthesizes the known scripted text
+  through TTS only if a cue's predetermined audio is missing.
 
 The module exposes:
 
@@ -110,8 +110,8 @@ CONFERENCE_PRESENTER_SILENCE_S = _env_float(
 CONFERENCE_PRESENTER_MAX_WAIT_S = _env_float(
     "CONFERENCE_PRESENTER_MAX_WAIT_S", config_defaults.CONFERENCE_PRESENTER_MAX_WAIT_S
 )
-CONFERENCE_LLM_FALLBACK = _env_bool(
-    "CONFERENCE_LLM_FALLBACK", config_defaults.CONFERENCE_LLM_FALLBACK
+CONFERENCE_TTS_FALLBACK = _env_bool(
+    "CONFERENCE_TTS_FALLBACK", config_defaults.CONFERENCE_TTS_FALLBACK
 )
 ORCHESTRATION_URL = os.getenv("ORCHESTRATION_URL", config_defaults.ORCHESTRATION_URL)
 
@@ -580,7 +580,7 @@ class ConferenceController:
     * ``wait_for_presenter_fn()`` performs presenter voice-activity detection and
       returns True once the presenter has finished speaking (auto-advance).
     * ``shutdown_hooks`` releases audio/recording/skills/movement on stop.
-    * ``llm_fallback_fn(text)`` is used **only** when ``use_llm_fallback`` is set
+    * ``tts_fallback_fn(text)`` is used **only** when ``use_tts_fallback`` is set
       and a cue's predetermined audio is missing.
 
     When ``enabled`` is False (the default), all playback/advance methods are
@@ -596,16 +596,16 @@ class ConferenceController:
         wait_for_presenter_fn: Optional[WaitFn] = None,
         shutdown_hooks: Optional[ShutdownHooks] = None,
         enabled: bool = False,
-        llm_fallback_fn: Optional[Callable[[str], None]] = None,
-        use_llm_fallback: bool = False,
+        tts_fallback_fn: Optional[Callable[[str], None]] = None,
+        use_tts_fallback: bool = False,
     ) -> None:
         self.manifest = manifest
         self._play_fn = play_fn
         self._wait_fn = wait_for_presenter_fn
         self._hooks = shutdown_hooks or ShutdownHooks()
         self.enabled = enabled
-        self._llm_fallback_fn = llm_fallback_fn
-        self.use_llm_fallback = use_llm_fallback
+        self._tts_fallback_fn = tts_fallback_fn
+        self.use_tts_fallback = use_tts_fallback
 
         self.status = ConferenceStatus.IDLE
         self._cursor = 0  # index of the NEXT cue to play
@@ -613,7 +613,7 @@ class ConferenceController:
         self._shutdown_done = False
         # Observability counters (used by tests and stage logging).
         self.play_count = 0
-        self.llm_calls = 0
+        self.tts_fallback_calls = 0
 
     # -- enable / lifecycle -------------------------------------------------
 
@@ -665,18 +665,18 @@ class ConferenceController:
         asset = self.manifest.cues[index]
         resolvable = bool(asset.wav_path) and _wav_file_duration(asset.wav_path) > 0
         if not resolvable:
-            if self.use_llm_fallback and self._llm_fallback_fn is not None:
+            if self.use_tts_fallback and self._tts_fallback_fn is not None:
                 logger.warning(
-                    "Cue %s audio missing; using explicit LLM fallback", asset.cue_id
+                    "Cue %s audio missing; using explicit TTS fallback", asset.cue_id
                 )
-                self.llm_calls += 1
-                self._llm_fallback_fn(asset.text)
+                self.tts_fallback_calls += 1
+                self._tts_fallback_fn(asset.text)
                 self._last = index
                 self._cursor = index + 1
                 return asset
             raise ConferenceAssetMissing(
                 f"Cue {asset.cue_id!r} has no predetermined audio at "
-                f"{asset.wav_path!r} and LLM fallback is disabled"
+                f"{asset.wav_path!r} and TTS fallback is disabled"
             )
         # Scripted playback path: predetermined audio only, never the LLM.
         self._play_fn(asset)
@@ -910,7 +910,7 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
     """Wire the state machine to a live MistyController for on-stage use."""
     manifest = ConferenceManifest.load(args.manifest)
     problems = verify_manifest(
-        manifest, allow_audio_fallback=CONFERENCE_LLM_FALLBACK
+        manifest, allow_audio_fallback=CONFERENCE_TTS_FALLBACK
     )
     if problems:
         raise ConferenceError(
@@ -929,7 +929,7 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         time.sleep(max(0.0, float(duration or 0.0)))
         return duration
 
-    def llm_fallback_fn(text: str):
+    def tts_fallback_fn(text: str):
         wav_bytes = http_tts(ORCHESTRATION_URL)(text)
         duration = robot.upload_and_play_audio(wav_bytes, "conference_fallback.wav")
         time.sleep(max(0.0, float(duration or 0.0)))
@@ -939,7 +939,12 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         # recording stop holding the device.
         listener = getattr(robot, "_wake_word_listener", None)
         if listener is not None:
-            listener.pause()
+            if hasattr(listener, "stop_speech_monitor"):
+                listener.stop_speech_monitor()
+            if hasattr(listener, "stop"):
+                listener.stop()
+            else:
+                listener.pause()
 
     hooks = ShutdownHooks(
         release_audio=_release_audio,
@@ -968,8 +973,8 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         wait_for_presenter_fn=wait_fn,
         shutdown_hooks=hooks,
         enabled=CONFERENCE_MODE_ENABLED,
-        llm_fallback_fn=llm_fallback_fn,
-        use_llm_fallback=CONFERENCE_LLM_FALLBACK,
+        tts_fallback_fn=tts_fallback_fn,
+        use_tts_fallback=CONFERENCE_TTS_FALLBACK,
     )
 
 

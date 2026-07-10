@@ -202,7 +202,7 @@ EXPRESSION_SENSOR_MIN_INTERVAL_S: float = 3.0
 # talks/20260710-2.md) instead of routing scripted lines through the live
 # STT -> LLM -> TTS conversation path. Normal wake-word conversation behavior is
 # unchanged whenever this flag is off. Runtime never invokes the LLM for a
-# scripted Misty cue unless CONFERENCE_LLM_FALLBACK is explicitly enabled.
+# scripted Misty cue; optional fallback only re-synthesizes known scripted text.
 CONFERENCE_MODE_ENABLED: bool = False
 # Default talk script parsed into ordered presenter/Misty cue pairs.
 CONFERENCE_SCRIPT_PATH: str = os.path.normpath(
@@ -228,6 +228,6 @@ CONFERENCE_PRESENTER_SILENCE_S: float = 1.5
 # Maximum seconds to wait for the presenter to finish before an auto-advance
 # attempt gives up and yields to manual control (stage-safety timeout).
 CONFERENCE_PRESENTER_MAX_WAIT_S: float = 45.0
-# Explicit fallback to the live LLM for a scripted cue whose predetermined audio
-# is missing. Off by default so scripted lines never hit the LLM at showtime.
-CONFERENCE_LLM_FALLBACK: bool = False
+# Explicit fallback to live TTS for a scripted cue whose predetermined audio is
+# missing. Off by default so showtime uses prepared audio unless enabled.
+CONFERENCE_TTS_FALLBACK: bool = False
