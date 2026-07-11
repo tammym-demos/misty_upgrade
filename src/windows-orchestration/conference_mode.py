@@ -875,7 +875,9 @@ def _cmd_prepare(args) -> int:
 
 def _cmd_verify(args) -> int:
     manifest = ConferenceManifest.load(args.manifest)
-    problems = verify_manifest(manifest)
+    problems = verify_manifest(
+        manifest, allow_audio_fallback=CONFERENCE_TTS_FALLBACK
+    )
     if problems:
         print(f"{len(problems)} problem(s) found in {args.manifest}:")
         for problem in problems:
@@ -1014,7 +1016,11 @@ def _cmd_run(args) -> int:  # pragma: no cover - requires Misty + live services
     )
     try:
         while controller.status != ConferenceStatus.STOPPED:
-            raw = input("> ")
+            try:
+                raw = input("> ")
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
             key = raw.strip().lower()
             # A single space toggles pause/resume (handled before stripping,
             # since a bare space would otherwise strip to "" == next).

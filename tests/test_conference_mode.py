@@ -313,6 +313,18 @@ def test_verify_manifest_allows_missing_audio_only_for_explicit_fallback(tmp_pat
     assert verify_manifest(manifest, allow_audio_fallback=True) == []
 
 
+def test_cmd_verify_honors_tts_fallback_readiness(tmp_path, monkeypatch):
+    script = parse_script(FIXTURE, is_text=True)
+    manifest = prepare_assets(script, str(tmp_path), FakeTts())
+    manifest.cues[0].wav_path = str(tmp_path / "does-not-exist.wav")
+    manifest_path = tmp_path / "manifest.json"
+    manifest.save(str(manifest_path))
+
+    monkeypatch.setattr(cm, "CONFERENCE_TTS_FALLBACK", True)
+
+    assert cm._cmd_verify(types.SimpleNamespace(manifest=str(manifest_path))) == 0
+
+
 def test_wav_duration_roundtrip():
     assert wav_duration(make_wav_bytes(0.5, rate=8000)) == pytest.approx(0.5, abs=0.02)
     assert wav_duration(b"not a wav") == 0.0
@@ -637,6 +649,30 @@ def test_cmd_run_auto_key_is_safe_when_auto_unavailable(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "Auto-advance is unavailable" in output
     assert controller.shutdown_called is True
+
+
+def test_cmd_run_keyboard_interrupt_exits_cleanly(monkeypatch, capsys):
+    class FakeController:
+        def __init__(self):
+            self.status = ConferenceStatus.RUNNING
+            self.shutdown_called = False
+
+        def start(self):
+            return True
+
+        def shutdown(self):
+            self.shutdown_called = True
+            self.status = ConferenceStatus.STOPPED
+
+    controller = FakeController()
+
+    monkeypatch.setattr(cm, "CONFERENCE_MODE_ENABLED", True)
+    monkeypatch.setattr(cm, "_build_live_controller", lambda args: controller)
+    monkeypatch.setattr("builtins.input", lambda prompt: (_ for _ in ()).throw(KeyboardInterrupt()))
+
+    assert cm._cmd_run(types.SimpleNamespace(manifest="manifest.json", auto=False)) == 0
+    assert controller.shutdown_called is True
+    assert "Conference Mode stopped" in capsys.readouterr().out
 
 
 def test_live_controller_rejects_missing_manifest_without_fallback(tmp_path, monkeypatch):
