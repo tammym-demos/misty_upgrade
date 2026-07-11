@@ -254,7 +254,7 @@ def test_prepare_prefers_recorded_override(tmp_path):
     )
     by_id = {a.cue_id: a for a in manifest.cues}
     assert by_id["slide01-misty01"].asset_source == "recorded"
-    assert "slide01-misty01" not in tts.calls  # not synthesized
+    assert by_id["slide01-misty01"].text not in tts.calls  # not synthesized
     assert by_id["slide02-misty01"].asset_source == "generated"
 
 
