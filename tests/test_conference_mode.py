@@ -573,6 +573,20 @@ def test_live_controller_wires_tts_fallback_flag_and_releases_listener(tmp_path,
     assert robot._wake_word_listener.stopped is True
 
 
+def test_cmd_run_disabled_does_not_touch_hardware(tmp_path, monkeypatch, capsys):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    def fail_build(args):
+        raise AssertionError("disabled run should not build live controller")
+
+    monkeypatch.setattr(cm, "CONFERENCE_MODE_ENABLED", False)
+    monkeypatch.setattr(cm, "_build_live_controller", fail_build)
+
+    assert cm._cmd_run(types.SimpleNamespace(manifest=str(manifest_path), auto=False)) == 2
+    assert "Conference Mode is disabled" in capsys.readouterr().out
+
+
 def test_live_controller_rejects_missing_manifest_without_fallback(tmp_path, monkeypatch):
     _, _, manifest = build_ready_controller(tmp_path)
     manifest.cues[0].wav_path = str(tmp_path / "missing.wav")

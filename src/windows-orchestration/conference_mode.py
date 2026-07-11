@@ -111,7 +111,8 @@ CONFERENCE_PRESENTER_MAX_WAIT_S = _env_float(
     "CONFERENCE_PRESENTER_MAX_WAIT_S", config_defaults.CONFERENCE_PRESENTER_MAX_WAIT_S
 )
 CONFERENCE_TTS_FALLBACK = _env_bool(
-    "CONFERENCE_TTS_FALLBACK", config_defaults.CONFERENCE_TTS_FALLBACK
+    "CONFERENCE_TTS_FALLBACK",
+    _env_bool("CONFERENCE_LLM_FALLBACK", config_defaults.CONFERENCE_TTS_FALLBACK),
 )
 ORCHESTRATION_URL = os.getenv("ORCHESTRATION_URL", config_defaults.ORCHESTRATION_URL)
 
@@ -993,13 +994,13 @@ def _cmd_run(args) -> int:  # pragma: no cover - requires Misty + live services
     voice-activity detection. It cannot run in the cloud; validate on the target
     hardware during rehearsal.
     """
-    controller = _build_live_controller(args)
-    if not controller.enabled:
+    if not CONFERENCE_MODE_ENABLED:
         print(
             "Conference Mode is disabled (CONFERENCE_MODE_ENABLED=false). "
             "Set CONFERENCE_MODE_ENABLED=true in your environment or .env to run."
         )
         return 2
+    controller = _build_live_controller(args)
     controller.start()
     print(
         "Conference Mode live. Controls: [n]ext [r]eplay [p]revious "
