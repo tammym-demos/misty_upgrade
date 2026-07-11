@@ -71,9 +71,31 @@ spoken text before TTS/asset generation and stored in the manifest as planned
 | `[nod]` | Head pitch down/up motion |
 | `[excited]` | Both arms up, happy face |
 | `[thinking]` | Slight head roll, thoughtful face |
+| `[talking]` | Show animated talking face (resolved at runtime) |
+| `[glance]` | Glance toward the presenter, then return to audience |
 | `[face:X]` | Set face image/alias (for example `happy`) |
 | `[arms:L,R]` | Set left/right arm positions in degrees |
 | `[head:pitch,roll,yaw]` | Set head pose in degrees |
+
+#### Chaining gestures
+
+Use `+` to combine gestures in a single tag: `[talking+excited]` merges both
+movement dicts so Misty gets excited arms *and* the talking face. The **last**
+gesture in the chain wins on conflicting keys (e.g., both set `face`).
+
+#### Auto-talking face
+
+When a cue has no `[face:...]` annotation, Misty automatically shows the
+configured talking face (`CONFERENCE_TALKING_FACE`, default
+`face_talking_happy.gif`) during speech. This ensures Misty appears animated
+while speaking even without explicit annotations.
+
+#### Presenter glance
+
+Between cues (during auto-advance), Misty glances toward the presenter's
+position and returns to facing the audience. Configure which side the presenter
+stands on with `CONFERENCE_PRESENTER_SIDE` (`left` or `right`, default `right`).
+The `[glance]` annotation can also be used inline to trigger a glance mid-script.
 
 ## Workflow
 
