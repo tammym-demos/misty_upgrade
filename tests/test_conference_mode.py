@@ -587,6 +587,36 @@ def test_cmd_run_disabled_does_not_touch_hardware(tmp_path, monkeypatch, capsys)
     assert "Conference Mode is disabled" in capsys.readouterr().out
 
 
+def test_cmd_run_auto_key_is_safe_when_auto_unavailable(monkeypatch, capsys):
+    class FakeController:
+        def __init__(self):
+            self.status = ConferenceStatus.RUNNING
+            self.auto_advance_available = False
+            self.shutdown_called = False
+
+        def start(self):
+            return True
+
+        def run_auto(self):
+            raise AssertionError("manual runner must not call run_auto without VAD")
+
+        def shutdown(self):
+            self.shutdown_called = True
+            self.status = ConferenceStatus.STOPPED
+
+    controller = FakeController()
+    commands = iter(["a", "s"])
+
+    monkeypatch.setattr(cm, "CONFERENCE_MODE_ENABLED", True)
+    monkeypatch.setattr(cm, "_build_live_controller", lambda args: controller)
+    monkeypatch.setattr("builtins.input", lambda prompt: next(commands))
+
+    assert cm._cmd_run(types.SimpleNamespace(manifest="manifest.json", auto=False)) == 0
+    output = capsys.readouterr().out
+    assert "Auto-advance is unavailable" in output
+    assert controller.shutdown_called is True
+
+
 def test_live_controller_rejects_missing_manifest_without_fallback(tmp_path, monkeypatch):
     _, _, manifest = build_ready_controller(tmp_path)
     manifest.cues[0].wav_path = str(tmp_path / "missing.wav")

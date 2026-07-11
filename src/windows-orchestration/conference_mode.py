@@ -659,6 +659,10 @@ class ConferenceController:
             return self.manifest.cues[self._last]
         return None
 
+    @property
+    def auto_advance_available(self) -> bool:
+        return self._wait_fn is not None
+
     def peek_next(self) -> Optional[CueAsset]:
         if 0 <= self._cursor < self.total:
             return self.manifest.cues[self._cursor]
@@ -1024,7 +1028,10 @@ def _cmd_run(args) -> int:  # pragma: no cover - requires Misty + live services
             elif key in ("p", "prev", "previous"):
                 controller.previous()
             elif key in ("a", "auto"):
-                controller.run_auto()
+                if not controller.auto_advance_available:
+                    print("Auto-advance is unavailable; use manual controls.")
+                else:
+                    controller.run_auto()
             elif key in ("s", "stop", "q", "quit"):
                 break
     finally:
