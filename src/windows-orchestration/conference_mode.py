@@ -509,7 +509,7 @@ def _wav_file_duration(path: str) -> float:
             frames = wf.getnframes()
             rate = wf.getframerate()
             return frames / rate if rate > 0 else 0.0
-    except (OSError, wave.Error):
+    except (EOFError, OSError, wave.Error):
         return 0.0
 
 
