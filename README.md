@@ -417,6 +417,58 @@ Controller test API:
 
 ---
 
+## Conference Mode
+
+Conference Mode lets Misty participate in scripted on-stage dialog by playing
+predetermined audio cues instead of using the live STT → LLM → TTS path.
+The presenter speaks naturally; Misty plays the next cue once silence is
+detected, with manual override controls available at all times.
+
+```powershell
+# Preview the ordered cue plan (no hardware needed)
+npx . conference dry-run
+
+# Generate TTS audio for all cues (requires orchestration service running)
+npx . conference prepare
+
+# Verify every cue has playable audio before showtime
+npx . conference verify
+
+# Live interactive stage runner (requires Misty + orchestration service)
+npx . conference run
+
+# Manual-only mode (no auto-advance, keyboard controls only)
+npx . conference run --no-auto
+```
+
+The default talk script is `talks/20260710-2.md`. Override with `--script`:
+
+```powershell
+npx . conference dry-run --script talks/my-talk.md
+npx . conference prepare --script talks/my-talk.md
+```
+
+**Live controls** (during `run`):
+
+| Key | Action |
+|---|---|
+| `n` / Enter | Play next cue |
+| `r` | Replay current cue |
+| `p` | Go back one cue |
+| Space | Pause / resume auto-advance |
+| `a` | Start auto-advance (listen for presenter silence) |
+| `s` / `q` | Stop and return Misty to rest state |
+
+**Notes:**
+- `npx . conference run` automatically stops the main controller service to free the laptop mic.
+- Auto-advance uses the laptop mic (configured via `LAPTOP_MIC_DEVICE`) to detect when the presenter finishes speaking (default: 2 s trailing silence).
+- Generated audio and the manifest are cached in `data/conference/`. Re-running `prepare` reuses unchanged cues.
+- Set `CONFERENCE_MODE_ENABLED=true` in `.env` to enable live mode.
+
+See [`docs/conference-mode.md`](docs/conference-mode.md) for full design documentation.
+
+---
+
 ## Testing
 
 `tests/test_integration.py` includes both fast mocked tests and live-service/hardware tests.
