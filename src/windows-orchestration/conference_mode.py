@@ -144,6 +144,8 @@ NEUTRAL_ARMS = [80.0, 80.0]
 NEUTRAL_HEAD = [-10.0, 0.0, 0.0]
 # Yaw angle for glancing at the presenter (sign depends on CONFERENCE_PRESENTER_SIDE).
 PRESENTER_GLANCE_YAW = 40.0
+# Pitch for looking up at the presenter (negative = up on Misty).
+PRESENTER_GLANCE_PITCH = -25.0
 
 GESTURE_LIBRARY = {
     "wave": {"arms": [-30, 0], "head": [0, 0, 5], "face": "e_Joy.jpg"},
@@ -1225,10 +1227,10 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
             robot.display_image(filename)
 
     def glance_fn() -> None:
-        """Glance toward the presenter then back to audience (neutral head)."""
+        """Glance up and toward the presenter then back to audience (neutral head)."""
         if hasattr(robot, "move_head"):
             robot.move_head(
-                pitch=NEUTRAL_HEAD[0],
+                pitch=_clamp(PRESENTER_GLANCE_PITCH, HEAD_PITCH_MIN, HEAD_PITCH_MAX),
                 roll=0,
                 yaw=_clamp(_presenter_yaw, HEAD_YAW_MIN, HEAD_YAW_MAX),
                 velocity=30,
@@ -1271,7 +1273,7 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
 
             if movement.get("head_motion") == "glance_presenter" and hasattr(robot, "move_head"):
                 robot.move_head(
-                    pitch=NEUTRAL_HEAD[0],
+                    pitch=_clamp(PRESENTER_GLANCE_PITCH, HEAD_PITCH_MIN, HEAD_PITCH_MAX),
                     roll=0,
                     yaw=_clamp(_presenter_yaw, HEAD_YAW_MIN, HEAD_YAW_MAX),
                     velocity=30,
