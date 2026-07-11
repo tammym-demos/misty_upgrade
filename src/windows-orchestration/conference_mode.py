@@ -47,6 +47,7 @@ import re
 import sys
 import time
 import wave
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Optional
@@ -114,6 +115,7 @@ CONFERENCE_TTS_FALLBACK = _env_bool(
     "CONFERENCE_TTS_FALLBACK",
     _env_bool("CONFERENCE_LLM_FALLBACK", config_defaults.CONFERENCE_TTS_FALLBACK),
 )
+CONFERENCE_VARS = os.getenv("CONFERENCE_VARS", config_defaults.CONFERENCE_VARS)
 ORCHESTRATION_URL = os.getenv("ORCHESTRATION_URL", config_defaults.ORCHESTRATION_URL)
 
 MANIFEST_VERSION = 1
@@ -124,7 +126,33 @@ MANIFEST_VERSION = 1
 _SLIDE_RE = re.compile(r"^\s*#{2,6}\s*\*\*\s*Slide\s+(?P<label>.+?)\s*\*\*", re.IGNORECASE)
 _SPEAKER_RE = re.compile(r"^\s*\*\*\s*\[(?P<speaker>You|Misty)\]\s*:\s*\*\*\s*(?P<text>.*)$", re.IGNORECASE)
 _CITE_RE = re.compile(r"\[\s*cite\s*:[^\]]*\]", re.IGNORECASE)
+_VAR_RE = re.compile(r"\{\{\s*(?P<key>[A-Za-z0-9_.-]+)\s*\}\}")
+_ANNOTATION_RE = re.compile(r"\[(?P<tag>[A-Za-z]+)(?::(?P<value>[^\]]+))?\]")
 _WS_RE = re.compile(r"\s+")
+
+ARM_MIN, ARM_MAX = -29.0, 90.0
+HEAD_PITCH_MIN, HEAD_PITCH_MAX = -40.0, 26.0
+HEAD_ROLL_MIN, HEAD_ROLL_MAX = -40.0, 40.0
+HEAD_YAW_MIN, HEAD_YAW_MAX = -81.0, 81.0
+NEUTRAL_ARMS = [80.0, 80.0]
+NEUTRAL_HEAD = [-10.0, 0.0, 0.0]
+
+GESTURE_LIBRARY = {
+    "wave": {"arms": [-30, 0], "head": [0, 0, 5], "face": "e_Joy.jpg"},
+    "shrug": {"arms": [-20, -20], "head": [0, 0, 0]},
+    "nod": {"head_motion": "nod"},
+    "excited": {"arms": [-40, -40], "face": "e_Joy.jpg"},
+    "thinking": {"head": [0, 10, 0], "face": "e_ApprehensionConcerned.jpg"},
+}
+
+_FACE_ALIASES = {
+    "happy": "e_Joy.jpg",
+    "joy": "e_Joy.jpg",
+    "excited": "e_Joy.jpg",
+    "thinking": "e_ApprehensionConcerned.jpg",
+    "thoughtful": "e_ApprehensionConcerned.jpg",
+    "neutral": "e_DefaultContent.jpg",
+}
 
 
 class ConferenceError(Exception):
@@ -164,6 +192,7 @@ class Cue:
     order: int
     text: str
     preceding_presenter: str = ""
+    movements: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -198,6 +227,7 @@ class CueAsset:
     slide_seq: int = 0
     slide_label: str = ""
     slide_title: str = ""
+    movements: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -211,6 +241,7 @@ class CueAsset:
             "slide_seq": self.slide_seq,
             "slide_label": self.slide_label,
             "slide_title": self.slide_title,
+            "movements": deepcopy(self.movements),
         }
 
     @classmethod
@@ -226,6 +257,7 @@ class CueAsset:
             slide_seq=int(data.get("slide_seq", 0)),
             slide_label=data.get("slide_label", ""),
             slide_title=data.get("slide_title", ""),
+            movements=deepcopy(data.get("movements", [])),
         )
 
 
@@ -276,6 +308,87 @@ def _clean_text(raw: str) -> str:
     return _WS_RE.sub(" ", _CITE_RE.sub("", raw)).strip()
 
 
+def parse_conference_vars(raw: str) -> dict[str, str]:
+    """Parse CONFERENCE_VARS from 'key=value,key2=value2' into a dict."""
+    variables: dict[str, str] = {}
+    if not raw.strip():
+        return variables
+    for part in raw.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise ScriptParseError(
+                "CONFERENCE_VARS entries must use key=value pairs separated by commas"
+            )
+        key, value = item.split("=", 1)
+        key = key.strip()
+        if not key:
+            raise ScriptParseError("CONFERENCE_VARS contains an empty variable name")
+        variables[key] = value.strip()
+    return variables
+
+
+def resolve_variables(text: str, variables_dict: dict[str, str]) -> str:
+    """Resolve {{variable}} placeholders or raise on any missing keys."""
+    missing: set[str] = set()
+
+    def _replace(match: re.Match[str]) -> str:
+        key = match.group("key")
+        if key not in variables_dict:
+            missing.add(key)
+            return match.group(0)
+        return variables_dict[key]
+
+    resolved = _VAR_RE.sub(_replace, text)
+    if missing:
+        raise ScriptParseError(
+            "Unresolved conference variables: " + ", ".join(sorted(missing))
+        )
+    return resolved
+
+
+def _resolve_face_name(value: str) -> str:
+    face = value.strip()
+    return _FACE_ALIASES.get(face.lower(), face)
+
+
+def _parse_floats(raw: str, expected: int, tag: str) -> list[float]:
+    parts = [piece.strip() for piece in raw.split(",")]
+    if len(parts) != expected or any(not piece for piece in parts):
+        raise ScriptParseError(
+            f"Annotation [{tag}:{raw}] requires exactly {expected} comma-separated values"
+        )
+    try:
+        return [float(piece) for piece in parts]
+    except ValueError as exc:
+        raise ScriptParseError(
+            f"Annotation [{tag}:{raw}] contains a non-numeric value"
+        ) from exc
+
+
+def parse_annotations(text: str) -> tuple[str, list[dict]]:
+    """Strip inline movement annotations from spoken text and return movements."""
+    movements: list[dict] = []
+    for match in _ANNOTATION_RE.finditer(text):
+        tag = match.group("tag").strip().lower()
+        value = (match.group("value") or "").strip()
+        if tag in GESTURE_LIBRARY and not value:
+            movements.append(deepcopy(GESTURE_LIBRARY[tag]))
+            continue
+        if tag == "face" and value:
+            movements.append({"face": _resolve_face_name(value)})
+            continue
+        if tag == "arms" and value:
+            movements.append({"arms": _parse_floats(value, 2, tag)})
+            continue
+        if tag == "head" and value:
+            movements.append({"head": _parse_floats(value, 3, tag)})
+            continue
+        raise ScriptParseError(f"Unsupported conference annotation: [{tag}{':' + value if value else ''}]")
+    return _WS_RE.sub(" ", _ANNOTATION_RE.sub("", text)).strip(), movements
+
+
 def _split_slide_label(label: str) -> tuple[str, str]:
     """Split a slide header label like "1: Title Slide" into (label, title)."""
     label = label.strip()
@@ -285,7 +398,12 @@ def _split_slide_label(label: str) -> tuple[str, str]:
     return label, ""
 
 
-def parse_script(source: str, *, is_text: bool = False) -> ConferenceScript:
+def parse_script(
+    source: str,
+    *,
+    is_text: bool = False,
+    variables_dict: Optional[dict[str, str]] = None,
+) -> ConferenceScript:
     """Parse a talk script into an ordered list of predetermined Misty cues.
 
     Parameters
@@ -308,6 +426,9 @@ def parse_script(source: str, *, is_text: bool = False) -> ConferenceScript:
         with open(source, "r", encoding="utf-8") as fh:
             text = fh.read()
         origin = source
+
+    if variables_dict is None:
+        variables_dict = parse_conference_vars(CONFERENCE_VARS)
 
     cues: list[Cue] = []
     slide_seq = 0
@@ -334,9 +455,14 @@ def parse_script(source: str, *, is_text: bool = False) -> ConferenceScript:
         spoken = _clean_text(speaker_match.group("text"))
         if not spoken:
             continue
+        spoken = resolve_variables(spoken, variables_dict)
 
         if speaker == "you":
             last_presenter = spoken
+            continue
+
+        spoken, movements = parse_annotations(spoken)
+        if not spoken:
             continue
 
         # Misty line -> a predetermined cue.
@@ -352,6 +478,7 @@ def parse_script(source: str, *, is_text: bool = False) -> ConferenceScript:
                 order=order,
                 text=spoken,
                 preceding_presenter=last_presenter,
+                movements=movements,
             )
         )
 
@@ -500,6 +627,7 @@ def prepare_assets(
                 slide_seq=cue.slide_seq,
                 slide_label=cue.slide_label,
                 slide_title=cue.slide_title,
+                movements=deepcopy(cue.movements),
             )
         )
 
@@ -579,6 +707,8 @@ class ShutdownHooks:
 PlayFn = Callable[[CueAsset], Optional[float]]
 # wait_for_presenter_fn() -> True when the presenter finished speaking, else False
 WaitFn = Callable[[], bool]
+MovementFn = Callable[[list[dict]], None]
+NeutralFn = Callable[[], None]
 
 
 class ConferenceController:
@@ -607,8 +737,11 @@ class ConferenceController:
         wait_for_presenter_fn: Optional[WaitFn] = None,
         shutdown_hooks: Optional[ShutdownHooks] = None,
         enabled: bool = False,
-        tts_fallback_fn: Optional[Callable[[str], None]] = None,
+        tts_fallback_fn: Optional[Callable[[str], Optional[float]]] = None,
         use_tts_fallback: bool = False,
+        movement_fn: Optional[MovementFn] = None,
+        neutral_fn: Optional[NeutralFn] = None,
+        sleep_fn: Optional[Callable[[float], None]] = None,
     ) -> None:
         self.manifest = manifest
         self._play_fn = play_fn
@@ -617,6 +750,9 @@ class ConferenceController:
         self.enabled = enabled
         self._tts_fallback_fn = tts_fallback_fn
         self.use_tts_fallback = use_tts_fallback
+        self._movement_fn = movement_fn
+        self._neutral_fn = neutral_fn
+        self._sleep_fn = sleep_fn or time.sleep
 
         self.status = ConferenceStatus.IDLE
         self._cursor = 0  # index of the NEXT cue to play
@@ -687,19 +823,25 @@ class ConferenceController:
                     "Cue %s audio missing; using explicit TTS fallback", asset.cue_id
                 )
                 self.tts_fallback_calls += 1
-                self._tts_fallback_fn(asset.text)
-                self._last = index
-                self._cursor = index + 1
-                return asset
-            raise ConferenceAssetMissing(
-                f"Cue {asset.cue_id!r} has no predetermined audio at "
-                f"{asset.wav_path!r} and TTS fallback is disabled"
-            )
-        # Scripted playback path: predetermined audio only, never the LLM.
-        self._play_fn(asset)
+                duration = float(self._tts_fallback_fn(asset.text) or 0.0)
+            else:
+                raise ConferenceAssetMissing(
+                    f"Cue {asset.cue_id!r} has no predetermined audio at "
+                    f"{asset.wav_path!r} and TTS fallback is disabled"
+                )
+        else:
+            # Scripted playback path: predetermined audio only, never the LLM.
+            duration = float(self._play_fn(asset) or 0.0)
+
+        if self._movement_fn is not None and asset.movements:
+            self._movement_fn(deepcopy(asset.movements))
         self.play_count += 1
         self._last = index
         self._cursor = index + 1
+        if duration > 0:
+            self._sleep_fn(max(0.0, duration))
+        if self._neutral_fn is not None:
+            self._neutral_fn()
         return asset
 
     def play_next(self) -> Optional[CueAsset]:
@@ -843,6 +985,24 @@ def _print_cue_plan(script: ConferenceScript, stream=sys.stdout) -> None:
             file=stream,
         )
         print(f"      Misty: {preview}", file=stream)
+        if cue.movements:
+            print(f"      Movements: {_format_movements(cue.movements)}", file=stream)
+
+
+def _format_movements(movements: list[dict]) -> str:
+    parts: list[str] = []
+    for movement in movements:
+        if "face" in movement:
+            parts.append(f"face={movement['face']}")
+        if "arms" in movement:
+            left, right = movement["arms"]
+            parts.append(f"arms=[{left:g}, {right:g}]")
+        if "head" in movement:
+            pitch, roll, yaw = movement["head"]
+            parts.append(f"head=[{pitch:g}, {roll:g}, {yaw:g}]")
+        if "head_motion" in movement:
+            parts.append(f"head_motion={movement['head_motion']}")
+    return ", ".join(parts)
 
 
 def _cmd_dry_run(args) -> int:
@@ -964,12 +1124,11 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
             with open(asset.wav_path, "rb") as fh:
                 wav_bytes = fh.read()
             filename = asset.misty_filename or os.path.basename(asset.wav_path)
-            duration = robot.upload_and_play_audio(wav_bytes, filename)
-            time.sleep(max(0.0, float(duration or 0.0)))
-            return duration
-        finally:
+            return float(robot.upload_and_play_audio(wav_bytes, filename) or 0.0)
+        except Exception:
             if listener is not None:
                 listener.resume()
+            raise
 
     tts_fallback_backend = http_tts(ORCHESTRATION_URL)
 
@@ -980,11 +1139,61 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
             listener.pause()
         try:
             wav_bytes = tts_fallback_backend(text)
-            duration = robot.upload_and_play_audio(wav_bytes, "conference_fallback.wav")
-            time.sleep(max(0.0, float(duration or 0.0)))
-        finally:
+            return float(robot.upload_and_play_audio(wav_bytes, "conference_fallback.wav") or 0.0)
+        except Exception:
             if listener is not None:
                 listener.resume()
+            raise
+
+    def _clamp(value: float, minimum: float, maximum: float) -> float:
+        return max(minimum, min(maximum, float(value)))
+
+    def movement_fn(movements: list[dict]) -> None:
+        for movement in movements:
+            face = movement.get("face")
+            if face:
+                if hasattr(robot, "show_face"):
+                    robot.show_face(face)
+                elif hasattr(robot, "display_image"):
+                    robot.display_image(face)
+
+            arms = movement.get("arms")
+            if arms and hasattr(robot, "move_arms"):
+                robot.move_arms(
+                    left=_clamp(arms[0], ARM_MIN, ARM_MAX),
+                    right=_clamp(arms[1], ARM_MIN, ARM_MAX),
+                    velocity=40,
+                )
+
+            head = movement.get("head")
+            if head and hasattr(robot, "move_head"):
+                robot.move_head(
+                    pitch=_clamp(head[0], HEAD_PITCH_MIN, HEAD_PITCH_MAX),
+                    roll=_clamp(head[1], HEAD_ROLL_MIN, HEAD_ROLL_MAX),
+                    yaw=_clamp(head[2], HEAD_YAW_MIN, HEAD_YAW_MAX),
+                    velocity=40,
+                )
+
+            if movement.get("head_motion") == "nod" and hasattr(robot, "move_head"):
+                robot.move_head(pitch=10, roll=0, yaw=0, velocity=40)
+                time.sleep(0.2)
+                robot.move_head(pitch=-10, roll=0, yaw=0, velocity=40)
+                time.sleep(0.2)
+                robot.move_head(pitch=0, roll=0, yaw=0, velocity=40)
+
+    def neutral_fn() -> None:
+        if hasattr(robot, "move_arms"):
+            robot.move_arms(left=NEUTRAL_ARMS[0], right=NEUTRAL_ARMS[1], velocity=40)
+        if hasattr(robot, "move_head"):
+            robot.move_head(
+                pitch=NEUTRAL_HEAD[0],
+                roll=NEUTRAL_HEAD[1],
+                yaw=NEUTRAL_HEAD[2],
+                velocity=40,
+            )
+        listener = getattr(robot, "_wake_word_listener", None)
+        if listener is not None:
+            listener.resume()
 
     def _release_audio():
         # First safe-shutdown step: release the mic/audio stack so keyphrase and
@@ -1027,6 +1236,8 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         enabled=CONFERENCE_MODE_ENABLED,
         tts_fallback_fn=tts_fallback_fn,
         use_tts_fallback=CONFERENCE_TTS_FALLBACK,
+        movement_fn=movement_fn,
+        neutral_fn=neutral_fn,
     )
 
 
