@@ -862,3 +862,119 @@ def test_stopped_controller_stops_playback(tmp_path):
     controller.shutdown()
     assert controller.play_next() is None
     assert recorder.played == []
+
+
+# ---------------------------------------------------------------------------
+# talking face, presenter glance, and chaining
+# ---------------------------------------------------------------------------
+
+
+def test_auto_talking_face_applied_when_no_face_annotation(tmp_path):
+    """When a cue has no [face:...] annotation, the controller calls face_fn
+    with the configured talking face before playback."""
+    face_calls = []
+    controller, _, _ = build_ready_controller(
+        tmp_path,
+        face_fn=lambda f: face_calls.append(f),
+    )
+    controller.start()
+    # slide02-misty01 has no annotations -> auto talking face
+    controller.play_next()  # slide01-misty01 has [wave] which has face
+    controller.play_next()  # slide02-misty01 has no annotations
+    # First cue has face annotation (wave includes face), so no auto face
+    # Second cue has no face annotation, so auto face is applied
+    assert face_calls == ["face_talking_happy.gif"]
+
+
+def test_auto_talking_face_not_applied_when_face_annotation_present(tmp_path):
+    """When a cue has a [face:...] annotation, face_fn is not called."""
+    face_calls = []
+    controller, _, _ = build_ready_controller(
+        tmp_path,
+        face_fn=lambda f: face_calls.append(f),
+    )
+    controller.start()
+    controller.play_next()  # slide01-misty01 has [wave][face:happy] -> has face
+    assert face_calls == []
+
+
+def test_glance_fn_called_during_auto_advance(tmp_path):
+    """Glance function is called while waiting for presenter to finish."""
+    glance_calls = []
+    controller, _, _ = build_ready_controller(
+        tmp_path,
+        wait_for_presenter_fn=lambda: True,
+        glance_fn=lambda: glance_calls.append("glance"),
+    )
+    controller.start()
+    controller.auto_advance_once()
+    assert glance_calls == ["glance"]
+
+
+def test_glance_fn_not_called_during_manual_next(tmp_path):
+    """Manual play_next does not glance — only auto-advance does."""
+    glance_calls = []
+    controller, _, _ = build_ready_controller(
+        tmp_path,
+        glance_fn=lambda: glance_calls.append("glance"),
+    )
+    controller.start()
+    controller.play_next()
+    assert glance_calls == []
+
+
+def test_chained_gesture_merges_movements():
+    """[talking+excited] merges both gesture dicts (last wins on conflict)."""
+    text, movements = cm.parse_annotations("Hello! [talking+excited]")
+    assert text == "Hello!"
+    assert len(movements) == 1
+    merged = movements[0]
+    # excited provides arms and face; talking face is overwritten by excited's
+    assert merged["arms"] == [-40, -40]
+    assert merged["face"] == "e_Joy.jpg"
+
+
+def test_chained_gesture_last_wins_on_conflict():
+    """Later gesture in chain overwrites earlier for same key."""
+    text, movements = cm.parse_annotations("Hi [wave+shrug]")
+    assert text == "Hi"
+    merged = movements[0]
+    # shrug arms overwrite wave arms
+    assert merged["arms"] == [-20, -20]
+    # wave face remains (shrug has no face)
+    assert merged["face"] == "e_Joy.jpg"
+
+
+def test_chained_unknown_gesture_raises():
+    """Unknown gesture in chain raises ScriptParseError."""
+    with pytest.raises(cm.ScriptParseError, match="Unknown gesture 'dance'"):
+        cm.parse_annotations("Hi [dance+wave]")
+
+
+def test_talking_gesture_resolves_sentinel_at_runtime(tmp_path):
+    """The __talking__ face sentinel is resolved to the configured talking face."""
+    movement_calls = []
+    controller, _, _ = build_ready_controller(
+        tmp_path,
+        movement_fn=lambda m: movement_calls.append(m),
+    )
+    # Manually inject a talking annotation into the first cue
+    controller.manifest.cues[1].movements = [{"face": "__talking__"}]
+    controller.start()
+    controller.play_next()  # cue 0
+    controller.play_next()  # cue 1 with __talking__ sentinel
+    # The second call should have resolved __talking__ to the configured face
+    assert movement_calls[1] == [{"face": "face_talking_happy.gif"}]
+
+
+def test_glance_gesture_parsed():
+    """[glance] is parsed as a head_motion: glance_presenter."""
+    text, movements = cm.parse_annotations("Interesting. [glance]")
+    assert text == "Interesting."
+    assert movements == [{"head_motion": "glance_presenter"}]
+
+
+def test_presenter_side_config_default():
+    """CONFERENCE_PRESENTER_SIDE defaults to 'right'."""
+    import config_defaults
+    assert config_defaults.CONFERENCE_PRESENTER_SIDE == "right"

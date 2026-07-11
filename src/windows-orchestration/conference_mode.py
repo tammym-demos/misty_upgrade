@@ -116,6 +116,12 @@ CONFERENCE_TTS_FALLBACK = _env_bool(
     _env_bool("CONFERENCE_LLM_FALLBACK", config_defaults.CONFERENCE_TTS_FALLBACK),
 )
 CONFERENCE_VARS = os.getenv("CONFERENCE_VARS", config_defaults.CONFERENCE_VARS)
+CONFERENCE_PRESENTER_SIDE = os.getenv(
+    "CONFERENCE_PRESENTER_SIDE", config_defaults.CONFERENCE_PRESENTER_SIDE
+).strip().lower()
+CONFERENCE_TALKING_FACE = os.getenv(
+    "CONFERENCE_TALKING_FACE", config_defaults.CONFERENCE_TALKING_FACE
+)
 ORCHESTRATION_URL = os.getenv("ORCHESTRATION_URL", config_defaults.ORCHESTRATION_URL)
 
 MANIFEST_VERSION = 1
@@ -127,7 +133,7 @@ _SLIDE_RE = re.compile(r"^\s*#{2,6}\s*\*\*\s*Slide\s+(?P<label>.+?)\s*\*\*", re.
 _SPEAKER_RE = re.compile(r"^\s*\*\*\s*\[(?P<speaker>You|Misty)\]\s*:\s*\*\*\s*(?P<text>.*)$", re.IGNORECASE)
 _CITE_RE = re.compile(r"\[\s*cite\s*:[^\]]*\]", re.IGNORECASE)
 _VAR_RE = re.compile(r"\{\{\s*(?P<key>[A-Za-z0-9_.-]+)\s*\}\}")
-_ANNOTATION_RE = re.compile(r"\[(?P<tag>[A-Za-z]+)(?::(?P<value>[^\]]+))?\]")
+_ANNOTATION_RE = re.compile(r"\[(?P<tag>[A-Za-z+]+)(?::(?P<value>[^\]]+))?\]")
 _WS_RE = re.compile(r"\s+")
 
 ARM_MIN, ARM_MAX = -29.0, 90.0
@@ -136,6 +142,8 @@ HEAD_ROLL_MIN, HEAD_ROLL_MAX = -40.0, 40.0
 HEAD_YAW_MIN, HEAD_YAW_MAX = -81.0, 81.0
 NEUTRAL_ARMS = [80.0, 80.0]
 NEUTRAL_HEAD = [-10.0, 0.0, 0.0]
+# Yaw angle for glancing at the presenter (sign depends on CONFERENCE_PRESENTER_SIDE).
+PRESENTER_GLANCE_YAW = 40.0
 
 GESTURE_LIBRARY = {
     "wave": {"arms": [-30, 0], "head": [0, 0, 5], "face": "e_Joy.jpg"},
@@ -143,15 +151,19 @@ GESTURE_LIBRARY = {
     "nod": {"head_motion": "nod"},
     "excited": {"arms": [-40, -40], "face": "e_Joy.jpg"},
     "thinking": {"head": [0, 10, 0], "face": "e_ApprehensionConcerned.jpg"},
+    "talking": {"face": "__talking__"},
+    "glance": {"head_motion": "glance_presenter"},
 }
 
 _FACE_ALIASES = {
     "happy": "e_Joy.jpg",
     "joy": "e_Joy.jpg",
     "excited": "e_Joy.jpg",
+    "sarcastic": "e_Disgust.jpg",
     "thinking": "e_ApprehensionConcerned.jpg",
     "thoughtful": "e_ApprehensionConcerned.jpg",
     "neutral": "e_DefaultContent.jpg",
+    "talking": "__talking__",
 }
 
 
@@ -367,12 +379,38 @@ def _parse_floats(raw: str, expected: int, tag: str) -> list[float]:
         ) from exc
 
 
+def _merge_movements(base: dict, overlay: dict) -> dict:
+    """Merge two movement dicts — overlay wins for conflicting keys."""
+    merged = dict(base)
+    merged.update(overlay)
+    return merged
+
+
 def parse_annotations(text: str) -> tuple[str, list[dict]]:
-    """Strip inline movement annotations from spoken text and return movements."""
+    """Strip inline movement annotations from spoken text and return movements.
+
+    Supports ``+`` chaining: ``[talking+excited]`` merges the gesture dicts so
+    you get excited arms *and* the talking face in a single movement entry.
+    """
     movements: list[dict] = []
     for match in _ANNOTATION_RE.finditer(text):
-        tag = match.group("tag").strip().lower()
+        full_tag = match.group("tag").strip().lower()
         value = (match.group("value") or "").strip()
+
+        # Chained gestures: [talking+excited], [wave+nod], etc.
+        if "+" in full_tag and not value:
+            parts = [p.strip() for p in full_tag.split("+") if p.strip()]
+            merged: dict = {}
+            for part in parts:
+                if part not in GESTURE_LIBRARY:
+                    raise ScriptParseError(
+                        f"Unknown gesture '{part}' in chained annotation [{full_tag}]"
+                    )
+                merged = _merge_movements(merged, GESTURE_LIBRARY[part])
+            movements.append(deepcopy(merged))
+            continue
+
+        tag = full_tag
         if tag in GESTURE_LIBRARY and not value:
             movements.append(deepcopy(GESTURE_LIBRARY[tag]))
             continue
@@ -709,6 +747,10 @@ PlayFn = Callable[[CueAsset], Optional[float]]
 WaitFn = Callable[[], bool]
 MovementFn = Callable[[list[dict]], None]
 NeutralFn = Callable[[], None]
+# glance_fn() -> glance at presenter briefly, then return to audience
+GlanceFn = Callable[[], None]
+# face_fn(filename) -> display a face image on Misty
+FaceFn = Callable[[str], None]
 
 
 class ConferenceController:
@@ -741,6 +783,9 @@ class ConferenceController:
         use_tts_fallback: bool = False,
         movement_fn: Optional[MovementFn] = None,
         neutral_fn: Optional[NeutralFn] = None,
+        glance_fn: Optional[GlanceFn] = None,
+        face_fn: Optional[FaceFn] = None,
+        talking_face: str = "",
         sleep_fn: Optional[Callable[[float], None]] = None,
     ) -> None:
         self.manifest = manifest
@@ -752,6 +797,9 @@ class ConferenceController:
         self.use_tts_fallback = use_tts_fallback
         self._movement_fn = movement_fn
         self._neutral_fn = neutral_fn
+        self._glance_fn = glance_fn
+        self._face_fn = face_fn
+        self._talking_face = talking_face or CONFERENCE_TALKING_FACE
         self._sleep_fn = sleep_fn or time.sleep
 
         self.status = ConferenceStatus.IDLE
@@ -812,6 +860,10 @@ class ConferenceController:
 
     # -- playback -----------------------------------------------------------
 
+    def _has_face_annotation(self, movements: list[dict]) -> bool:
+        """Check if any movement in the list sets a face."""
+        return any(m.get("face") for m in movements)
+
     def _play_index(self, index: int) -> Optional[CueAsset]:
         if not (0 <= index < self.total):
             return None
@@ -833,8 +885,19 @@ class ConferenceController:
             # Scripted playback path: predetermined audio only, never the LLM.
             duration = float(self._play_fn(asset) or 0.0)
 
+        # Auto-apply talking face during speech unless a [face:...] annotation
+        # already sets one. The __talking__ sentinel is resolved to the configured
+        # talking face GIF at runtime.
+        if self._face_fn and not self._has_face_annotation(asset.movements):
+            self._face_fn(self._talking_face)
+
         if self._movement_fn is not None and asset.movements:
-            self._movement_fn(deepcopy(asset.movements))
+            resolved = deepcopy(asset.movements)
+            # Resolve __talking__ sentinel to the configured talking face
+            for m in resolved:
+                if m.get("face") == "__talking__":
+                    m["face"] = self._talking_face
+            self._movement_fn(resolved)
         self.play_count += 1
         self._last = index
         self._cursor = index + 1
@@ -902,6 +965,9 @@ class ConferenceController:
     def auto_advance_once(self) -> Optional[CueAsset]:
         """Listen for the presenter to finish, then play the next cue.
 
+        While waiting for the presenter, Misty glances toward them (if a
+        glance_fn is provided) to appear attentive and engaged.
+
         Respects manual override: returns None (no playback) while paused or
         stopped, or when the presenter-wait times out.
         """
@@ -911,6 +977,9 @@ class ConferenceController:
             raise ConferenceError(
                 "auto_advance_once requires a wait_for_presenter_fn (VAD) callable"
             )
+        # Glance toward presenter while they speak
+        if self._glance_fn is not None:
+            self._glance_fn()
         finished = self._wait_fn()
         # Manual override may have paused/stopped us while we were listening.
         if not finished or not self._active() or self.status == ConferenceStatus.PAUSED:
@@ -1148,6 +1217,27 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
     def _clamp(value: float, minimum: float, maximum: float) -> float:
         return max(minimum, min(maximum, float(value)))
 
+    # Determine presenter yaw direction based on configured side
+    _presenter_yaw = PRESENTER_GLANCE_YAW if CONFERENCE_PRESENTER_SIDE == "left" else -PRESENTER_GLANCE_YAW
+
+    def face_fn(filename: str) -> None:
+        if hasattr(robot, "show_face"):
+            robot.show_face(filename)
+        elif hasattr(robot, "display_image"):
+            robot.display_image(filename)
+
+    def glance_fn() -> None:
+        """Glance toward the presenter then back to audience (neutral head)."""
+        if hasattr(robot, "move_head"):
+            robot.move_head(
+                pitch=NEUTRAL_HEAD[0],
+                roll=0,
+                yaw=_clamp(_presenter_yaw, HEAD_YAW_MIN, HEAD_YAW_MAX),
+                velocity=30,
+            )
+        if hasattr(robot, "show_face"):
+            robot.show_face("e_DefaultContent.jpg")
+
     def movement_fn(movements: list[dict]) -> None:
         for movement in movements:
             face = movement.get("face")
@@ -1180,6 +1270,21 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
                 robot.move_head(pitch=-10, roll=0, yaw=0, velocity=40)
                 time.sleep(0.2)
                 robot.move_head(pitch=0, roll=0, yaw=0, velocity=40)
+
+            if movement.get("head_motion") == "glance_presenter" and hasattr(robot, "move_head"):
+                robot.move_head(
+                    pitch=NEUTRAL_HEAD[0],
+                    roll=0,
+                    yaw=_clamp(_presenter_yaw, HEAD_YAW_MIN, HEAD_YAW_MAX),
+                    velocity=30,
+                )
+                time.sleep(0.5)
+                robot.move_head(
+                    pitch=NEUTRAL_HEAD[0],
+                    roll=NEUTRAL_HEAD[1],
+                    yaw=NEUTRAL_HEAD[2],
+                    velocity=30,
+                )
 
     def neutral_fn() -> None:
         if hasattr(robot, "move_arms"):
@@ -1238,6 +1343,9 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         use_tts_fallback=CONFERENCE_TTS_FALLBACK,
         movement_fn=movement_fn,
         neutral_fn=neutral_fn,
+        glance_fn=glance_fn,
+        face_fn=face_fn,
+        talking_face=CONFERENCE_TALKING_FACE,
     )
 
 

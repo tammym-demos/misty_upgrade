@@ -234,3 +234,8 @@ CONFERENCE_TTS_FALLBACK: bool = False
 # Variable substitution for talk scripts (comma-separated key=value pairs).
 # Example: CONFERENCE_VARS=customer=Contoso,event=Hackathon
 CONFERENCE_VARS: str = ""
+# Side where the presenter stands relative to Misty ("left" or "right").
+# Used for glance-at-presenter behavior between cues.
+CONFERENCE_PRESENTER_SIDE: str = "right"
+# Default talking face shown during speech when no [face:...] annotation overrides.
+CONFERENCE_TALKING_FACE: str = "face_talking_happy.gif"
