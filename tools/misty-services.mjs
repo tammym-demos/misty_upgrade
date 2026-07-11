@@ -40,6 +40,9 @@ Commands:
   stop      Gracefully stop the controller, orchestration service, and Foundry Local
   restart   Stop then start all services
   status    Show service status
+  conference <subcommand> [opts]
+            Run Conference Mode (scripted stage dialog).
+            Subcommands: dry-run, prepare, verify, run
 
 Options:
   --skip-foundry          Do not start or stop Foundry Local
@@ -54,6 +57,12 @@ Options:
   --yes                   Assume yes for install prompts
   --no-install            Do not prompt to install missing prerequisites
   -h, --help              Show this help
+
+Conference Mode (npx . conference <subcommand>):
+  dry-run [--script <path>]       Preview the ordered cue plan (no hardware)
+  prepare [--script <path>]       Generate/import/reuse cue audio + manifest
+  verify                          Confirm every cue has playable audio
+  run [--auto|--no-auto]          Live interactive stage runner (requires Misty)
 `);
 }
 
@@ -72,6 +81,11 @@ function parseArgs(argv) {
   };
   if (options.command === "-h" || options.command === "--help") {
     options.command = "help";
+  }
+
+  // Conference passes all remaining args through to conference_mode.py.
+  if (options.command === "conference") {
+    return options;
   }
 
   for (let index = 3; index < argv.length; index += 1) {
@@ -1161,6 +1175,53 @@ async function status(options) {
   console.log(`Misty controller: ${controller}${state.controller?.pid ? ` (PID ${state.controller.pid})` : ""}`);
 }
 
+async function conference(options) {
+  // Conference Mode delegates to conference_mode.py with the remaining argv.
+  // Usage: npx . conference <subcommand> [opts]
+  // e.g.:  npx . conference dry-run --script ../../talks/20260710-2.md
+  const subArgs = process.argv.slice(3); // everything after "conference"
+  if (subArgs.length === 0 || subArgs[0] === "--help" || subArgs[0] === "-h") {
+    console.log(`Usage: npx . conference <subcommand> [options]
+
+Subcommands:
+  dry-run [--script <path>]       Preview the ordered cue plan (no hardware)
+  prepare [--script <path>]       Generate/import/reuse cue audio + manifest
+  verify                          Confirm every cue has playable audio
+  run [--auto|--no-auto]          Live interactive stage runner (requires Misty)
+
+Options are passed directly to conference_mode.py.
+`);
+    return;
+  }
+
+  // For "run", stop the main controller service if it's running — it holds the
+  // laptop mic wake word listener and will conflict with conference mode.
+  const subcommand = subArgs[0];
+  if (subcommand === "run") {
+    const state = readState();
+    if (state.controller?.pid && isPidRunning(state.controller.pid)) {
+      console.log(`Stopping main controller (PID ${state.controller.pid}) to free laptop mic...`);
+      await stopPid("Misty controller", state.controller.pid, "SIGTERM");
+      delete state.controller;
+      writeState(state);
+    }
+  }
+
+  selectCompatiblePython(options);
+  const python = options.python;
+  const script = path.join(ORCH_DIR, "conference_mode.py");
+
+  if (!fs.existsSync(script)) {
+    throw new Error(`Conference Mode module not found: ${script}`);
+  }
+
+  console.log(`Running: ${python} conference_mode.py ${subArgs.join(" ")}`);
+  const result = runInherited(python, [script, ...subArgs], { cwd: ORCH_DIR });
+  if (result.status !== 0) {
+    process.exitCode = result.status ?? 1;
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv);
   switch (options.command) {
@@ -1176,6 +1237,9 @@ async function main() {
       break;
     case "status":
       await status(options);
+      break;
+    case "conference":
+      await conference(options);
       break;
     case "help":
       usage();

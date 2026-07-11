@@ -569,6 +569,12 @@ def test_live_controller_wires_tts_fallback_flag_and_releases_listener(tmp_path,
         def stop(self):
             self.stopped = True
 
+        def pause(self):
+            pass
+
+        def resume(self):
+            pass
+
     class FakeRobot:
         def __init__(self):
             self.played = []

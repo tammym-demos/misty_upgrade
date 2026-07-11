@@ -941,20 +941,50 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
 
     robot = mc.MistyController()
 
+    # Start the laptop wake word listener explicitly — normally done inside
+    # MistyController.run(), but conference mode doesn't call run().  Needed for
+    # both self-wake suppression during playback and auto-advance VAD.
+    if getattr(mc, "USE_LAPTOP_WAKE_WORD", False):
+        try:
+            robot._start_laptop_wake_word()
+            # In conference mode, suppress the normal wake-word-fires-conversation
+            # callback. The listener is only used for its speech monitor (VAD) to
+            # detect when the presenter finishes speaking for auto-advance.
+            if robot._wake_word_listener is not None:
+                robot._wake_word_listener.on_wake_word = lambda: None
+        except Exception as exc:
+            logger.warning("Could not start laptop wake word listener: %s", exc)
+
     def play_fn(asset: CueAsset):
-        with open(asset.wav_path, "rb") as fh:
-            wav_bytes = fh.read()
-        filename = asset.misty_filename or os.path.basename(asset.wav_path)
-        duration = robot.upload_and_play_audio(wav_bytes, filename)
-        time.sleep(max(0.0, float(duration or 0.0)))
-        return duration
+        # Pause wake word during playback to prevent self-wake from Misty's speaker
+        listener = getattr(robot, "_wake_word_listener", None)
+        if listener is not None:
+            listener.pause()
+        try:
+            with open(asset.wav_path, "rb") as fh:
+                wav_bytes = fh.read()
+            filename = asset.misty_filename or os.path.basename(asset.wav_path)
+            duration = robot.upload_and_play_audio(wav_bytes, filename)
+            time.sleep(max(0.0, float(duration or 0.0)))
+            return duration
+        finally:
+            if listener is not None:
+                listener.resume()
 
     tts_fallback_backend = http_tts(ORCHESTRATION_URL)
 
     def tts_fallback_fn(text: str):
-        wav_bytes = tts_fallback_backend(text)
-        duration = robot.upload_and_play_audio(wav_bytes, "conference_fallback.wav")
-        time.sleep(max(0.0, float(duration or 0.0)))
+        # Pause wake word during fallback playback to prevent self-wake
+        listener = getattr(robot, "_wake_word_listener", None)
+        if listener is not None:
+            listener.pause()
+        try:
+            wav_bytes = tts_fallback_backend(text)
+            duration = robot.upload_and_play_audio(wav_bytes, "conference_fallback.wav")
+            time.sleep(max(0.0, float(duration or 0.0)))
+        finally:
+            if listener is not None:
+                listener.resume()
 
     def _release_audio():
         # First safe-shutdown step: release the mic/audio stack so keyphrase and
