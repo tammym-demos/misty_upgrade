@@ -268,6 +268,11 @@ class WakeWordListener:
         self._detection_streaks.clear()
         logger.debug("Wake word listener paused (self-wake prevention)")
 
+    @property
+    def speech_detected(self) -> bool:
+        """Whether the active speech monitor has detected speech."""
+        return self._speech_detected
+
     def resume(self):
         """Resume detection after conversation ends."""
         self._paused = False

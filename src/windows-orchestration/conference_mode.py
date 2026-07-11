@@ -899,7 +899,7 @@ def _build_presenter_wait(listener, max_wait_s, silence_s):  # pragma: no cover 
 
         def _on_speech_end(*a, **k) -> None:
             result["presenter_finished"] = bool(
-                getattr(listener, "_speech_detected", False)
+                getattr(listener, "speech_detected", False)
             )
             done.set()
 

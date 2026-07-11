@@ -442,7 +442,7 @@ def test_presenter_wait_passes_silence_setting_and_yields_on_timeout():
 
 def test_presenter_wait_returns_true_only_when_monitor_signals_speech_end():
     class Listener:
-        _speech_detected = True
+        speech_detected = True
 
         def start_speech_monitor(self, **kwargs):
             kwargs["on_speech_end"]()
@@ -456,7 +456,7 @@ def test_presenter_wait_returns_true_only_when_monitor_signals_speech_end():
 
 def test_presenter_wait_does_not_advance_on_no_speech_timeout():
     class Listener:
-        _speech_detected = False
+        speech_detected = False
 
         def start_speech_monitor(self, **kwargs):
             kwargs["on_speech_end"]()
