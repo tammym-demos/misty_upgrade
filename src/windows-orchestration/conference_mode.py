@@ -871,6 +871,19 @@ class ConferenceController:
             return None
         asset = self.manifest.cues[index]
         resolvable = bool(asset.wav_path) and _wav_file_duration(asset.wav_path) > 0
+
+        # Set the talking face BEFORE audio starts so Misty doesn't flash the
+        # system default face when audio playback begins.
+        if self._face_fn:
+            self._face_fn(self._talking_face)
+
+        if self._movement_fn is not None and asset.movements:
+            resolved = deepcopy(asset.movements)
+            for m in resolved:
+                if m.get("face") == "__talking__":
+                    m["face"] = self._talking_face
+            self._movement_fn(resolved)
+
         if not resolvable:
             if self.use_tts_fallback and self._tts_fallback_fn is not None:
                 logger.warning(
@@ -887,17 +900,6 @@ class ConferenceController:
             # Scripted playback path: predetermined audio only, never the LLM.
             duration = float(self._play_fn(asset) or 0.0)
 
-        # Always show the animated talking face during audio playback.
-        if self._face_fn:
-            self._face_fn(self._talking_face)
-
-        if self._movement_fn is not None and asset.movements:
-            resolved = deepcopy(asset.movements)
-            # Resolve __talking__ sentinel to the configured talking face
-            for m in resolved:
-                if m.get("face") == "__talking__":
-                    m["face"] = self._talking_face
-            self._movement_fn(resolved)
         self.play_count += 1
         self._last = index
         self._cursor = index + 1
