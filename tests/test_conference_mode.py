@@ -310,6 +310,19 @@ def test_disabled_controller_is_a_noop(tmp_path):
     assert recorder.played == []
 
 
+def test_disable_disarms_until_start_is_called_again(tmp_path):
+    controller, recorder, _ = build_ready_controller(tmp_path)
+    controller.start()
+    controller.disable()
+    controller.enable()
+
+    assert controller.status is ConferenceStatus.IDLE
+    assert controller.play_next() is None
+    assert recorder.played == []
+    assert controller.start() is True
+    assert controller.play_next().cue_id == "slide01-misty01"
+
+
 def test_playback_requires_explicit_start(tmp_path):
     # Enabled but never armed: IDLE is inert until start() is called.
     controller, recorder, _ = build_ready_controller(tmp_path)

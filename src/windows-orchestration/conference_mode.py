@@ -624,6 +624,8 @@ class ConferenceController:
 
     def disable(self) -> None:
         self.enabled = False
+        if self.status != ConferenceStatus.STOPPED:
+            self.status = ConferenceStatus.IDLE
 
     def start(self) -> bool:
         """Arm the runner. Returns False when Conference Mode is disabled."""
