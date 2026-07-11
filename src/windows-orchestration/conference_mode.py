@@ -817,7 +817,6 @@ class ConferenceController:
             return None
         asset = self.manifest.cues[index]
         resolvable = bool(asset.wav_path) and _wav_file_duration(asset.wav_path) > 0
-        duration = 0.0
         if not resolvable:
             if self.use_tts_fallback and self._tts_fallback_fn is not None:
                 logger.warning(
