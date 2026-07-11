@@ -32,6 +32,7 @@ from conference_mode import (
     ConferenceAssetMissing,
     ConferenceController,
     ConferenceManifest,
+    ConferencePreparationError,
     ConferenceStatus,
     ScriptParseError,
     ShutdownHooks,
@@ -263,6 +264,13 @@ def test_prepare_regenerates_corrupted_cached_wav(tmp_path):
     assert tts.calls == ["Hello humans. I am awake."]
     assert manifest.cues[0].duration_s > 0
     assert verify_manifest(manifest) == []
+
+
+def test_prepare_rejects_unplayable_tts_audio(tmp_path):
+    script = parse_script(FIXTURE, is_text=True)
+
+    with pytest.raises(ConferencePreparationError, match="not a playable WAV"):
+        prepare_assets(script, str(tmp_path), lambda text: b"not a wav")
 
 
 def test_prepare_prefers_recorded_override(tmp_path):

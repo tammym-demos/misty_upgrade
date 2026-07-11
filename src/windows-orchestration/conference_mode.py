@@ -482,6 +482,11 @@ def prepare_assets(
             raise ConferencePreparationError(
                 f"Prepared audio for cue {cue.cue_id!r} is unreadable: {exc}"
             ) from exc
+        if duration <= 0:
+            raise ConferencePreparationError(
+                f"Prepared audio for cue {cue.cue_id!r} is not a playable WAV: "
+                f"{final_path}"
+            )
 
         assets.append(
             CueAsset(
