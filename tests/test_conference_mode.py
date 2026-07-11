@@ -879,8 +879,12 @@ def test_talking_face_always_applied_during_playback(tmp_path):
     controller.start()
     controller.play_next()  # slide01-misty01 has [wave][face:happy]
     controller.play_next()  # slide02-misty01 has no annotations
-    # Both cues get the talking face unconditionally
-    assert face_calls == ["face_talking_happy.gif", "face_talking_happy.gif"]
+    # Both cues get the talking face twice (before + after play) to minimize
+    # the firmware face-reset flash during audio start.
+    assert face_calls == [
+        "face_talking_happy.gif", "face_talking_happy.gif",  # cue 1: before + after
+        "face_talking_happy.gif", "face_talking_happy.gif",  # cue 2: before + after
+    ]
 
 
 def test_glance_fn_called_during_auto_advance(tmp_path):

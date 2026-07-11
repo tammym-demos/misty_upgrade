@@ -880,6 +880,10 @@ class ConferenceController:
                     m["face"] = self._talking_face
             self._movement_fn(resolved)
 
+        # Set talking face BEFORE audio — visible during upload/buffering.
+        if self._face_fn:
+            self._face_fn(self._talking_face)
+
         if not resolvable:
             if self.use_tts_fallback and self._tts_fallback_fn is not None:
                 logger.warning(
@@ -896,8 +900,8 @@ class ConferenceController:
             # Scripted playback path: predetermined audio only, never the LLM.
             duration = float(self._play_fn(asset) or 0.0)
 
-        # Set talking face AFTER play starts — Misty's firmware resets the face
-        # when audio playback begins, so we must override it immediately after.
+        # Re-set talking face AFTER play starts — Misty's firmware resets the
+        # display when audio playback begins, so override again immediately.
         if self._face_fn:
             self._face_fn(self._talking_face)
 
