@@ -97,6 +97,38 @@ python conference_mode.py run
 `dry-run` now prints any planned movement annotations beside each cue so you can
 verify both speech and choreography before rehearsal.
 
+### Quick-start with `npx` CLI
+
+The `npx .` wrapper provides a shorter entry point from the repository root:
+
+```powershell
+npx . conference dry-run                        # Preview cue plan
+npx . conference prepare                        # Generate/reuse TTS audio
+npx . conference verify                         # Confirm showtime-ready
+npx . conference run                            # Live runner (auto-advance)
+npx . conference run --no-auto                  # Manual-only mode
+npx . conference dry-run --script talks/my-talk.md   # Custom script
+```
+
+The default talk script is `talks/20260710-2.md`. Override with `--script`.
+
+### Live controls (during `run`)
+
+| Key | Action |
+|---|---|
+| `n` / Enter | Play next cue |
+| `r` | Replay current cue |
+| `p` | Go back one cue |
+| Space | Pause / resume auto-advance |
+| `a` | Start auto-advance (listen for presenter silence) |
+| `s` / `q` | Stop and return Misty to rest state |
+
+**Notes:**
+- `npx . conference run` automatically stops the main controller service to free the laptop mic.
+- Auto-advance uses the laptop mic (configured via `LAPTOP_MIC_DEVICE`) to detect when the presenter finishes speaking (default: 2 s trailing silence).
+- Generated audio and the manifest are cached in `data/conference/`. Re-running `prepare` reuses unchanged cues.
+- Set `CONFERENCE_MODE_ENABLED=true` in `.env` to enable live mode.
+
 ### Preparation and the manifest
 
 `prepare` resolves each cue's audio in this order:
