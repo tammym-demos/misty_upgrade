@@ -152,6 +152,19 @@ def test_parse_captures_slide_and_presenter_context():
     assert script.cues[2].preceding_presenter == "Keep going."
 
 
+def test_parse_does_not_bleed_presenter_context_across_slides():
+    text = """\
+### **Slide 1: First**
+**[You]:** Closing line from slide one.
+### **Slide 2: Second**
+**[Misty]:** First line on slide two.
+"""
+
+    script = parse_script(text, is_text=True)
+
+    assert script.cues[0].preceding_presenter == ""
+
+
 def test_parse_empty_script_raises():
     with pytest.raises(ScriptParseError):
         parse_script("# Nothing here\n\nJust prose.\n", is_text=True)
@@ -172,6 +185,15 @@ def test_parse_real_shipped_script_yields_nine_ordered_cues():
     # Cue IDs are unique and stable.
     ids = [c.cue_id for c in script.cues]
     assert len(ids) == len(set(ids))
+
+
+def test_dry_run_prints_no_slide_cues_with_slide_zero():
+    script = parse_script("**[Misty]:** Before any slide.", is_text=True)
+    stream = io.StringIO()
+
+    cm._print_cue_plan(script, stream=stream)
+
+    assert "(Slide 00: (no slide))" in stream.getvalue()
 
 
 # ---------------------------------------------------------------------------

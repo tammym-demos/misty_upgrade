@@ -323,6 +323,7 @@ def parse_script(source: str, *, is_text: bool = False) -> ConferenceScript:
             slide_seq += 1
             slide_label, slide_title = _split_slide_label(slide_match.group("label"))
             misty_in_slide = 0
+            last_presenter = ""
             continue
 
         speaker_match = _SPEAKER_RE.match(line)
@@ -830,9 +831,10 @@ def _print_cue_plan(script: ConferenceScript, stream=sys.stdout) -> None:
     print("-" * 72, file=stream)
     for cue in script.cues:
         title = cue.slide_title or cue.slide_label or "(no slide)"
+        label = cue.slide_label or f"{cue.slide_seq:02d}"
         preview = cue.text if len(cue.text) <= 60 else cue.text[:57] + "..."
         print(
-            f"[{cue.order:02d}] {cue.cue_id}  (Slide {cue.slide_label}: {title})",
+            f"[{cue.order:02d}] {cue.cue_id}  (Slide {label}: {title})",
             file=stream,
         )
         print(f"      Misty: {preview}", file=stream)
