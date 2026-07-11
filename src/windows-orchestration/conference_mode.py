@@ -872,11 +872,7 @@ class ConferenceController:
         asset = self.manifest.cues[index]
         resolvable = bool(asset.wav_path) and _wav_file_duration(asset.wav_path) > 0
 
-        # Set the talking face BEFORE audio starts so Misty doesn't flash the
-        # system default face when audio playback begins.
-        if self._face_fn:
-            self._face_fn(self._talking_face)
-
+        # Apply gesture movements (arms/head) before audio starts
         if self._movement_fn is not None and asset.movements:
             resolved = deepcopy(asset.movements)
             for m in resolved:
@@ -899,6 +895,11 @@ class ConferenceController:
         else:
             # Scripted playback path: predetermined audio only, never the LLM.
             duration = float(self._play_fn(asset) or 0.0)
+
+        # Set talking face AFTER play starts — Misty's firmware resets the face
+        # when audio playback begins, so we must override it immediately after.
+        if self._face_fn:
+            self._face_fn(self._talking_face)
 
         self.play_count += 1
         self._last = index
