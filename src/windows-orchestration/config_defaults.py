@@ -231,3 +231,6 @@ CONFERENCE_PRESENTER_MAX_WAIT_S: float = 45.0
 # Explicit fallback to live TTS for a scripted cue whose predetermined audio is
 # missing. Off by default so showtime uses prepared audio unless enabled.
 CONFERENCE_TTS_FALLBACK: bool = False
+# Variable substitution for talk scripts (comma-separated key=value pairs).
+# Example: CONFERENCE_VARS=customer=Contoso,event=Hackathon
+CONFERENCE_VARS: str = ""

@@ -46,6 +46,35 @@ Every `**[Misty]:**` line becomes a **cue** with a stable, deterministic ID
 headers, 1-based) and `MM` is the Misty-line index within that slide (1-based).
 Misty lines before any slide header get slide sequence `00`.
 
+### Variable substitution
+
+Talk scripts can include `{{variable}}` placeholders. Conference Mode resolves
+them during `dry-run` and `prepare` from `CONFERENCE_VARS`, a comma-separated
+`key=value` environment variable such as:
+
+```powershell
+$env:CONFERENCE_VARS="customer=Contoso,event=Hackathon"
+```
+
+If any placeholder is unresolved, parsing fails fast and lists the missing keys.
+
+### Gesture / annotation tags
+
+`**[Misty]:**` lines can include inline bracket tags. Tags are removed from the
+spoken text before TTS/asset generation and stored in the manifest as planned
+`movements`.
+
+| Tag | Effect |
+|---|---|
+| `[wave]` | Left-arm raise, slight head tilt, happy face |
+| `[shrug]` | Both arms slightly up |
+| `[nod]` | Head pitch down/up motion |
+| `[excited]` | Both arms up, happy face |
+| `[thinking]` | Slight head roll, thoughtful face |
+| `[face:X]` | Set face image/alias (for example `happy`) |
+| `[arms:L,R]` | Set left/right arm positions in degrees |
+| `[head:pitch,roll,yaw]` | Set head pose in degrees |
+
 ## Workflow
 
 ```powershell
@@ -65,6 +94,9 @@ python conference_mode.py verify
 python conference_mode.py run
 ```
 
+`dry-run` now prints any planned movement annotations beside each cue so you can
+verify both speech and choreography before rehearsal.
+
 ### Preparation and the manifest
 
 `prepare` resolves each cue's audio in this order:
@@ -78,7 +110,8 @@ python conference_mode.py run
 It writes `conference_manifest.json` mapping each cue ID to its text, asset
 source (`generated`/`recorded`), local WAV path, duration, text hash, and the
 optional on-Misty filename (`conf_{cue_id}.wav`) used when audio is pre-uploaded
-to the robot.
+to the robot. Each cue also carries an optional `movements` list describing the
+planned gesture/face/head actions for runtime playback.
 
 ### Control surface
 

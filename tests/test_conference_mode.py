@@ -54,7 +54,7 @@ FIXTURE = """\
 
 **[You]:** Welcome everyone to the show.[cite: 1]
 
-**[Misty]:** Hello   humans.[cite: 1] I am awake.[cite: 1, 2]
+**[Misty]:** Hello   humans.[cite: 1] I am awake.[cite: 1, 2] [wave] [face:happy]
 
 ---
 
@@ -115,6 +115,7 @@ def build_ready_controller(tmp_path, **kwargs):
     script = parse_script(FIXTURE, is_text=True)
     manifest = prepare_assets(script, str(tmp_path / "assets"), FakeTts())
     recorder = PlayRecorder()
+    kwargs.setdefault("sleep_fn", lambda seconds: None)
     controller = ConferenceController(manifest, recorder, enabled=True, **kwargs)
     return controller, recorder, manifest
 
@@ -171,9 +172,10 @@ def test_parse_empty_script_raises():
         parse_script("# Nothing here\n\nJust prose.\n", is_text=True)
 
 
-def test_parse_real_shipped_script_yields_nine_ordered_cues():
+def test_parse_real_shipped_script_yields_nine_ordered_cues(monkeypatch):
     if not os.path.isfile(REAL_SCRIPT):
         pytest.skip("shipped talks/20260710-2.md not present")
+    monkeypatch.setattr(cm, "CONFERENCE_VARS", "customer=Rockwell,event=Hackathon")
     script = parse_script(REAL_SCRIPT)
     assert len(script.cues) == 9
     assert [c.order for c in script.cues] == list(range(1, 10))
@@ -195,6 +197,49 @@ def test_dry_run_prints_no_slide_cues_with_slide_zero():
     cm._print_cue_plan(script, stream=stream)
 
     assert "(Slide 00: (no slide))" in stream.getvalue()
+
+
+def test_resolve_variables_basic():
+    assert (
+        cm.resolve_variables(
+            "Hello, {{customer}} at {{event}}!",
+            {"customer": "Contoso", "event": "Hackathon"},
+        )
+        == "Hello, Contoso at Hackathon!"
+    )
+
+
+def test_resolve_variables_missing_raises():
+    with pytest.raises(ScriptParseError, match="customer, event"):
+        cm.resolve_variables("Hello, {{customer}} at {{event}}!", {})
+
+
+def test_parse_annotations_extracts_gestures():
+    spoken, movements = cm.parse_annotations(
+        "Hello there. [wave] [head:10,5,0] [face:happy]"
+    )
+
+    assert spoken == "Hello there."
+    assert movements == [
+        cm.GESTURE_LIBRARY["wave"],
+        {"head": [10.0, 5.0, 0.0]},
+        {"face": "e_Joy.jpg"},
+    ]
+
+
+def test_parse_annotations_strips_from_text():
+    script = parse_script(
+        "**[Misty]:** Ready to go. [thinking] [arms:-30,0]",
+        is_text=True,
+    )
+
+    assert script.cues[0].text == "Ready to go."
+    assert "[" not in script.cues[0].text
+
+
+def test_gesture_library_lookup():
+    _, movements = cm.parse_annotations("Thinking... [thinking]")
+    assert movements == [cm.GESTURE_LIBRARY["thinking"]]
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +343,17 @@ def test_manifest_round_trip(tmp_path):
     assert loaded.cues[0].wav_path == manifest.cues[0].wav_path
 
 
+def test_movements_in_manifest(tmp_path):
+    script = parse_script(FIXTURE, is_text=True)
+    manifest = prepare_assets(script, str(tmp_path / "a"), FakeTts())
+
+    assert manifest.cues[0].movements == [
+        cm.GESTURE_LIBRARY["wave"],
+        {"face": "e_Joy.jpg"},
+    ]
+    assert manifest.cues[0].to_dict()["movements"] == manifest.cues[0].movements
+
+
 def test_verify_manifest_flags_missing_and_unreadable(tmp_path):
     script = parse_script(FIXTURE, is_text=True)
     manifest = prepare_assets(script, str(tmp_path), FakeTts())
@@ -336,6 +392,17 @@ def test_cmd_verify_honors_tts_fallback_readiness(tmp_path, monkeypatch):
 def test_wav_duration_roundtrip():
     assert wav_duration(make_wav_bytes(0.5, rate=8000)) == pytest.approx(0.5, abs=0.02)
     assert wav_duration(b"not a wav") == 0.0
+
+
+def test_dry_run_shows_movements():
+    script = parse_script(FIXTURE, is_text=True)
+    stream = io.StringIO()
+
+    cm._print_cue_plan(script, stream=stream)
+
+    output = stream.getvalue()
+    assert "Movements:" in output
+    assert "face=e_Joy.jpg" in output
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +617,33 @@ def test_missing_asset_with_explicit_fallback_uses_tts(tmp_path):
     assert controller.tts_fallback_calls == 1
     assert len(fallback_calls) == 1
     assert recorder.played == []  # TTS fallback path, not predetermined playback
+
+
+def test_controller_calls_movement_fn(tmp_path):
+    calls = []
+    controller, _, _ = build_ready_controller(
+        tmp_path,
+        movement_fn=lambda movements: calls.append(movements),
+    )
+
+    controller.start()
+    controller.play_next()
+
+    assert calls == [[cm.GESTURE_LIBRARY["wave"], {"face": "e_Joy.jpg"}]]
+
+
+def test_controller_restores_neutral(tmp_path):
+    calls = []
+    controller, _, _ = build_ready_controller(
+        tmp_path,
+        neutral_fn=lambda: calls.append("neutral"),
+    )
+
+    controller.start()
+    controller.play_next()
+    controller.play_next()
+
+    assert calls == ["neutral", "neutral"]
 
 
 def test_live_controller_wires_tts_fallback_flag_and_releases_listener(tmp_path, monkeypatch):
