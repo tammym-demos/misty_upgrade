@@ -118,6 +118,7 @@ class WakeWordListener:
         self._last_speech_time = 0.0
         self._speech_monitor_min_s = SPEECH_MIN_DURATION_S
         self._speech_monitor_max_s = SPEECH_MAX_DURATION_S
+        self._speech_monitor_silence_s = SPEECH_SILENCE_DURATION_S
         self._speech_rms_threshold = SPEECH_RMS_THRESHOLD  # dynamic, set by calibration
         self._calibration_samples: list[int] = []  # RMS samples during calibration
         self._calibration_done = False
@@ -267,6 +268,11 @@ class WakeWordListener:
         self._detection_streaks.clear()
         logger.debug("Wake word listener paused (self-wake prevention)")
 
+    @property
+    def speech_detected(self) -> bool:
+        """Whether the active speech monitor has detected speech."""
+        return self._speech_detected
+
     def resume(self):
         """Resume detection after conversation ends."""
         self._paused = False
@@ -283,6 +289,7 @@ class WakeWordListener:
         on_speech_end: callable,
         min_duration: float = SPEECH_MIN_DURATION_S,
         max_duration: float = SPEECH_MAX_DURATION_S,
+        silence_duration: float = SPEECH_SILENCE_DURATION_S,
     ):
         """Begin monitoring laptop mic for speech end during Misty recording.
         
@@ -294,6 +301,7 @@ class WakeWordListener:
             on_speech_end: Callback fired when speech ends (silence detected)
             min_duration: Minimum monitoring time before allowing early stop
             max_duration: Maximum monitoring time (hard cap)
+            silence_duration: Trailing silence required after speech
         """
         self._speech_monitor_callback = on_speech_end
         self._speech_monitor_start_time = time.time()
@@ -301,6 +309,7 @@ class WakeWordListener:
         self._last_speech_time = 0.0
         self._speech_monitor_min_s = min_duration
         self._speech_monitor_max_s = max_duration
+        self._speech_monitor_silence_s = silence_duration
         self._calibration_samples = []
         self._calibration_done = False
         self._speech_rms_threshold = SPEECH_RMS_THRESHOLD  # reset to default until calibrated
@@ -317,7 +326,8 @@ class WakeWordListener:
         self._pause_event.set()
         logger.info(
             f"Speech monitor started (min={min_duration}s, max={max_duration}s, "
-            f"calibrating noise floor..., drained {drained} stale frames)"
+            f"silence={silence_duration}s, calibrating noise floor..., "
+            f"drained {drained} stale frames)"
         )
 
     def stop_speech_monitor(self):
@@ -601,7 +611,7 @@ class WakeWordListener:
         # Check silence after speech — end of utterance
         if self._speech_detected and not is_speech:
             silence_duration = now - self._last_speech_time
-            if silence_duration >= SPEECH_SILENCE_DURATION_S and elapsed >= self._speech_monitor_min_s:
+            if silence_duration >= self._speech_monitor_silence_s and elapsed >= self._speech_monitor_min_s:
                 logger.info(
                     f"Speech monitor: end of utterance detected "
                     f"(silence={silence_duration:.1f}s, total={elapsed:.1f}s)"
