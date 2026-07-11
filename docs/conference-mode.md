@@ -85,10 +85,11 @@ gesture in the chain wins on conflicting keys (e.g., both set `face`).
 
 #### Auto-talking face
 
-When a cue has no `[face:...]` annotation, Misty automatically shows the
-configured talking face (`CONFERENCE_TALKING_FACE`, default
-`face_talking_happy.gif`) during speech. This ensures Misty appears animated
-while speaking even without explicit annotations.
+Misty always shows the configured talking face (`CONFERENCE_TALKING_FACE`,
+default `face_talking_happy.gif`) during audio playback — unconditionally, on
+every cue. Gesture annotations for arms, head, and motion still apply alongside
+the talking face. This means you never need to add `[talking]` manually; it
+happens automatically for every cue at runtime.
 
 #### Presenter glance
 
