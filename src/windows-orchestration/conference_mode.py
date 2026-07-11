@@ -1287,6 +1287,8 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
                 )
 
     def neutral_fn() -> None:
+        if hasattr(robot, "show_face"):
+            robot.show_face("face_idle.gif")
         if hasattr(robot, "move_arms"):
             robot.move_arms(left=NEUTRAL_ARMS[0], right=NEUTRAL_ARMS[1], velocity=40)
         if hasattr(robot, "move_head"):
