@@ -1121,15 +1121,20 @@ def _cmd_verify(args) -> int:
     return 0
 
 
-def _build_presenter_wait(listener, max_wait_s, silence_s):  # pragma: no cover - live audio
+def _build_presenter_wait(listener, max_wait_s, silence_s, ambient_fn=None):  # pragma: no cover - live audio
     """Wrap the wake-word speech monitor into a blocking presenter-wait.
 
     Returns a callable that starts RMS-based end-of-speech detection on the
     laptop mic, blocks until the presenter finishes speaking, and returns
     False when the stage-safety timeout elapses so auto-advance yields to manual
     control instead of treating a hard cap as end-of-speech.
+
+    If ``ambient_fn`` is provided, it is called every ~3-5 seconds while waiting
+    to produce subtle idle motion (head sweeps, arm shifts) so Misty appears
+    engaged while the presenter speaks.
     """
     import threading
+    import random as _random
 
     def _wait() -> bool:
         done = threading.Event()
@@ -1148,7 +1153,18 @@ def _build_presenter_wait(listener, max_wait_s, silence_s):  # pragma: no cover 
             silence_duration=silence_s,
         )
         try:
-            return done.wait(timeout=max_wait_s) and result["presenter_finished"]
+            if ambient_fn is None:
+                return done.wait(timeout=max_wait_s) and result["presenter_finished"]
+            # Run ambient motion loop while waiting for presenter to finish
+            elapsed = 0.0
+            while elapsed < max_wait_s:
+                interval = _random.uniform(3.0, 5.0)
+                if done.wait(timeout=interval):
+                    break
+                elapsed += interval
+                if not done.is_set():
+                    ambient_fn()
+            return done.is_set() and result["presenter_finished"]
         finally:
             listener.stop_speech_monitor()
 
@@ -1236,7 +1252,48 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
                 velocity=30,
             )
         if hasattr(robot, "show_face"):
-            robot.show_face("e_DefaultContent.jpg")
+            robot.show_face("face_idle.gif")
+
+    def ambient_fn() -> None:
+        """Subtle random idle motion while the presenter speaks.
+
+        Alternates between looking at the presenter and sweeping back toward
+        the audience, with small random variation so she looks alive.
+        """
+        import random as _rand
+
+        choice = _rand.random()
+        if choice < 0.4:
+            # Look toward presenter (up and to presenter side)
+            if hasattr(robot, "move_head"):
+                robot.move_head(
+                    pitch=_clamp(PRESENTER_GLANCE_PITCH + _rand.uniform(-5, 5),
+                                 HEAD_PITCH_MIN, HEAD_PITCH_MAX),
+                    roll=_clamp(_rand.uniform(-5, 5), HEAD_ROLL_MIN, HEAD_ROLL_MAX),
+                    yaw=_clamp(_presenter_yaw + _rand.uniform(-10, 10),
+                               HEAD_YAW_MIN, HEAD_YAW_MAX),
+                    velocity=_rand.randint(20, 35),
+                )
+        elif choice < 0.75:
+            # Sweep toward audience (center or slight opposite of presenter)
+            if hasattr(robot, "move_head"):
+                robot.move_head(
+                    pitch=_clamp(NEUTRAL_HEAD[0] + _rand.uniform(-5, 5),
+                                 HEAD_PITCH_MIN, HEAD_PITCH_MAX),
+                    roll=_clamp(_rand.uniform(-3, 3), HEAD_ROLL_MIN, HEAD_ROLL_MAX),
+                    yaw=_clamp(_rand.uniform(-15, 15), HEAD_YAW_MIN, HEAD_YAW_MAX),
+                    velocity=_rand.randint(20, 35),
+                )
+        else:
+            # Occasional small arm shift (subtle "listening" fidget)
+            if hasattr(robot, "move_arms"):
+                robot.move_arms(
+                    left=_clamp(NEUTRAL_ARMS[0] + _rand.uniform(-10, 5),
+                                ARM_MIN, ARM_MAX),
+                    right=_clamp(NEUTRAL_ARMS[1] + _rand.uniform(-10, 5),
+                                 ARM_MIN, ARM_MAX),
+                    velocity=25,
+                )
 
     def movement_fn(movements: list[dict]) -> None:
         for movement in movements:
@@ -1332,7 +1389,8 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
                 "--no-auto and use manual controls."
             )
         wait_fn = _build_presenter_wait(
-            listener, CONFERENCE_PRESENTER_MAX_WAIT_S, CONFERENCE_PRESENTER_SILENCE_S
+            listener, CONFERENCE_PRESENTER_MAX_WAIT_S, CONFERENCE_PRESENTER_SILENCE_S,
+            ambient_fn=ambient_fn,
         )
 
     return ConferenceController(
