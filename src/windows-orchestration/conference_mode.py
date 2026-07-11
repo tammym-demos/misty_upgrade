@@ -505,9 +505,11 @@ def prepare_assets(
 
 def _wav_file_duration(path: str) -> float:
     try:
-        with open(path, "rb") as fh:
-            return wav_duration(fh.read())
-    except OSError:
+        with wave.open(path, "rb") as wf:
+            frames = wf.getnframes()
+            rate = wf.getframerate()
+            return frames / rate if rate > 0 else 0.0
+    except (OSError, wave.Error):
         return 0.0
 
 
@@ -933,8 +935,10 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         time.sleep(max(0.0, float(duration or 0.0)))
         return duration
 
+    tts_fallback_backend = http_tts(ORCHESTRATION_URL)
+
     def tts_fallback_fn(text: str):
-        wav_bytes = http_tts(ORCHESTRATION_URL)(text)
+        wav_bytes = tts_fallback_backend(text)
         duration = robot.upload_and_play_audio(wav_bytes, "conference_fallback.wav")
         time.sleep(max(0.0, float(duration or 0.0)))
 
