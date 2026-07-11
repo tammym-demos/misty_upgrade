@@ -869,33 +869,18 @@ def test_stopped_controller_stops_playback(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_auto_talking_face_applied_when_no_face_annotation(tmp_path):
-    """When a cue has no [face:...] annotation, the controller calls face_fn
-    with the configured talking face before playback."""
+def test_talking_face_always_applied_during_playback(tmp_path):
+    """The talking face is always shown during playback, even with face annotations."""
     face_calls = []
     controller, _, _ = build_ready_controller(
         tmp_path,
         face_fn=lambda f: face_calls.append(f),
     )
     controller.start()
-    # slide02-misty01 has no annotations -> auto talking face
-    controller.play_next()  # slide01-misty01 has [wave] which has face
+    controller.play_next()  # slide01-misty01 has [wave][face:happy]
     controller.play_next()  # slide02-misty01 has no annotations
-    # First cue has face annotation (wave includes face), so no auto face
-    # Second cue has no face annotation, so auto face is applied
-    assert face_calls == ["face_talking_happy.gif"]
-
-
-def test_auto_talking_face_not_applied_when_face_annotation_present(tmp_path):
-    """When a cue has a [face:...] annotation, face_fn is not called."""
-    face_calls = []
-    controller, _, _ = build_ready_controller(
-        tmp_path,
-        face_fn=lambda f: face_calls.append(f),
-    )
-    controller.start()
-    controller.play_next()  # slide01-misty01 has [wave][face:happy] -> has face
-    assert face_calls == []
+    # Both cues get the talking face unconditionally
+    assert face_calls == ["face_talking_happy.gif", "face_talking_happy.gif"]
 
 
 def test_glance_fn_called_during_auto_advance(tmp_path):

@@ -885,10 +885,8 @@ class ConferenceController:
             # Scripted playback path: predetermined audio only, never the LLM.
             duration = float(self._play_fn(asset) or 0.0)
 
-        # Auto-apply talking face during speech unless a [face:...] annotation
-        # already sets one. The __talking__ sentinel is resolved to the configured
-        # talking face GIF at runtime.
-        if self._face_fn and not self._has_face_annotation(asset.movements):
+        # Always show the animated talking face during audio playback.
+        if self._face_fn:
             self._face_fn(self._talking_face)
 
         if self._movement_fn is not None and asset.movements:
