@@ -139,6 +139,10 @@ class WakeWordListener:
         # sounddevice stream
         self._stream = None
 
+        # Mic health monitoring — detect dead stream and auto-recover
+        self._mic_dead_since: float = 0.0  # timestamp when mic first went dead
+        self._mic_recovery_count: int = 0  # number of auto-recoveries
+
     def _init_model(self) -> bool:
         """Initialize the openWakeWord model."""
         try:
@@ -411,6 +415,47 @@ class WakeWordListener:
     def is_paused(self) -> bool:
         return self._paused
 
+    def _reopen_mic_stream(self):
+        """Close and re-open the audio stream to recover from a dead mic."""
+        import sounddevice as sd
+        self._mic_recovery_count += 1
+        logger.warning(
+            f"Mic health: stream appears dead — reopening "
+            f"(recovery #{self._mic_recovery_count})"
+        )
+        # Close existing stream
+        if self._stream is not None:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception as e:
+                logger.debug(f"Error closing dead stream: {e}")
+            self._stream = None
+
+        time.sleep(0.5)
+
+        # Re-open
+        try:
+            self._stream = sd.RawInputStream(
+                samplerate=SAMPLE_RATE,
+                blocksize=BLOCK_SIZE,
+                dtype="int16",
+                channels=1,
+                device=LAPTOP_MIC_DEVICE,
+                callback=self._audio_callback,
+            )
+            self._stream.start()
+            self._mic_dead_since = 0.0
+            # Drain stale frames from queue
+            while not self._audio_queue.empty():
+                try:
+                    self._audio_queue.get_nowait()
+                except queue.Empty:
+                    break
+            logger.info("Mic health: stream reopened successfully")
+        except Exception as e:
+            logger.error(f"Mic health: failed to reopen stream: {e}")
+
     def get_health(self) -> dict:
         """Return health metrics for diagnostics."""
         uptime = time.time() - self._start_time if self._start_time else 0
@@ -425,6 +470,7 @@ class WakeWordListener:
             "threshold": self.threshold,
             "trigger_frames": self.trigger_frames,
             "source": "laptop_mic",
+            "mic_recoveries": self._mic_recovery_count,
             "custom_model_path": self.custom_model_path or None,
             "model_source": "custom" if self.custom_model_path else "missing_config",
         }
@@ -496,6 +542,16 @@ class WakeWordListener:
                 self._recent_rms.append(frame_rms)
                 if len(self._recent_rms) > 20:
                     self._recent_rms = self._recent_rms[-10:]
+
+                # Mic health: detect dead stream (all-zero audio)
+                if frame_rms < 3:
+                    if self._mic_dead_since == 0.0:
+                        self._mic_dead_since = time.time()
+                    elif (time.time() - self._mic_dead_since) > 10.0:
+                        self._reopen_mic_stream()
+                        continue
+                else:
+                    self._mic_dead_since = 0.0
 
                 # Run openWakeWord inference on ALL frames
                 if self._oww_model and not in_cooldown:
