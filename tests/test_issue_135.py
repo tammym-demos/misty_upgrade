@@ -130,6 +130,33 @@ def test_conference_pause_interrupts_playback_without_advancing(tmp_path):
     assert controller.remaining() == 1
 
 
+def test_conference_resume_wins_manual_playback_cleanup_race(tmp_path):
+    sleeping = threading.Event()
+    release = threading.Event()
+
+    def controlled_sleep(_):
+        sleeping.set()
+        assert release.wait(1)
+
+    controller = cm.ConferenceController(
+        manifest_with_cue(tmp_path),
+        lambda _: 0.01,
+        enabled=True,
+        sleep_fn=controlled_sleep,
+    )
+    controller.start()
+    controller.pause()
+    worker = threading.Thread(target=controller.play_next)
+    worker.start()
+    assert sleeping.wait(1)
+    controller.resume()
+    release.set()
+    worker.join(1)
+
+    assert controller.status == cm.ConferenceStatus.RUNNING
+    assert not controller._interrupt.is_set()
+
+
 def test_uncertain_presenter_match_requires_manual_advance(tmp_path):
     controller = cm.ConferenceController(
         manifest_with_cue(tmp_path, presenter="Expected presenter sentence"),

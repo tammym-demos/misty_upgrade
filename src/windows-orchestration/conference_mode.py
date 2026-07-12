@@ -978,7 +978,7 @@ class ConferenceController:
         try:
             return self._play_index(self._cursor)
         finally:
-            if paused:
+            if paused and self.status == ConferenceStatus.PAUSED:
                 self._interrupt.set()
 
     def replay(self) -> Optional[CueAsset]:
