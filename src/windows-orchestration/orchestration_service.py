@@ -509,6 +509,16 @@ def retrieve_local_context(query: str, limit: int = 4) -> list[str]:
             logger.warning("Configured grounding source is unavailable: %s", path)
     return matches
 
+
+def _normalize_speaker_name(value: str | None) -> str | None:
+    """Accept only short human-name labels produced by the local recognizer."""
+    name = (value or "").strip()
+    if not name or len(name) > 40:
+        return None
+    if not re.fullmatch(r"[A-Za-z][A-Za-z '\-]{0,39}", name):
+        return None
+    return name
+
 # ============================================================================
 # FLASK APP SETUP
 # ============================================================================
@@ -591,7 +601,7 @@ def orchestrate():
         audio_bytes = audio_file.read()
 
         # Optional: speaker name from face recognition (#16)
-        speaker_name = request.form.get("speaker_name", "").strip() or None
+        speaker_name = _normalize_speaker_name(request.form.get("speaker_name"))
 
         # Optional: return WAV bytes inline to save a round trip (#69)
         return_audio_bytes = request.form.get("return_audio_bytes", "").lower() == "true"
@@ -793,7 +803,7 @@ def orchestrate_stream():
     conversation_id = (
         request.form.get("conversation_id", "").strip() or str(uuid.uuid4())
     )
-    speaker_name = request.form.get("speaker_name", "").strip() or None
+    speaker_name = _normalize_speaker_name(request.form.get("speaker_name"))
     state = _conversation_state(conversation_id)
     stream_started = time.time()
 
