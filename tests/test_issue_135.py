@@ -2,7 +2,6 @@ import io
 import os
 import sys
 import threading
-import time
 import types
 import wave
 from unittest import mock

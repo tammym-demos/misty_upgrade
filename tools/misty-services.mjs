@@ -720,6 +720,10 @@ function stopFoundry(state, options) {
 function configuredChatModel(env = {}) {
   const modelId = (env.CHAT_MODEL_ID || DEFAULTS.chatModelId).trim();
   const alias = (env.CHAT_MODEL_ALIAS || modelId.split("-instruct-")[0] || modelId).trim();
+  const safeModelValue = /^[A-Za-z0-9._:+-]{1,200}$/;
+  if (!safeModelValue.test(modelId) || !safeModelValue.test(alias)) {
+    throw new Error("CHAT_MODEL_ID and CHAT_MODEL_ALIAS contain unsupported characters");
+  }
   return { modelId, alias };
 }
 
@@ -744,7 +748,7 @@ function ensureChatModelCached(model) {
     return;
   }
 
-  console.log(`Foundry chat model: downloading ${model.alias} (${model.modelId})`);
+  console.log("Foundry chat model: downloading configured model");
   const result = runInherited("foundry", [
     "model",
     "download",
@@ -764,7 +768,7 @@ function loadChatModel(state, options, env) {
 
   const model = configuredChatModel(env);
   if (chatModelIsLoaded(model)) {
-    console.log(`Foundry chat model: already loaded (${model.alias})`);
+    console.log("Foundry chat model: configured model is already loaded");
     state.chatModel = {
       alias: model.alias,
       modelId: model.modelId,
@@ -775,7 +779,7 @@ function loadChatModel(state, options, env) {
 
   ensureChatModelCached(model);
 
-  console.log(`Foundry chat model: loading ${model.alias}`);
+  console.log("Foundry chat model: loading configured model");
   const result = run("foundry", [
     "model",
     "load",
