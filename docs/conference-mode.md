@@ -186,6 +186,12 @@ planned gesture/face/head actions for runtime playback.
 
 ## Verification
 
+The live runner preflights reachability and battery, uploads all verified WAVs
+with `ImmediatelyApply=false`, and then plays the named assets during the talk.
+Playback and presenter waits run outside the CLI input loop, so pause or stop can
+cancel promptly without advancing the cue cursor. Optional presenter transcript
+matching is conservative: an uncertain match leaves the cue for manual advance.
+
 Cloud-safe verification (no hardware, Foundry, or Windows audio):
 
 ```powershell

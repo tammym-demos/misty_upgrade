@@ -40,10 +40,15 @@ STT_MIN_RMS: float = 0.0005
 STT_MIN_PEAK: float = 0.005
 STT_MIN_AVG_LOGPROB: float = -1.0
 STT_MAX_NO_SPEECH_PROB: float = 0.6
+STT_BEAM_SIZE: int = 1
 
 # LLM prompt-length limits
 MAX_USER_CHARS: int = 400
 MAX_CONTEXT_CHARS: int = 5000
+MAX_CONTEXT_TOKENS: int = 1200
+GROUNDING_SOURCES: str = "../../README.md,../../docs/conference-mode.md"
+STREAMING_ENABLED: bool = True
+STREAMING_FIRST_AUDIO_TARGET_S: float = 5.0
 
 # ---------------------------------------------------------------------------
 # Misty controller (misty_controller.py)
@@ -54,7 +59,7 @@ MISTY_IP: str = "10.0.0.23"
 ORCHESTRATION_URL: str = "http://localhost:5000"
 
 # Audio recording
-RECORDING_DURATION_S: float = 6.0
+RECORDING_DURATION_S: float = 1.25
 
 # Follow-up conversation
 FOLLOWUP_ENABLED: bool = True
@@ -88,6 +93,7 @@ OWW_THRESHOLD: float = 0.85
 # Require the wake model to cross threshold on consecutive audio frames before
 # firing. This suppresses single-frame background false positives.
 OWW_TRIGGER_FRAMES: int = 2
+WAKE_WORD_MIN_RMS: int = 100
 LAPTOP_MIC_DEVICE: str = ""
 
 # Face recognition (issue #16)
@@ -224,7 +230,7 @@ CONFERENCE_MISTY_FILENAME_PREFIX: str = "conf_"
 # available at all times regardless of this setting.
 CONFERENCE_AUTO_ADVANCE: bool = True
 # Seconds of trailing presenter silence that mark end-of-speech for auto-advance.
-CONFERENCE_PRESENTER_SILENCE_S: float = 2.5
+CONFERENCE_PRESENTER_SILENCE_S: float = 1.5
 # Maximum seconds to wait for the presenter to finish before an auto-advance
 # attempt gives up and yields to manual control (stage-safety timeout).
 CONFERENCE_PRESENTER_MAX_WAIT_S: float = 45.0

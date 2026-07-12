@@ -14,14 +14,16 @@ import logging
 import subprocess
 import threading
 import time
+import uuid
 import requests
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Tuple
 
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, Response, request, jsonify, send_file, stream_with_context
 from flask_cors import CORS
 
 import config_defaults  # canonical source for all shared default values (see config_defaults.py)
@@ -53,6 +55,7 @@ STT_MIN_RMS = float(os.getenv("STT_MIN_RMS", str(config_defaults.STT_MIN_RMS)))
 STT_MIN_PEAK = float(os.getenv("STT_MIN_PEAK", str(config_defaults.STT_MIN_PEAK)))
 STT_MIN_AVG_LOGPROB = float(os.getenv("STT_MIN_AVG_LOGPROB", str(config_defaults.STT_MIN_AVG_LOGPROB)))
 STT_MAX_NO_SPEECH_PROB = float(os.getenv("STT_MAX_NO_SPEECH_PROB", str(config_defaults.STT_MAX_NO_SPEECH_PROB)))
+STT_BEAM_SIZE = int(os.getenv("STT_BEAM_SIZE", str(config_defaults.STT_BEAM_SIZE)))
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     (
@@ -240,8 +243,8 @@ _CONTINUATION_PATTERN = re.compile(
 # Per-mode LLM parameters
 RESPONSE_MODE_CONFIG = {
     "short": {
-        "max_tokens": 60,
-        "max_words": 40,
+        "max_tokens": 50,
+        "max_words": 35,
         "max_sentences": 3,
         "prompt_suffix": None,
         "stop": ["\n", "...", "\u2014"],
@@ -349,6 +352,18 @@ def classify_emotion(response_text: str) -> str:
 MAX_USER_CHARS = int(os.getenv("MAX_USER_CHARS", str(config_defaults.MAX_USER_CHARS)))
 # Maximum total characters across all messages sent to the LLM (0 = disabled)
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", str(config_defaults.MAX_CONTEXT_CHARS)))
+MAX_CONTEXT_TOKENS = int(
+    os.getenv("MAX_CONTEXT_TOKENS", str(config_defaults.MAX_CONTEXT_TOKENS))
+)
+GROUNDING_SOURCES = os.getenv(
+    "GROUNDING_SOURCES", config_defaults.GROUNDING_SOURCES
+)
+STREAMING_FIRST_AUDIO_TARGET_S = float(
+    os.getenv(
+        "STREAMING_FIRST_AUDIO_TARGET_S",
+        str(config_defaults.STREAMING_FIRST_AUDIO_TARGET_S),
+    )
+)
 
 # Locked v1 model stack
 # Foundry Local requires full model IDs for inference calls
@@ -409,10 +424,100 @@ LATENCY_BUDGET = {
     "overhead": 1000,  # Network, serialization, etc.
 }
 
-# Global conversation context (in-memory for v1; stateless per utterance for MVP)
-conversation_history = []
-# Track last response mode for continuation detection
+@dataclass
+class ConversationState:
+    history: list[dict[str, str]] = field(default_factory=list)
+    summary: str = ""
+    last_response_mode: str = "short"
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    updated_at: float = field(default_factory=time.time)
+
+
+_conversation_states: dict[str, ConversationState] = {}
+_conversation_states_lock = threading.Lock()
+conversation_history: list[dict[str, str]] = []
 _last_response_mode = "short"
+_legacy_state = ConversationState(history=conversation_history)
+
+
+def _conversation_state(conversation_id: str | None) -> ConversationState:
+    """Return isolated state for a conversation, preserving direct-call compatibility."""
+    global _legacy_state
+    if not conversation_id:
+        if _legacy_state.history is not conversation_history:
+            _legacy_state = ConversationState(
+                history=conversation_history,
+                last_response_mode=_last_response_mode,
+            )
+        return _legacy_state
+    with _conversation_states_lock:
+        return _conversation_states.setdefault(conversation_id, ConversationState())
+
+
+def reset_conversation(conversation_id: str) -> bool:
+    with _conversation_states_lock:
+        return _conversation_states.pop(conversation_id, None) is not None
+
+
+def _estimate_tokens(messages: list[dict[str, str]]) -> int:
+    return sum(max(1, len(message.get("content", "")) // 4) for message in messages)
+
+
+def _compact_history(state: ConversationState) -> None:
+    """Bound context by estimated tokens and retain a compact prior-turn summary."""
+    removed: list[str] = []
+    while len(state.history) > 2 and _estimate_tokens(state.history) > MAX_CONTEXT_TOKENS:
+        message = state.history.pop(0)
+        removed.append(f"{message.get('role', 'unknown')}: {message.get('content', '')}")
+    if removed:
+        compact = " | ".join(removed)
+        state.summary = (state.summary + " | " + compact).strip(" |")[-1200:]
+
+
+def get_current_datetime() -> str:
+    """Approved deterministic tool for questions about the current date/time."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def retrieve_local_context(query: str, limit: int = 4) -> list[str]:
+    """Return small, cited excerpts from explicitly approved local sources."""
+    terms = {
+        token
+        for token in re.findall(r"[a-z0-9]{4,}", (query or "").lower())
+        if token not in {"what", "when", "where", "which", "about", "misty"}
+    }
+    if not terms:
+        return []
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    matches: list[str] = []
+    for configured_path in GROUNDING_SOURCES.split(","):
+        configured_path = configured_path.strip()
+        if not configured_path:
+            continue
+        path = os.path.abspath(os.path.join(base_dir, configured_path))
+        try:
+            with open(path, "r", encoding="utf-8") as source:
+                for line_number, line in enumerate(source, 1):
+                    text = line.strip()
+                    if text and any(term in text.lower() for term in terms):
+                        matches.append(
+                            f"[{os.path.basename(path)}:{line_number}] {text[:240]}"
+                        )
+                        if len(matches) >= limit:
+                            return matches
+        except OSError:
+            logger.warning("Configured grounding source is unavailable: %s", path)
+    return matches
+
+
+def _normalize_speaker_name(value: str | None) -> str | None:
+    """Accept only short human-name labels produced by the local recognizer."""
+    name = (value or "").strip()
+    if not name or len(name) > 40:
+        return None
+    if not re.fullmatch(r"[A-Za-z][A-Za-z '\-]{0,39}", name):
+        return None
+    return name
 
 # ============================================================================
 # FLASK APP SETUP
@@ -478,6 +583,13 @@ def orchestrate():
     Output: JSON with response audio URI (and optionally inline audio bytes) or error
     """
     start_time = time.time()
+    conversation_id = (
+        request.form.get("conversation_id", "").strip()
+        or request.headers.get("X-Conversation-ID", "").strip()
+        or str(uuid.uuid4())
+    )
+    session = _conversation_state(conversation_id)
+    session.lock.acquire()
     
     try:
         # Extract WAV file
@@ -489,7 +601,7 @@ def orchestrate():
         audio_bytes = audio_file.read()
 
         # Optional: speaker name from face recognition (#16)
-        speaker_name = request.form.get("speaker_name", "").strip() or None
+        speaker_name = _normalize_speaker_name(request.form.get("speaker_name"))
 
         # Optional: return WAV bytes inline to save a round trip (#69)
         return_audio_bytes = request.form.get("return_audio_bytes", "").lower() == "true"
@@ -540,8 +652,19 @@ def orchestrate():
             return jsonify(result), 200
         
         # Step 2: Language Model Inference
+        history_snapshot = (
+            list(session.history),
+            session.summary,
+            session.last_response_mode,
+            session.updated_at,
+        )
         llm_start = time.time()
-        llm_result = language_model_inference(user_text, llm_start, speaker_name=speaker_name)
+        llm_result = language_model_inference(
+            user_text,
+            llm_start,
+            speaker_name=speaker_name,
+            conversation_id=conversation_id,
+        )
         llm_ms = (time.time() - llm_start) * 1000
         if llm_result.get("status") == "error":
             return jsonify(llm_result), 500
@@ -549,6 +672,12 @@ def orchestrate():
         response_text = llm_result.get("text", "").strip()
         if not response_text:
             logger.warning("LLM returned empty response")
+            (
+                session.history[:],
+                session.summary,
+                session.last_response_mode,
+                session.updated_at,
+            ) = history_snapshot
             return jsonify({"status": "error", "error": "empty_llm"}), 400
         
         logger.info(f"[LLM {llm_ms:.0f}ms] {response_text}")
@@ -558,11 +687,23 @@ def orchestrate():
         tts_result = text_to_speech(response_text, tts_start)
         tts_ms = (time.time() - tts_start) * 1000
         if tts_result.get("status") == "error":
+            (
+                session.history[:],
+                session.summary,
+                session.last_response_mode,
+                session.updated_at,
+            ) = history_snapshot
             return jsonify(tts_result), 500
         
         response_audio_uri = tts_result.get("audio_uri", "")
         if not response_audio_uri:
             logger.warning("TTS returned no audio URI")
+            (
+                session.history[:],
+                session.summary,
+                session.last_response_mode,
+                session.updated_at,
+            ) = history_snapshot
             return jsonify({"status": "error", "error": "empty_tts"}), 500
         
         # Calculate total latency
@@ -573,7 +714,7 @@ def orchestrate():
         # Classify emotion for face animation (< 1ms, regex only)
         emotion = classify_emotion(response_text)
         
-        logger.info(f"[Pipeline {total_latency_ms:.0f}ms] STT={stt_ms:.0f} LLM={llm_ms:.0f} TTS={tts_ms:.0f} history={len(conversation_history)} fallback={tts_fallback} cached={tts_cached} emotion={emotion}")
+        logger.info(f"[Pipeline {total_latency_ms:.0f}ms] STT={stt_ms:.0f} LLM={llm_ms:.0f} TTS={tts_ms:.0f} history={len(session.history)} fallback={tts_fallback} cached={tts_cached} emotion={emotion}")
         
         resp = {
             "status": "ok",
@@ -584,6 +725,7 @@ def orchestrate():
             "latencyMs": total_latency_ms,
             "ttsFallback": tts_fallback,
             "ttsCached": tts_cached,
+            "conversationId": conversation_id,
         }
         if return_audio_bytes:
             resp["audioBytes"] = _read_audio_bytes_b64(tts_result.get("audio_file"))
@@ -592,6 +734,214 @@ def orchestrate():
     except Exception as e:
         logger.error(f"Orchestration failed: {e}", exc_info=True)
         return jsonify({"status": "error", "error": "internal_error"}), 500
+    finally:
+        session.lock.release()
+
+
+@app.route("/api/conversations/<conversation_id>", methods=["DELETE"])
+def clear_conversation(conversation_id: str):
+    """Explicitly release context when the controller re-arms for a new person."""
+    return jsonify(
+        {
+            "status": "ok",
+            "conversationId": conversation_id,
+            "cleared": reset_conversation(conversation_id),
+        }
+    )
+
+
+@app.route("/api/conversations/<conversation_id>/last", methods=["DELETE"])
+def rollback_conversation_turn(conversation_id: str):
+    """Remove the last complete exchange when robot playback did not occur."""
+    state = _conversation_state(conversation_id)
+    removed = False
+    with state.lock:
+        if len(state.history) >= 2:
+            state.history[:] = state.history[:-2]
+            state.last_response_mode = "short"
+            state.updated_at = time.time()
+            removed = True
+    return jsonify(
+        {
+            "status": "ok",
+            "conversationId": conversation_id,
+            "rolledBack": removed,
+        }
+    )
+
+
+def _complete_sentences(buffer: str, final: bool = False) -> tuple[list[str], str]:
+    """Split complete sentence-sized chunks while retaining an unfinished tail."""
+    chunks: list[str] = []
+    while True:
+        match = re.search(r"(?<=[.!?])\s+", buffer)
+        if not match:
+            break
+        chunk = buffer[: match.start()].strip()
+        buffer = buffer[match.end() :]
+        if chunk:
+            chunks.append(chunk)
+    if final and buffer.strip():
+        chunks.append(buffer.strip())
+        buffer = ""
+    return chunks, buffer
+
+
+@app.route("/api/orchestrate/stream", methods=["POST"])
+def orchestrate_stream():
+    """Stream ordered sentence WAVs as SSE so playback can begin before LLM completion."""
+    if "file" not in request.files:
+        return jsonify({"status": "error", "error": "no_file"}), 400
+    audio_bytes = request.files["file"].read()
+    if len(audio_bytes) > 10 * 1024 * 1024:
+        return jsonify({"status": "error", "error": "file_too_large"}), 413
+    stt_result = speech_to_text(audio_bytes, time.time())
+    user_text = stt_result.get("text", "").strip()
+    if not user_text:
+        return jsonify({"status": "error", "error": "empty_stt"}), 400
+
+    conversation_id = (
+        request.form.get("conversation_id", "").strip() or str(uuid.uuid4())
+    )
+    speaker_name = _normalize_speaker_name(request.form.get("speaker_name"))
+    state = _conversation_state(conversation_id)
+    stream_started = time.time()
+
+    @stream_with_context
+    def generate():
+        with state.lock:
+            movement = classify_movement_intent(user_text)
+            if movement:
+                acknowledgment = _get_movement_acknowledgment(movement["command"])
+                tts = text_to_speech(acknowledgment, time.time())
+                yield "data: " + json.dumps(
+                    {
+                        "type": "movement",
+                        "movement": movement,
+                        "text": acknowledgment,
+                        "audioBytes": _read_audio_bytes_b64(tts.get("audio_file")),
+                    }
+                ) + "\n\n"
+                return
+            previous_history = list(state.history)
+            previous_mode = state.last_response_mode
+            mode = classify_intent(user_text, previous_mode)
+            mode_config = RESPONSE_MODE_CONFIG[mode]
+            working_history = list(state.history)[-8:]
+            working_history.append({"role": "user", "content": user_text})
+            system_prompt = (
+                f"{SYSTEM_PROMPT} Current UTC date/time: {get_current_datetime()}. "
+                "Use only approved local context for event/project facts and state uncertainty otherwise."
+            )
+            if speaker_name:
+                system_prompt += f" You are currently talking to {speaker_name}."
+            grounding = retrieve_local_context(user_text)
+            if grounding:
+                system_prompt += " Approved local context: " + " ".join(grounding)
+            messages = [{"role": "system", "content": system_prompt}]
+            if state.summary:
+                messages.append(
+                    {"role": "system", "content": f"Earlier conversation summary: {state.summary}"}
+                )
+            messages.extend(working_history)
+            if mode_config["prompt_suffix"]:
+                messages.append(
+                    {"role": "system", "content": mode_config["prompt_suffix"]}
+                )
+            payload = {
+                "model": MODELS["chat"],
+                "messages": messages,
+                "max_tokens": mode_config["max_tokens"],
+                "temperature": 0.7,
+                "stop": mode_config["stop"],
+                "stream": True,
+            }
+            complete_text = ""
+            pending = ""
+            sequence = 0
+            first_audio_ms = None
+            try:
+                response = requests.post(
+                    f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions",
+                    json=payload,
+                    timeout=FOUNDRY_API_TIMEOUT,
+                    stream=True,
+                )
+                response.raise_for_status()
+                for raw_line in response.iter_lines(decode_unicode=True):
+                    if not raw_line or not raw_line.startswith("data:"):
+                        continue
+                    encoded = raw_line[5:].strip()
+                    if encoded == "[DONE]":
+                        break
+                    event = json.loads(encoded)
+                    delta = event["choices"][0].get("delta", {}).get("content", "")
+                    if not delta:
+                        continue
+                    pending += delta
+                    complete_text += delta
+                    sentences, pending = _complete_sentences(pending)
+                    for sentence in sentences:
+                        tts = text_to_speech(sentence, time.time())
+                        if tts.get("status") != "ok":
+                            raise RuntimeError(tts.get("error", "tts_failure"))
+                        if first_audio_ms is None:
+                            first_audio_ms = (time.time() - stream_started) * 1000
+                        yield "data: " + json.dumps(
+                            {
+                                "type": "audio",
+                                "sequence": sequence,
+                                "text": sentence,
+                                "audioBytes": _read_audio_bytes_b64(tts.get("audio_file")),
+                                "firstAudioMs": round(first_audio_ms),
+                            }
+                        ) + "\n\n"
+                        sequence += 1
+                sentences, _ = _complete_sentences(pending, final=True)
+                for sentence in sentences:
+                    tts = text_to_speech(sentence, time.time())
+                    if tts.get("status") != "ok":
+                        raise RuntimeError(tts.get("error", "tts_failure"))
+                    if first_audio_ms is None:
+                        first_audio_ms = (time.time() - stream_started) * 1000
+                    yield "data: " + json.dumps(
+                        {
+                            "type": "audio",
+                            "sequence": sequence,
+                            "text": sentence,
+                            "audioBytes": _read_audio_bytes_b64(tts.get("audio_file")),
+                            "firstAudioMs": round(first_audio_ms),
+                        }
+                    ) + "\n\n"
+                    sequence += 1
+                complete_text = complete_text.strip()
+                state.history[:] = working_history
+                state.history.append({"role": "assistant", "content": complete_text})
+                state.last_response_mode = mode
+                _compact_history(state)
+                state.updated_at = time.time()
+                yield "data: " + json.dumps(
+                    {
+                        "type": "complete",
+                        "conversationId": conversation_id,
+                        "transcribedText": user_text,
+                        "inferenceResponse": complete_text,
+                        "chunks": sequence,
+                        "firstAudioMs": round(first_audio_ms or 0),
+                        "firstAudioTargetMs": round(STREAMING_FIRST_AUDIO_TARGET_S * 1000),
+                    }
+                ) + "\n\n"
+            except (GeneratorExit, Exception) as exc:
+                state.history[:] = previous_history
+                state.last_response_mode = previous_mode
+                if isinstance(exc, GeneratorExit):
+                    raise
+                logger.error("Streaming orchestration failed: %s", exc)
+                yield "data: " + json.dumps(
+                    {"type": "error", "error": "stream_failure", "retryable": True}
+                ) + "\n\n"
+
+    return Response(generate(), mimetype="text/event-stream")
 
 # ============================================================================
 # STEP 1: SPEECH-TO-TEXT (faster-whisper, in-process)
@@ -668,7 +1018,7 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
         segments, info = model.transcribe(
             audio_io,
             language="en",
-            beam_size=5,
+            beam_size=STT_BEAM_SIZE,
             vad_filter=True,
         )
         segment_list = list(segments)
@@ -718,7 +1068,12 @@ def _looks_like_repeated_short_hallucination(text: str) -> bool:
 # STEP 2: LANGUAGE MODEL INFERENCE
 # ============================================================================
 
-def language_model_inference(user_text: str, start_time: float, speaker_name: str | None = None) -> Dict[str, Any]:
+def language_model_inference(
+    user_text: str,
+    start_time: float,
+    speaker_name: str | None = None,
+    conversation_id: str | None = None,
+) -> Dict[str, Any]:
     """Run inference using Foundry Local with adaptive response modes.
 
     Args:
@@ -726,7 +1081,8 @@ def language_model_inference(user_text: str, start_time: float, speaker_name: st
         start_time: Pipeline start timestamp.
         speaker_name: Optional recognized face name (#16). Injected into prompt context.
     """
-    global conversation_history, _last_response_mode
+    global _last_response_mode
+    state = _conversation_state(conversation_id)
     
     try:
         elapsed = (time.time() - start_time) * 1000
@@ -745,7 +1101,7 @@ def language_model_inference(user_text: str, start_time: float, speaker_name: st
             user_text = user_text[:MAX_USER_CHARS]
 
         # Classify intent for adaptive response mode
-        previous_response_mode = _last_response_mode
+        previous_response_mode = state.last_response_mode
         response_mode = classify_intent(user_text, previous_response_mode)
         # Note: _last_response_mode is updated AFTER successful LLM response (below)
         # to avoid stale state if the LLM call fails or times out.
@@ -753,14 +1109,18 @@ def language_model_inference(user_text: str, start_time: float, speaker_name: st
         logger.info(f"Response mode: {response_mode} (last={previous_response_mode})")
 
         # Build message history
-        conversation_history.append({"role": "user", "content": user_text})
-        # Keep history limited to last 8 messages (4 turns) for better context
-        if len(conversation_history) > 8:
-            del conversation_history[:-8]
+        working_history = list(state.history)
+        working_history.append({"role": "user", "content": user_text})
+        if len(working_history) > 8:
+            del working_history[:-8]
 
         url = f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions"
         # Prepend system prompt on every call; not stored in history
-        system_prompt = SYSTEM_PROMPT
+        system_prompt = (
+            f"{SYSTEM_PROMPT} Today is {datetime.now(timezone.utc).date().isoformat()} UTC. "
+            "Only state event or project facts supplied in approved local context; "
+            "otherwise say that you are not certain."
+        )
         # Inject face recognition context (#16) — tell Misty who she's talking to
         if speaker_name:
             system_prompt += (
@@ -769,12 +1129,20 @@ def language_model_inference(user_text: str, start_time: float, speaker_name: st
                 f" Don't announce that you recognized them every time."
             )
             logger.info(f"Speaker identified: {speaker_name}")
-        messages = [{"role": "system", "content": system_prompt}] + conversation_history
+        grounded_context = retrieve_local_context(user_text)
+        if grounded_context:
+            system_prompt += " Approved local context: " + " ".join(grounded_context)
+        messages = [{"role": "system", "content": system_prompt}]
+        if state.summary:
+            messages.append(
+                {"role": "system", "content": f"Earlier conversation summary: {state.summary}"}
+            )
+        messages.extend(working_history)
 
         # Inject mode-specific prompt suffix
         if mode_config["prompt_suffix"]:
             messages.append({"role": "system", "content": mode_config["prompt_suffix"]})
-        elif len(conversation_history) > 4:
+        elif len(working_history) > 4:
             # Brevity reminder only for short mode when history is long
             messages.append({"role": "system", "content": "Remember: 1-2 sentences, ~20 words max. Stay punchy."})
 
@@ -839,13 +1207,18 @@ def language_model_inference(user_text: str, start_time: float, speaker_name: st
             logger.info(f"Truncated LLM response ({response_mode} mode) to: {assistant_text}")
         
         # Add to history for context in next turn
-        conversation_history.append({"role": "assistant", "content": assistant_text})
+        state.history[:] = working_history
+        state.history.append({"role": "assistant", "content": assistant_text})
+        _compact_history(state)
+        state.updated_at = time.time()
 
         # Update response mode tracking AFTER successful LLM response —
         # prevents stale state when LLM times out or fails.
         # This is NOT unused: _last_response_mode is read at line 456 on the
         # next request to classify continuation intent (e.g., "yes" / "more").
-        _last_response_mode = response_mode  # noqa: F841
+        state.last_response_mode = response_mode
+        if conversation_id is None:
+            _last_response_mode = response_mode
         
         logger.debug(f"LLM result ({response_mode}): {assistant_text}")
         return {"status": "ok", "text": assistant_text, "responseMode": response_mode}

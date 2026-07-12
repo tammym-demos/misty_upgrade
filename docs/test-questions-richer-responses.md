@@ -8,7 +8,7 @@ Updated for the richer responses changes in PR #45 and adaptive conversations (i
 | Response length (summary) | N/A | ~40 words, 2-3 sentences + "Want more?" |
 | Response length (continuation) | N/A | ~40 words, 2-3 sentences per chunk |
 | max_tokens (short / summary) | 20 | 60 / 80 |
-| Recording duration | Fixed 6s | VAD-controlled: 6-15s (min_duration=RECORDING_DURATION_S) |
+| Recording duration | Fixed 6s | VAD-controlled: 1.25-15s (min_duration=RECORDING_DURATION_S) |
 | Follow-up window | 60s | 90s |
 | Follow-up turn cap | unlimited | 12 turns |
 | Conversation history | 4 messages (2 turns) | 8 messages (4 turns) |
@@ -164,7 +164,7 @@ Tests unique to the laptop mic wake word mode:
 **Response time**: depends mostly on TTS generation; check `[Pipeline ...]` logs for STT/LLM/TTS breakdown
 **Response length (short)**: 1-2 sentences, ~35 words (max_tokens=60, truncation at 35 words)
 **Response length (summary/continuation)**: 2-3 sentences, ~40 words (max_tokens=80, truncation at 50 words)
-**Recording duration**: VAD-controlled — 6s minimum (RECORDING_DURATION_S), up to 15s for long utterances
+**Recording duration**: VAD-controlled — 1.25s minimum (RECORDING_DURATION_S), up to 15s for long utterances
 **Follow-up window**: 90 seconds or 12 turns, whichever comes first
 **History**: Misty remembers the last 4 turns (8 messages) of conversation
 

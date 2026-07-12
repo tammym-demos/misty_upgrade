@@ -45,6 +45,7 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
 import wave
 from copy import deepcopy
@@ -242,6 +243,7 @@ class CueAsset:
     slide_label: str = ""
     slide_title: str = ""
     movements: list[dict] = field(default_factory=list)
+    preceding_presenter: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -256,6 +258,7 @@ class CueAsset:
             "slide_label": self.slide_label,
             "slide_title": self.slide_title,
             "movements": deepcopy(self.movements),
+            "preceding_presenter": self.preceding_presenter,
         }
 
     @classmethod
@@ -272,6 +275,7 @@ class CueAsset:
             slide_label=data.get("slide_label", ""),
             slide_title=data.get("slide_title", ""),
             movements=deepcopy(data.get("movements", [])),
+            preceding_presenter=data.get("preceding_presenter", ""),
         )
 
 
@@ -668,6 +672,7 @@ def prepare_assets(
                 slide_label=cue.slide_label,
                 slide_title=cue.slide_title,
                 movements=deepcopy(cue.movements),
+                preceding_presenter=cue.preceding_presenter,
             )
         )
 
@@ -714,6 +719,32 @@ def verify_manifest(
                     f"{asset.cue_id}: WAV at {asset.wav_path!r} has non-positive duration"
                 )
     return problems
+
+
+def preload_conference_assets(robot, manifest: ConferenceManifest) -> list[str]:
+    """Upload every prepared WAV without playing it and return verified names."""
+    uploaded: list[str] = []
+    for asset in manifest.cues:
+        if not asset.wav_path or not os.path.isfile(asset.wav_path):
+            continue
+        with open(asset.wav_path, "rb") as fh:
+            wav_bytes = fh.read()
+        filename = asset.misty_filename or os.path.basename(asset.wav_path)
+        result = robot.misty_post(
+            "/api/audio",
+            {
+                "FileName": filename,
+                "Data": __import__("base64").b64encode(wav_bytes).decode("ascii"),
+                "ImmediatelyApply": False,
+                "OverwriteExisting": True,
+            },
+            timeout=15.0,
+        )
+        if not result or result.get("status") != "Success":
+            raise ConferenceError(f"Failed to preload cue {asset.cue_id}: {result}")
+        asset.misty_filename = filename
+        uploaded.append(filename)
+    return uploaded
 
 
 # ---------------------------------------------------------------------------
@@ -789,6 +820,9 @@ class ConferenceController:
         face_fn: Optional[FaceFn] = None,
         talking_face: str = "",
         sleep_fn: Optional[Callable[[float], None]] = None,
+        interrupt_event: Optional[threading.Event] = None,
+        cancel_playback_fn: Optional[Callable[[], None]] = None,
+        presenter_match_fn: Optional[Callable[[str], bool]] = None,
     ) -> None:
         self.manifest = manifest
         self._play_fn = play_fn
@@ -803,6 +837,11 @@ class ConferenceController:
         self._face_fn = face_fn
         self._talking_face = talking_face or CONFERENCE_TALKING_FACE
         self._sleep_fn = sleep_fn or time.sleep
+        self._interrupt = interrupt_event or threading.Event()
+        self._cancel_playback_fn = cancel_playback_fn
+        self._presenter_match_fn = presenter_match_fn
+        self._play_lock = threading.Lock()
+        self._auto_thread: Optional[threading.Thread] = None
 
         self.status = ConferenceStatus.IDLE
         self._cursor = 0  # index of the NEXT cue to play
@@ -829,6 +868,7 @@ class ConferenceController:
             return False
         if self.status == ConferenceStatus.STOPPED:
             return False
+        self._interrupt.clear()
         self.status = ConferenceStatus.RUNNING
         return True
 
@@ -867,7 +907,11 @@ class ConferenceController:
         return any(m.get("face") for m in movements)
 
     def _play_index(self, index: int) -> Optional[CueAsset]:
-        if not (0 <= index < self.total):
+        with self._play_lock:
+            return self._play_index_locked(index)
+
+    def _play_index_locked(self, index: int) -> Optional[CueAsset]:
+        if not (0 <= index < self.total) or self._interrupt.is_set():
             return None
         asset = self.manifest.cues[index]
         resolvable = bool(asset.wav_path) and _wav_file_duration(asset.wav_path) > 0
@@ -905,11 +949,21 @@ class ConferenceController:
         if self._face_fn:
             self._face_fn(self._talking_face)
 
+        if duration > 0:
+            if self._sleep_fn is time.sleep:
+                interrupted = self._interrupt.wait(max(0.0, duration))
+            else:
+                self._sleep_fn(max(0.0, duration))
+                interrupted = self._interrupt.is_set()
+            if interrupted:
+                if self._cancel_playback_fn is not None:
+                    self._cancel_playback_fn()
+                if self._neutral_fn is not None:
+                    self._neutral_fn()
+                return None
         self.play_count += 1
         self._last = index
         self._cursor = index + 1
-        if duration > 0:
-            self._sleep_fn(max(0.0, duration))
         if self._neutral_fn is not None:
             self._neutral_fn()
         return asset
@@ -918,7 +972,14 @@ class ConferenceController:
         """Manual/auto 'play next cue'. Works whenever active (even if paused)."""
         if not self._active():
             return None
-        return self._play_index(self._cursor)
+        paused = self.status == ConferenceStatus.PAUSED
+        if paused:
+            self._interrupt.clear()
+        try:
+            return self._play_index(self._cursor)
+        finally:
+            if paused and self.status == ConferenceStatus.PAUSED:
+                self._interrupt.set()
 
     def replay(self) -> Optional[CueAsset]:
         """Replay the most recently played cue."""
@@ -964,9 +1025,13 @@ class ConferenceController:
     def pause(self) -> None:
         if self._active():
             self.status = ConferenceStatus.PAUSED
+            self._interrupt.set()
+            if self._cancel_playback_fn is not None:
+                self._cancel_playback_fn()
 
     def resume(self) -> None:
         if self._active():
+            self._interrupt.clear()
             self.status = ConferenceStatus.RUNNING
 
     def auto_advance_once(self) -> Optional[CueAsset]:
@@ -991,6 +1056,18 @@ class ConferenceController:
         # Manual override may have paused/stopped us while we were listening.
         if not finished or not self._active() or self.status == ConferenceStatus.PAUSED:
             return None
+        next_asset = self.peek_next()
+        if (
+            next_asset is not None
+            and self._presenter_match_fn is not None
+            and next_asset.preceding_presenter
+            and not self._presenter_match_fn(next_asset.preceding_presenter)
+        ):
+            logger.warning(
+                "Presenter transcript did not confidently match cue %s; waiting for manual advance",
+                next_asset.cue_id,
+            )
+            return None
         return self.play_next()
 
     def run_auto(self, max_cues: Optional[int] = None) -> int:
@@ -1007,6 +1084,20 @@ class ConferenceController:
             played += 1
         return played
 
+    def start_auto(self, max_cues: Optional[int] = None) -> bool:
+        """Start auto-run in a worker so the control surface remains responsive."""
+        if self._auto_thread is not None and self._auto_thread.is_alive():
+            return False
+        self._interrupt.clear()
+        self._auto_thread = threading.Thread(
+            target=self.run_auto,
+            args=(max_cues,),
+            name="conference-auto",
+            daemon=True,
+        )
+        self._auto_thread.start()
+        return True
+
     # -- safe shutdown ------------------------------------------------------
 
     def shutdown(self) -> list[str]:
@@ -1016,6 +1107,12 @@ class ConferenceController:
         single failing hook cannot prevent the rest of the safe shutdown.
         """
         self.status = ConferenceStatus.STOPPED
+        self._interrupt.set()
+        if self._cancel_playback_fn is not None:
+            try:
+                self._cancel_playback_fn()
+            except Exception as exc:
+                logger.error("Conference playback cancellation failed: %s", exc)
         if self._shutdown_done:
             return []
         self._shutdown_done = True
@@ -1128,7 +1225,13 @@ def _cmd_verify(args) -> int:
     return 0
 
 
-def _build_presenter_wait(listener, max_wait_s, silence_s, ambient_fn=None):  # pragma: no cover - live audio
+def _build_presenter_wait(
+    listener,
+    max_wait_s,
+    silence_s,
+    ambient_fn=None,
+    cancel_event=None,
+):  # pragma: no cover - live audio
     """Wrap the wake-word speech monitor into a blocking presenter-wait.
 
     Returns a callable that starts RMS-based end-of-speech detection on the
@@ -1161,13 +1264,21 @@ def _build_presenter_wait(listener, max_wait_s, silence_s, ambient_fn=None):  # 
         )
         try:
             if ambient_fn is None:
-                return done.wait(timeout=max_wait_s) and result["presenter_finished"]
+                deadline = time.monotonic() + max_wait_s
+                while time.monotonic() < deadline:
+                    if cancel_event is not None and cancel_event.is_set():
+                        return False
+                    if done.wait(timeout=0.1):
+                        return result["presenter_finished"]
+                return False
             # Run ambient motion loop while waiting for presenter to finish
             elapsed = 0.0
             while elapsed < max_wait_s:
                 interval = _random.uniform(3.0, 5.0)
                 if done.wait(timeout=interval):
                     break
+                if cancel_event is not None and cancel_event.is_set():
+                    return False
                 elapsed += interval
                 if not done.is_set():
                     ambient_fn()
@@ -1192,6 +1303,13 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
     import misty_controller as mc  # lazy: heavy, hardware-oriented
 
     robot = mc.MistyController()
+    if hasattr(robot, "check_misty_health") and not robot.check_misty_health():
+        raise ConferenceError("Conference preflight failed: Misty is unreachable")
+    battery = robot.check_battery() if hasattr(robot, "check_battery") else None
+    if battery and battery.charge_percent < 0.10:
+        raise ConferenceError("Conference preflight failed: Misty battery is below 10%")
+    if hasattr(robot, "misty_post"):
+        preload_conference_assets(robot, manifest)
 
     # Start the laptop wake word listener explicitly — normally done inside
     # MistyController.run(), but conference mode doesn't call run().  Needed for
@@ -1213,10 +1331,9 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         if listener is not None:
             listener.pause()
         try:
-            with open(asset.wav_path, "rb") as fh:
-                wav_bytes = fh.read()
             filename = asset.misty_filename or os.path.basename(asset.wav_path)
-            return float(robot.upload_and_play_audio(wav_bytes, filename) or 0.0)
+            robot.play_preloaded_audio(filename)
+            return float(asset.duration_s)
         except Exception:
             if listener is not None:
                 listener.resume()
@@ -1377,16 +1494,26 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
                 listener.stop()
             else:
                 listener.pause()
+        if hasattr(robot, "misty_post"):
+            robot.misty_post("/api/audio/keyphrase/stop")
+
+    def _rest_state():
+        if hasattr(robot, "show_face"):
+            robot.show_face("face_idle.gif")
+        robot.move_head(pitch=0, roll=0, yaw=0)
+        if hasattr(robot, "set_led"):
+            robot.set_led(0, 0, 0)
 
     hooks = ShutdownHooks(
         release_audio=_release_audio,
         stop_recording=robot.stop_recording,
         cancel_skills=robot._cancel_all_skills,
         halt_movement=robot.halt,
-        rest_state=lambda: robot.move_head(pitch=0, roll=0, yaw=0),
+        rest_state=_rest_state,
     )
 
     wait_fn = None
+    interrupt_event = threading.Event()
     if getattr(args, "auto", False):
         listener = getattr(robot, "_wake_word_listener", None)
         if listener is None:
@@ -1398,6 +1525,7 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         wait_fn = _build_presenter_wait(
             listener, CONFERENCE_PRESENTER_MAX_WAIT_S, CONFERENCE_PRESENTER_SILENCE_S,
             ambient_fn=ambient_fn,
+            cancel_event=interrupt_event,
         )
 
     return ConferenceController(
@@ -1413,6 +1541,8 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         glance_fn=glance_fn,
         face_fn=face_fn,
         talking_face=CONFERENCE_TALKING_FACE,
+        interrupt_event=interrupt_event,
+        cancel_playback_fn=robot.halt,
     )
 
 
@@ -1435,6 +1565,21 @@ def _cmd_run(args) -> int:  # pragma: no cover - requires Misty + live services
         "Conference Mode live. Controls: [n]ext [r]eplay [p]revious "
         "[space]pause/resume [a]uto [s]top"
     )
+    workers: list[threading.Thread] = []
+
+    def _run_async(action, name: str) -> None:
+        def _target():
+            try:
+                action()
+            except Exception as exc:
+                logger.error("Conference %s action failed: %s", name, exc)
+
+        worker = threading.Thread(
+            target=_target, name=f"conference-{name}", daemon=True
+        )
+        workers.append(worker)
+        worker.start()
+
     try:
         while controller.status != ConferenceStatus.STOPPED:
             try:
@@ -1451,20 +1596,25 @@ def _cmd_run(args) -> int:  # pragma: no cover - requires Misty + live services
                 else:
                     controller.pause()
             elif key in ("n", "next", ""):
-                controller.play_next()
+                _run_async(controller.play_next, "next")
             elif key in ("r", "replay"):
-                controller.replay()
+                _run_async(controller.replay, "replay")
             elif key in ("p", "prev", "previous"):
-                controller.previous()
+                _run_async(controller.previous, "previous")
             elif key in ("a", "auto"):
                 if not controller.auto_advance_available:
                     print("Auto-advance is unavailable; use manual controls.")
                 else:
-                    controller.run_auto()
+                    if hasattr(controller, "start_auto"):
+                        controller.start_auto()
+                    else:
+                        _run_async(controller.run_auto, "auto")
             elif key in ("s", "stop", "q", "quit"):
                 break
     finally:
         controller.shutdown()
+        for worker in workers:
+            worker.join(timeout=1.0)
     print("Conference Mode stopped; Misty returned to rest state.")
     return 0
 

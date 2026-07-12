@@ -23,6 +23,7 @@ import signal
 import atexit
 import logging
 import threading
+import uuid
 import requests
 import websocket
 
@@ -53,6 +54,9 @@ FOLLOWUP_LISTEN_S = float(os.getenv("FOLLOWUP_LISTEN_S", str(config_defaults.FOL
 FOLLOWUP_TIMEOUT_S = float(os.getenv("FOLLOWUP_TIMEOUT_S", str(config_defaults.FOLLOWUP_TIMEOUT_S)))  # max follow-up window (extended from 60)
 FOLLOWUP_SILENCE_THRESHOLD = 1000  # audio bytes below this = silence (no speech)
 FOLLOWUP_MAX_TURNS = int(os.getenv("FOLLOWUP_MAX_TURNS", str(config_defaults.FOLLOWUP_MAX_TURNS)))  # cap recording cycles per session
+STREAMING_ENABLED = os.getenv(
+    "STREAMING_ENABLED", str(config_defaults.STREAMING_ENABLED)
+).lower() in ("1", "true", "yes")
 WS_RECONNECT_BASE_S = 2.0
 WS_RECONNECT_MAX_S = 30.0
 HEALTH_CHECK_INTERVAL_S = 10.0  # reduced from 30s for watchdog responsiveness
@@ -303,6 +307,7 @@ class MistyController:
         self.reconnect_attempts = 0
         self.turn_id = 0
         self.running = True
+        self._conversation_id: str | None = None
 
         # Battery monitoring
         self.battery = BatteryState()
@@ -1030,7 +1035,7 @@ class MistyController:
         return None
 
     def upload_and_play_audio(self, wav_bytes: bytes, filename: str) -> float:
-        """Upload audio to Misty and play it. Returns estimated duration in seconds."""
+        """Upload audio to Misty and play it, raising a retryable error on failure."""
         b64_data = base64.b64encode(wav_bytes).decode("ascii")
         result = self.misty_post("/api/audio", {
             "FileName": filename,
@@ -1043,9 +1048,29 @@ class MistyController:
         duration = self._wav_duration(wav_bytes)
         if result and result.get("status") == "Success":
             logger.info(f"Playing response audio ({duration:.1f}s)")
-        else:
-            logger.error(f"SaveAudio failed: {result}")
-        return duration
+            return duration
+        raise RuntimeError(f"SaveAudio failed; playback can be retried: {result}")
+
+    def play_preloaded_audio(self, filename: str) -> bool:
+        """Play a verified on-robot asset without uploading it again."""
+        result = self.misty_post(
+            "/api/audio/play", {"FileName": filename, "Volume": 100}
+        )
+        if result and result.get("status") == "Success":
+            return True
+        raise RuntimeError(f"PlayAudio failed; playback can be retried: {result}")
+
+    def _rollback_orchestration_turn(self) -> None:
+        conversation_id = getattr(self, "_conversation_id", None)
+        if not conversation_id:
+            return
+        try:
+            requests.delete(
+                f"{ORCHESTRATION_URL}/api/conversations/{conversation_id}/last",
+                timeout=2.0,
+            )
+        except Exception as exc:
+            logger.warning("Could not roll back failed conversation turn: %s", exc)
 
     @staticmethod
     def _wav_duration(wav_bytes: bytes) -> float:
@@ -1883,8 +1908,13 @@ class MistyController:
         battery = self.check_battery()
         if battery:
             logger.info(f"Final battery: {battery.charge_percent*100:.0f}% | {battery.voltage:.1f}V")
-        # Stop keyphrase, LED off
+        # Return the robot to the documented safe rest state. Each REST call is
+        # best-effort so one unavailable subsystem cannot block later cleanup.
         self.misty_post("/api/audio/keyphrase/stop")
+        self.misty_post("/api/audio/record/stop")
+        self.misty_post("/api/skills/cancel")
+        self.halt()
+        self.show_face("face_idle.gif")
         if self.ws:
             self.ws.close()
         self.set_led(0, 0, 0)
@@ -2339,6 +2369,7 @@ class MistyController:
     def _handle_conversation_turn(self):
         turn = self.turn_id
         turn_start = time.time()
+        self._conversation_id = str(uuid.uuid4())
         logger.info(f"[Turn {turn}] Starting conversation turn")
 
         # Battery guard: enter charging mode if battery critically low
@@ -2461,19 +2492,18 @@ class MistyController:
         if self._wake_word_listener:
             logger.info(f"[Turn {turn}] Clearing mic before recording (laptop wake word mode)")
             self.misty_post("/api/audio/record/stop")  # belt-and-suspenders cleanup
-            time.sleep(0.5)  # minimal delay — no keyphrase to release
 
         # Play "What's up baby?" greeting via pre-uploaded TTS audio.
         # Falls back to chime if greeting audio isn't available.
         # Note: misty_post returns None on failure (doesn't raise), so check return value.
         greeting_result = self.misty_post("/api/audio/play", {"FileName": "greeting_whatsup.wav", "Volume": 40})
         if greeting_result:
-            time.sleep(1.2)  # let the greeting play before recording starts
+            time.sleep(0.2)
         else:
             logger.debug(f"[Turn {turn}] Greeting playback failed, trying chime")
             chime_result = self.misty_post("/api/audio/play", {"FileName": "s_Awe3.wav", "Volume": 30})
             if chime_result:
-                time.sleep(0.8)
+                time.sleep(0.2)
             else:
                 logger.debug(f"[Turn {turn}] Chime fallback also failed; continuing without audio cue")
 
@@ -2510,7 +2540,7 @@ class MistyController:
             speech_ended = threading.Event()
             self._wake_word_listener.start_speech_monitor(
                 on_speech_end=lambda: speech_ended.set(),
-                min_duration=RECORDING_DURATION_S,  # at least the standard duration
+                min_duration=RECORDING_DURATION_S,
                 max_duration=15.0,
             )
             speech_ended.wait(timeout=15.0)
@@ -2548,8 +2578,9 @@ class MistyController:
 
         logger.info(f"[Turn {turn}] Recorded {record_duration:.1f}s (cycle {self._recording_cycles})")
 
-        # Small delay for Misty to finalize the file
-        time.sleep(0.5)
+        # Laptop audio is already finalized. Misty fallback needs a short flush.
+        if not use_laptop_mic or misty_fallback_available:
+            time.sleep(0.2)
 
         # 3. Retrieve recorded audio — wondering face + thinking sound
         self.set_state(State.PROCESSING)
@@ -2602,10 +2633,18 @@ class MistyController:
             False — if no speech was detected (empty STT).
         """
         # Processing state already set by caller — just send to orchestration
+        if STREAMING_ENABLED:
+            streamed = self._do_streaming_orchestrate_and_respond(
+                turn, audio_bytes, turn_start, speaker_name
+            )
+            if streamed is not None:
+                return streamed
 
         # Send to orchestration service (include speaker_name from face recognition if available)
         # Request inline audio bytes to avoid a second GET round trip (#69)
         form_data = {"return_audio_bytes": "true"}
+        if getattr(self, "_conversation_id", None):
+            form_data["conversation_id"] = self._conversation_id
         if speaker_name:
             form_data["speaker_name"] = speaker_name
         response = requests.post(
@@ -2665,7 +2704,11 @@ class MistyController:
                         self.set_led(148, 0, 211)  # purple = speaking
                         self.show_face("face_talking_happy.gif")
                         self._talking_head.start("happy")  # talking motion (#116)
-                        play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
+                        try:
+                            play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
+                        except Exception:
+                            self._rollback_orchestration_turn()
+                            raise
                         time.sleep(play_duration + 1.0)
                         self._talking_head.stop()  # halt + re-center head (#116)
                     except Exception as e:
@@ -2720,7 +2763,7 @@ class MistyController:
         play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
 
         # Wait for playback to finish (generous buffer — no completion callback from Misty)
-        time.sleep(play_duration + 2.0)
+        time.sleep(play_duration + 0.2)
         self._talking_head.stop()  # halt + re-center head when playback ends (#116)
         if getattr(self, "_expression_coordinator", None):
             self._expression_coordinator.cancel()  # lower arms/re-center after response gesture
@@ -2728,6 +2771,95 @@ class MistyController:
         elapsed = time.time() - turn_start
         logger.info(f"[Turn {turn}] Exchange complete in {elapsed:.1f}s")
         return True
+
+    def _do_streaming_orchestrate_and_respond(
+        self,
+        turn: int,
+        audio_bytes: bytes,
+        turn_start: float,
+        speaker_name: str | None,
+    ):
+        """Play ordered sentence chunks as the LLM produces them.
+
+        Returns None only when streaming failed before any audio, allowing the
+        caller to use the existing single-WAV path as a safe fallback.
+        """
+        form_data = {}
+        if getattr(self, "_conversation_id", None):
+            form_data["conversation_id"] = self._conversation_id
+        if speaker_name:
+            form_data["speaker_name"] = speaker_name
+        response = requests.post(
+            f"{ORCHESTRATION_URL}/api/orchestrate/stream",
+            files={"file": (RECORDING_FILENAME, audio_bytes, "audio/wav")},
+            data=form_data,
+            timeout=60.0,
+            stream=True,
+        )
+        if response.status_code != 200:
+            logger.warning(
+                "[Turn %s] Streaming unavailable (HTTP %s); using buffered pipeline",
+                turn,
+                response.status_code,
+            )
+            return None
+
+        expected_sequence = 0
+        played = 0
+        movement = None
+        for raw_line in response.iter_lines(decode_unicode=True):
+            if not self.running:
+                response.close()
+                if played:
+                    self._rollback_orchestration_turn()
+                raise RuntimeError("Streaming playback cancelled")
+            if not raw_line or not raw_line.startswith("data:"):
+                continue
+            event = json.loads(raw_line[5:].strip())
+            event_type = event.get("type")
+            if event_type in ("audio", "movement"):
+                if event_type == "audio":
+                    sequence = int(event.get("sequence", -1))
+                    if sequence != expected_sequence:
+                        self._rollback_orchestration_turn()
+                        raise RuntimeError(
+                            f"Out-of-order streaming audio: expected {expected_sequence}, got {sequence}"
+                        )
+                    expected_sequence += 1
+                wav_data = base64.b64decode(event["audioBytes"], validate=True)
+                self.set_state(State.PLAYING)
+                self.set_led(148, 0, 211)
+                self._talking_head.start("happy")
+                try:
+                    duration = self.upload_and_play_audio(
+                        wav_data, f"foundry_chunk_{played:02d}.wav"
+                    )
+                except Exception:
+                    self._rollback_orchestration_turn()
+                    raise
+                time.sleep(duration)
+                played += 1
+                if event_type == "movement":
+                    movement = event.get("movement")
+            elif event_type == "error":
+                if played:
+                    self._rollback_orchestration_turn()
+                    raise RuntimeError("Streaming failed after playback began")
+                return None
+            elif event_type == "complete":
+                logger.info(
+                    "[Turn %s] Stream complete: chunks=%s first_audio=%sms target=%sms total=%.1fs",
+                    turn,
+                    event.get("chunks", played),
+                    event.get("firstAudioMs", 0),
+                    event.get("firstAudioTargetMs", 0),
+                    time.time() - turn_start,
+                )
+
+        self._talking_head.stop()
+        if movement:
+            return {"movement": movement, "had_speech": True}
+        return True if played else None
 
     def _listen_for_followup(self, turn: int) -> bool:
         """Listen briefly for follow-up speech. Returns True if speech was detected and responded to."""
@@ -2742,13 +2874,19 @@ class MistyController:
             self._wake_word_listener.start_recording()
 
         misty_recording_stop = None
+        misty_fallback_available = False
         if use_laptop_mic:
             misty_recording_stop = self._start_configured_laptop_misty_recording(
                 turn,
                 "follow-up recording",
             )
+            misty_fallback_available = (
+                self._laptop_misty_fallback_enabled()
+                and misty_recording_stop is not None
+            )
         else:
             self.start_recording(RECORDING_FILENAME)
+            misty_fallback_available = True
 
         record_start = time.time()
         if use_laptop_mic:
@@ -2773,7 +2911,8 @@ class MistyController:
         elif not use_laptop_mic:
             self.stop_recording()
             self._recording_cycles += 1
-        time.sleep(0.5)  # finalize
+        if not use_laptop_mic or misty_fallback_available:
+            time.sleep(0.2)
 
         # Get audio from laptop mic (preferred) or Misty
         if use_laptop_mic:
@@ -2811,7 +2950,9 @@ class MistyController:
         # Send through the full pipeline — orchestration returns empty_stt error
         # if no speech was detected, which we treat as silence
         try:
-            form_data = {}
+            form_data = {"return_audio_bytes": "true"}
+            if getattr(self, "_conversation_id", None):
+                form_data["conversation_id"] = self._conversation_id
             if self._recognized_face:
                 form_data["speaker_name"] = self._recognized_face
             response = requests.post(
@@ -2840,14 +2981,21 @@ class MistyController:
                 audio_file = result.get("audio_file")
                 if audio_file:
                     try:
-                        audio_url = f"{ORCHESTRATION_URL}/api/audio/{audio_file}"
-                        audio_resp = requests.get(audio_url, timeout=10.0)
-                        audio_resp.raise_for_status()
+                        response_wav = None
+                        if result.get("audioBytes"):
+                            response_wav = base64.b64decode(
+                                result["audioBytes"], validate=True
+                            )
+                        if response_wav is None:
+                            audio_url = f"{ORCHESTRATION_URL}/api/audio/{audio_file}"
+                            audio_resp = requests.get(audio_url, timeout=10.0)
+                            audio_resp.raise_for_status()
+                            response_wav = audio_resp.content
                         self.set_state(State.PLAYING)
                         self.set_led(148, 0, 211)
                         self.show_face("face_talking_happy.gif")  # consistent ack face (#116)
                         self._talking_head.start("happy")  # talking motion (#116)
-                        play_duration = self.upload_and_play_audio(audio_resp.content, RESPONSE_FILENAME)
+                        play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
                         time.sleep(play_duration + 1.0)
                         self._talking_head.stop()  # halt + re-center head (#116)
                     except Exception as e:
@@ -2865,14 +3013,18 @@ class MistyController:
             if result.get("ttsFallback"):
                 logger.warning(f"[Turn {turn}] WARNING: TTS FALLBACK was used")
 
-            if not audio_uri:
+            if not audio_uri and not result.get("audioBytes"):
                 logger.error(f"[Turn {turn}] Follow-up: no response audio URI")
                 return False
 
-            audio_url = f"{ORCHESTRATION_URL}{audio_uri}"
-            audio_resp = requests.get(audio_url, timeout=10.0)
-            audio_resp.raise_for_status()
-            response_wav = audio_resp.content
+            response_wav = None
+            if result.get("audioBytes"):
+                response_wav = base64.b64decode(result["audioBytes"], validate=True)
+            if response_wav is None:
+                audio_url = f"{ORCHESTRATION_URL}{audio_uri}"
+                audio_resp = requests.get(audio_url, timeout=10.0)
+                audio_resp.raise_for_status()
+                response_wav = audio_resp.content
             logger.info(f"[Turn {turn}] Follow-up audio: {len(response_wav)} bytes")
 
             # Play the response
@@ -2883,7 +3035,11 @@ class MistyController:
             self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # face forward
             self._talking_head.start(emotion)  # emotion-aware talking motion (#116)
 
-            play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
+            try:
+                play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
+            except Exception:
+                self._rollback_orchestration_turn()
+                raise
             time.sleep(play_duration + 0.5)
             self._talking_head.stop()  # halt + re-center head when playback ends (#116)
             return True
@@ -2896,6 +3052,15 @@ class MistyController:
         self.set_state(State.REARMING)
         self.move_head(pitch=0, roll=0, yaw=0, velocity=40)  # center head
         self._recognized_face = None  # clear face context between conversations (#16)
+        if getattr(self, "_conversation_id", None):
+            try:
+                requests.delete(
+                    f"{ORCHESTRATION_URL}/api/conversations/{self._conversation_id}",
+                    timeout=2.0,
+                )
+            except Exception as exc:
+                logger.warning("Could not clear conversation context: %s", exc)
+            self._conversation_id = None
 
         # Check if proactive reboot is needed (#22)
         # Trigger on conversation cycles OR total recording cycles — whichever hits first.
