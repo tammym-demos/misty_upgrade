@@ -75,7 +75,7 @@ The Misty controller runs on the companion device and drives the robot entirely 
 **Key Configuration** (environment variables):
 - `MISTY_IP`: Robot IP address (default: `10.0.0.44`)
 - `ORCHESTRATION_URL`: Orchestration service URL (default: `http://10.0.0.58:5000`)
-- `RECORDING_DURATION_S`: How long to record after wake word (default: `6` seconds)
+- `RECORDING_DURATION_S`: Minimum VAD capture time after wake word (default: `1.25` seconds)
 - `FOLLOWUP_LISTEN_S`: Duration of each follow-up listen clip (default: `5` seconds)
 - `FOLLOWUP_TIMEOUT_S`: Max follow-up conversation window (default: `90` seconds)
 - `LAPTOP_MISTY_RECORDING_MODE`: Misty recorder behavior during conversations (`fallback`, `tally`, or `off`)
@@ -535,7 +535,7 @@ curl http://localhost:5000/api/health
 1. Streaming TTS — synthesize in chunks as LLM tokens arrive
 2. Evaluate faster TTS engines (piper-tts)
 3. Pre-generate common responses
-4. Reduce `RECORDING_DURATION_S` env var (default 4s)
+4. Tune `RECORDING_DURATION_S` only after validating trailing-silence VAD (default 1.25s)
 5. Implement VAD to stop recording when user stops speaking (#20)
 
 ### Issue: Wake Word Not Triggering

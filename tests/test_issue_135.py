@@ -151,3 +151,12 @@ def test_preload_uploads_without_immediate_playback(tmp_path):
     assert names == ["cue-1.wav"]
     payload = robot.misty_post.call_args.args[1]
     assert payload["ImmediatelyApply"] is False
+
+
+def test_streaming_sentence_chunks_preserve_order_and_tail():
+    chunks, tail = svc._complete_sentences("First sentence. Second")
+    assert chunks == ["First sentence."]
+    assert tail == "Second"
+    final, tail = svc._complete_sentences(tail, final=True)
+    assert final == ["Second"]
+    assert tail == ""

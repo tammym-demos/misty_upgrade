@@ -47,6 +47,8 @@ MAX_USER_CHARS: int = 400
 MAX_CONTEXT_CHARS: int = 5000
 MAX_CONTEXT_TOKENS: int = 1200
 GROUNDING_SOURCES: str = "../../README.md,../../docs/conference-mode.md"
+STREAMING_ENABLED: bool = True
+STREAMING_FIRST_AUDIO_TARGET_S: float = 5.0
 
 # ---------------------------------------------------------------------------
 # Misty controller (misty_controller.py)
@@ -228,7 +230,7 @@ CONFERENCE_MISTY_FILENAME_PREFIX: str = "conf_"
 # available at all times regardless of this setting.
 CONFERENCE_AUTO_ADVANCE: bool = True
 # Seconds of trailing presenter silence that mark end-of-speech for auto-advance.
-CONFERENCE_PRESENTER_SILENCE_S: float = 2.5
+CONFERENCE_PRESENTER_SILENCE_S: float = 1.5
 # Maximum seconds to wait for the presenter to finish before an auto-advance
 # attempt gives up and yields to manual control (stage-safety timeout).
 CONFERENCE_PRESENTER_MAX_WAIT_S: float = 45.0

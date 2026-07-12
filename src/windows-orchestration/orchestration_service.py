@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 from typing import Dict, Any, Tuple
 
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify, send_file
+from flask import Flask, Response, request, jsonify, send_file, stream_with_context
 from flask_cors import CORS
 
 import config_defaults  # canonical source for all shared default values (see config_defaults.py)
@@ -357,6 +357,12 @@ MAX_CONTEXT_TOKENS = int(
 )
 GROUNDING_SOURCES = os.getenv(
     "GROUNDING_SOURCES", config_defaults.GROUNDING_SOURCES
+)
+STREAMING_FIRST_AUDIO_TARGET_S = float(
+    os.getenv(
+        "STREAMING_FIRST_AUDIO_TARGET_S",
+        str(config_defaults.STREAMING_FIRST_AUDIO_TARGET_S),
+    )
 )
 
 # Locked v1 model stack
@@ -752,6 +758,180 @@ def rollback_conversation_turn(conversation_id: str):
             "rolledBack": removed,
         }
     )
+
+
+def _complete_sentences(buffer: str, final: bool = False) -> tuple[list[str], str]:
+    """Split complete sentence-sized chunks while retaining an unfinished tail."""
+    chunks: list[str] = []
+    while True:
+        match = re.search(r"(?<=[.!?])\s+", buffer)
+        if not match:
+            break
+        chunk = buffer[: match.start()].strip()
+        buffer = buffer[match.end() :]
+        if chunk:
+            chunks.append(chunk)
+    if final and buffer.strip():
+        chunks.append(buffer.strip())
+        buffer = ""
+    return chunks, buffer
+
+
+@app.route("/api/orchestrate/stream", methods=["POST"])
+def orchestrate_stream():
+    """Stream ordered sentence WAVs as SSE so playback can begin before LLM completion."""
+    if "file" not in request.files:
+        return jsonify({"status": "error", "error": "no_file"}), 400
+    audio_bytes = request.files["file"].read()
+    if len(audio_bytes) > 10 * 1024 * 1024:
+        return jsonify({"status": "error", "error": "file_too_large"}), 413
+    stt_result = speech_to_text(audio_bytes, time.time())
+    user_text = stt_result.get("text", "").strip()
+    if not user_text:
+        return jsonify({"status": "error", "error": "empty_stt"}), 400
+
+    conversation_id = (
+        request.form.get("conversation_id", "").strip() or str(uuid.uuid4())
+    )
+    speaker_name = request.form.get("speaker_name", "").strip() or None
+    state = _conversation_state(conversation_id)
+    stream_started = time.time()
+
+    @stream_with_context
+    def generate():
+        with state.lock:
+            movement = classify_movement_intent(user_text)
+            if movement:
+                acknowledgment = _get_movement_acknowledgment(movement["command"])
+                tts = text_to_speech(acknowledgment, time.time())
+                yield "data: " + json.dumps(
+                    {
+                        "type": "movement",
+                        "movement": movement,
+                        "text": acknowledgment,
+                        "audioBytes": _read_audio_bytes_b64(tts.get("audio_file")),
+                    }
+                ) + "\n\n"
+                return
+            previous_history = list(state.history)
+            previous_mode = state.last_response_mode
+            mode = classify_intent(user_text, previous_mode)
+            mode_config = RESPONSE_MODE_CONFIG[mode]
+            working_history = list(state.history)[-8:]
+            working_history.append({"role": "user", "content": user_text})
+            system_prompt = (
+                f"{SYSTEM_PROMPT} Current UTC date/time: {get_current_datetime()}. "
+                "Use only approved local context for event/project facts and state uncertainty otherwise."
+            )
+            if speaker_name:
+                system_prompt += f" You are currently talking to {speaker_name}."
+            grounding = retrieve_local_context(user_text)
+            if grounding:
+                system_prompt += " Approved local context: " + " ".join(grounding)
+            messages = [{"role": "system", "content": system_prompt}]
+            if state.summary:
+                messages.append(
+                    {"role": "system", "content": f"Earlier conversation summary: {state.summary}"}
+                )
+            messages.extend(working_history)
+            if mode_config["prompt_suffix"]:
+                messages.append(
+                    {"role": "system", "content": mode_config["prompt_suffix"]}
+                )
+            payload = {
+                "model": MODELS["chat"],
+                "messages": messages,
+                "max_tokens": mode_config["max_tokens"],
+                "temperature": 0.7,
+                "stop": mode_config["stop"],
+                "stream": True,
+            }
+            complete_text = ""
+            pending = ""
+            sequence = 0
+            first_audio_ms = None
+            try:
+                response = requests.post(
+                    f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions",
+                    json=payload,
+                    timeout=FOUNDRY_API_TIMEOUT,
+                    stream=True,
+                )
+                response.raise_for_status()
+                for raw_line in response.iter_lines(decode_unicode=True):
+                    if not raw_line or not raw_line.startswith("data:"):
+                        continue
+                    encoded = raw_line[5:].strip()
+                    if encoded == "[DONE]":
+                        break
+                    event = json.loads(encoded)
+                    delta = event["choices"][0].get("delta", {}).get("content", "")
+                    if not delta:
+                        continue
+                    pending += delta
+                    complete_text += delta
+                    sentences, pending = _complete_sentences(pending)
+                    for sentence in sentences:
+                        tts = text_to_speech(sentence, time.time())
+                        if tts.get("status") != "ok":
+                            raise RuntimeError(tts.get("error", "tts_failure"))
+                        if first_audio_ms is None:
+                            first_audio_ms = (time.time() - stream_started) * 1000
+                        yield "data: " + json.dumps(
+                            {
+                                "type": "audio",
+                                "sequence": sequence,
+                                "text": sentence,
+                                "audioBytes": _read_audio_bytes_b64(tts.get("audio_file")),
+                                "firstAudioMs": round(first_audio_ms),
+                            }
+                        ) + "\n\n"
+                        sequence += 1
+                sentences, _ = _complete_sentences(pending, final=True)
+                for sentence in sentences:
+                    tts = text_to_speech(sentence, time.time())
+                    if tts.get("status") != "ok":
+                        raise RuntimeError(tts.get("error", "tts_failure"))
+                    if first_audio_ms is None:
+                        first_audio_ms = (time.time() - stream_started) * 1000
+                    yield "data: " + json.dumps(
+                        {
+                            "type": "audio",
+                            "sequence": sequence,
+                            "text": sentence,
+                            "audioBytes": _read_audio_bytes_b64(tts.get("audio_file")),
+                            "firstAudioMs": round(first_audio_ms),
+                        }
+                    ) + "\n\n"
+                    sequence += 1
+                complete_text = complete_text.strip()
+                state.history[:] = working_history
+                state.history.append({"role": "assistant", "content": complete_text})
+                state.last_response_mode = mode
+                _compact_history(state)
+                state.updated_at = time.time()
+                yield "data: " + json.dumps(
+                    {
+                        "type": "complete",
+                        "conversationId": conversation_id,
+                        "transcribedText": user_text,
+                        "inferenceResponse": complete_text,
+                        "chunks": sequence,
+                        "firstAudioMs": round(first_audio_ms or 0),
+                        "firstAudioTargetMs": round(STREAMING_FIRST_AUDIO_TARGET_S * 1000),
+                    }
+                ) + "\n\n"
+            except (GeneratorExit, Exception) as exc:
+                state.history[:] = previous_history
+                state.last_response_mode = previous_mode
+                if isinstance(exc, GeneratorExit):
+                    raise
+                logger.error("Streaming orchestration failed: %s", exc)
+                yield "data: " + json.dumps(
+                    {"type": "error", "error": "stream_failure", "retryable": True}
+                ) + "\n\n"
+
+    return Response(generate(), mimetype="text/event-stream")
 
 # ============================================================================
 # STEP 1: SPEECH-TO-TEXT (faster-whisper, in-process)
