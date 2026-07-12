@@ -14,10 +14,12 @@ import logging
 import subprocess
 import threading
 import time
+import uuid
 import requests
 from collections import OrderedDict
+from dataclasses import dataclass, field
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, Tuple
 
 from dotenv import load_dotenv
@@ -53,6 +55,7 @@ STT_MIN_RMS = float(os.getenv("STT_MIN_RMS", str(config_defaults.STT_MIN_RMS)))
 STT_MIN_PEAK = float(os.getenv("STT_MIN_PEAK", str(config_defaults.STT_MIN_PEAK)))
 STT_MIN_AVG_LOGPROB = float(os.getenv("STT_MIN_AVG_LOGPROB", str(config_defaults.STT_MIN_AVG_LOGPROB)))
 STT_MAX_NO_SPEECH_PROB = float(os.getenv("STT_MAX_NO_SPEECH_PROB", str(config_defaults.STT_MAX_NO_SPEECH_PROB)))
+STT_BEAM_SIZE = int(os.getenv("STT_BEAM_SIZE", str(config_defaults.STT_BEAM_SIZE)))
 SYSTEM_PROMPT = os.getenv(
     "SYSTEM_PROMPT",
     (
@@ -240,8 +243,8 @@ _CONTINUATION_PATTERN = re.compile(
 # Per-mode LLM parameters
 RESPONSE_MODE_CONFIG = {
     "short": {
-        "max_tokens": 60,
-        "max_words": 40,
+        "max_tokens": 50,
+        "max_words": 35,
         "max_sentences": 3,
         "prompt_suffix": None,
         "stop": ["\n", "...", "\u2014"],
@@ -349,6 +352,9 @@ def classify_emotion(response_text: str) -> str:
 MAX_USER_CHARS = int(os.getenv("MAX_USER_CHARS", str(config_defaults.MAX_USER_CHARS)))
 # Maximum total characters across all messages sent to the LLM (0 = disabled)
 MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", str(config_defaults.MAX_CONTEXT_CHARS)))
+MAX_CONTEXT_TOKENS = int(
+    os.getenv("MAX_CONTEXT_TOKENS", str(config_defaults.MAX_CONTEXT_TOKENS))
+)
 
 # Locked v1 model stack
 # Foundry Local requires full model IDs for inference calls
@@ -409,10 +415,54 @@ LATENCY_BUDGET = {
     "overhead": 1000,  # Network, serialization, etc.
 }
 
-# Global conversation context (in-memory for v1; stateless per utterance for MVP)
-conversation_history = []
-# Track last response mode for continuation detection
+@dataclass
+class ConversationState:
+    history: list[dict[str, str]] = field(default_factory=list)
+    summary: str = ""
+    last_response_mode: str = "short"
+    lock: threading.RLock = field(default_factory=threading.RLock)
+    updated_at: float = field(default_factory=time.time)
+
+
+_conversation_states: dict[str, ConversationState] = {}
+_conversation_states_lock = threading.Lock()
+conversation_history: list[dict[str, str]] = []
 _last_response_mode = "short"
+_legacy_state = ConversationState(history=conversation_history)
+
+
+def _conversation_state(conversation_id: str | None) -> ConversationState:
+    """Return isolated state for a conversation, preserving direct-call compatibility."""
+    global _legacy_state
+    if not conversation_id:
+        if _legacy_state.history is not conversation_history:
+            _legacy_state = ConversationState(
+                history=conversation_history,
+                last_response_mode=_last_response_mode,
+            )
+        return _legacy_state
+    with _conversation_states_lock:
+        return _conversation_states.setdefault(conversation_id, ConversationState())
+
+
+def reset_conversation(conversation_id: str) -> bool:
+    with _conversation_states_lock:
+        return _conversation_states.pop(conversation_id, None) is not None
+
+
+def _estimate_tokens(messages: list[dict[str, str]]) -> int:
+    return sum(max(1, len(message.get("content", "")) // 4) for message in messages)
+
+
+def _compact_history(state: ConversationState) -> None:
+    """Bound context by estimated tokens and retain a compact prior-turn summary."""
+    removed: list[str] = []
+    while len(state.history) > 2 and _estimate_tokens(state.history) > MAX_CONTEXT_TOKENS:
+        message = state.history.pop(0)
+        removed.append(f"{message.get('role', 'unknown')}: {message.get('content', '')}")
+    if removed:
+        compact = " | ".join(removed)
+        state.summary = (state.summary + " | " + compact).strip(" |")[-1200:]
 
 # ============================================================================
 # FLASK APP SETUP
@@ -478,6 +528,13 @@ def orchestrate():
     Output: JSON with response audio URI (and optionally inline audio bytes) or error
     """
     start_time = time.time()
+    conversation_id = (
+        request.form.get("conversation_id", "").strip()
+        or request.headers.get("X-Conversation-ID", "").strip()
+        or str(uuid.uuid4())
+    )
+    session = _conversation_state(conversation_id)
+    session.lock.acquire()
     
     try:
         # Extract WAV file
@@ -540,8 +597,19 @@ def orchestrate():
             return jsonify(result), 200
         
         # Step 2: Language Model Inference
+        history_snapshot = (
+            list(session.history),
+            session.summary,
+            session.last_response_mode,
+            session.updated_at,
+        )
         llm_start = time.time()
-        llm_result = language_model_inference(user_text, llm_start, speaker_name=speaker_name)
+        llm_result = language_model_inference(
+            user_text,
+            llm_start,
+            speaker_name=speaker_name,
+            conversation_id=conversation_id,
+        )
         llm_ms = (time.time() - llm_start) * 1000
         if llm_result.get("status") == "error":
             return jsonify(llm_result), 500
@@ -549,6 +617,12 @@ def orchestrate():
         response_text = llm_result.get("text", "").strip()
         if not response_text:
             logger.warning("LLM returned empty response")
+            (
+                session.history[:],
+                session.summary,
+                session.last_response_mode,
+                session.updated_at,
+            ) = history_snapshot
             return jsonify({"status": "error", "error": "empty_llm"}), 400
         
         logger.info(f"[LLM {llm_ms:.0f}ms] {response_text}")
@@ -558,11 +632,23 @@ def orchestrate():
         tts_result = text_to_speech(response_text, tts_start)
         tts_ms = (time.time() - tts_start) * 1000
         if tts_result.get("status") == "error":
+            (
+                session.history[:],
+                session.summary,
+                session.last_response_mode,
+                session.updated_at,
+            ) = history_snapshot
             return jsonify(tts_result), 500
         
         response_audio_uri = tts_result.get("audio_uri", "")
         if not response_audio_uri:
             logger.warning("TTS returned no audio URI")
+            (
+                session.history[:],
+                session.summary,
+                session.last_response_mode,
+                session.updated_at,
+            ) = history_snapshot
             return jsonify({"status": "error", "error": "empty_tts"}), 500
         
         # Calculate total latency
@@ -573,7 +659,7 @@ def orchestrate():
         # Classify emotion for face animation (< 1ms, regex only)
         emotion = classify_emotion(response_text)
         
-        logger.info(f"[Pipeline {total_latency_ms:.0f}ms] STT={stt_ms:.0f} LLM={llm_ms:.0f} TTS={tts_ms:.0f} history={len(conversation_history)} fallback={tts_fallback} cached={tts_cached} emotion={emotion}")
+        logger.info(f"[Pipeline {total_latency_ms:.0f}ms] STT={stt_ms:.0f} LLM={llm_ms:.0f} TTS={tts_ms:.0f} history={len(session.history)} fallback={tts_fallback} cached={tts_cached} emotion={emotion}")
         
         resp = {
             "status": "ok",
@@ -584,6 +670,7 @@ def orchestrate():
             "latencyMs": total_latency_ms,
             "ttsFallback": tts_fallback,
             "ttsCached": tts_cached,
+            "conversationId": conversation_id,
         }
         if return_audio_bytes:
             resp["audioBytes"] = _read_audio_bytes_b64(tts_result.get("audio_file"))
@@ -592,6 +679,40 @@ def orchestrate():
     except Exception as e:
         logger.error(f"Orchestration failed: {e}", exc_info=True)
         return jsonify({"status": "error", "error": "internal_error"}), 500
+    finally:
+        session.lock.release()
+
+
+@app.route("/api/conversations/<conversation_id>", methods=["DELETE"])
+def clear_conversation(conversation_id: str):
+    """Explicitly release context when the controller re-arms for a new person."""
+    return jsonify(
+        {
+            "status": "ok",
+            "conversationId": conversation_id,
+            "cleared": reset_conversation(conversation_id),
+        }
+    )
+
+
+@app.route("/api/conversations/<conversation_id>/last", methods=["DELETE"])
+def rollback_conversation_turn(conversation_id: str):
+    """Remove the last complete exchange when robot playback did not occur."""
+    state = _conversation_state(conversation_id)
+    removed = False
+    with state.lock:
+        if len(state.history) >= 2:
+            state.history[:] = state.history[:-2]
+            state.last_response_mode = "short"
+            state.updated_at = time.time()
+            removed = True
+    return jsonify(
+        {
+            "status": "ok",
+            "conversationId": conversation_id,
+            "rolledBack": removed,
+        }
+    )
 
 # ============================================================================
 # STEP 1: SPEECH-TO-TEXT (faster-whisper, in-process)
@@ -668,7 +789,7 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
         segments, info = model.transcribe(
             audio_io,
             language="en",
-            beam_size=5,
+            beam_size=STT_BEAM_SIZE,
             vad_filter=True,
         )
         segment_list = list(segments)
@@ -718,7 +839,12 @@ def _looks_like_repeated_short_hallucination(text: str) -> bool:
 # STEP 2: LANGUAGE MODEL INFERENCE
 # ============================================================================
 
-def language_model_inference(user_text: str, start_time: float, speaker_name: str | None = None) -> Dict[str, Any]:
+def language_model_inference(
+    user_text: str,
+    start_time: float,
+    speaker_name: str | None = None,
+    conversation_id: str | None = None,
+) -> Dict[str, Any]:
     """Run inference using Foundry Local with adaptive response modes.
 
     Args:
@@ -726,7 +852,8 @@ def language_model_inference(user_text: str, start_time: float, speaker_name: st
         start_time: Pipeline start timestamp.
         speaker_name: Optional recognized face name (#16). Injected into prompt context.
     """
-    global conversation_history, _last_response_mode
+    global _last_response_mode
+    state = _conversation_state(conversation_id)
     
     try:
         elapsed = (time.time() - start_time) * 1000
@@ -745,7 +872,7 @@ def language_model_inference(user_text: str, start_time: float, speaker_name: st
             user_text = user_text[:MAX_USER_CHARS]
 
         # Classify intent for adaptive response mode
-        previous_response_mode = _last_response_mode
+        previous_response_mode = state.last_response_mode
         response_mode = classify_intent(user_text, previous_response_mode)
         # Note: _last_response_mode is updated AFTER successful LLM response (below)
         # to avoid stale state if the LLM call fails or times out.
@@ -753,14 +880,18 @@ def language_model_inference(user_text: str, start_time: float, speaker_name: st
         logger.info(f"Response mode: {response_mode} (last={previous_response_mode})")
 
         # Build message history
-        conversation_history.append({"role": "user", "content": user_text})
-        # Keep history limited to last 8 messages (4 turns) for better context
-        if len(conversation_history) > 8:
-            del conversation_history[:-8]
+        working_history = list(state.history)
+        working_history.append({"role": "user", "content": user_text})
+        if len(working_history) > 8:
+            del working_history[:-8]
 
         url = f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions"
         # Prepend system prompt on every call; not stored in history
-        system_prompt = SYSTEM_PROMPT
+        system_prompt = (
+            f"{SYSTEM_PROMPT} Today is {datetime.now(timezone.utc).date().isoformat()} UTC. "
+            "Only state event or project facts supplied in approved local context; "
+            "otherwise say that you are not certain."
+        )
         # Inject face recognition context (#16) — tell Misty who she's talking to
         if speaker_name:
             system_prompt += (
@@ -769,12 +900,17 @@ def language_model_inference(user_text: str, start_time: float, speaker_name: st
                 f" Don't announce that you recognized them every time."
             )
             logger.info(f"Speaker identified: {speaker_name}")
-        messages = [{"role": "system", "content": system_prompt}] + conversation_history
+        messages = [{"role": "system", "content": system_prompt}]
+        if state.summary:
+            messages.append(
+                {"role": "system", "content": f"Earlier conversation summary: {state.summary}"}
+            )
+        messages.extend(working_history)
 
         # Inject mode-specific prompt suffix
         if mode_config["prompt_suffix"]:
             messages.append({"role": "system", "content": mode_config["prompt_suffix"]})
-        elif len(conversation_history) > 4:
+        elif len(working_history) > 4:
             # Brevity reminder only for short mode when history is long
             messages.append({"role": "system", "content": "Remember: 1-2 sentences, ~20 words max. Stay punchy."})
 
@@ -839,13 +975,18 @@ def language_model_inference(user_text: str, start_time: float, speaker_name: st
             logger.info(f"Truncated LLM response ({response_mode} mode) to: {assistant_text}")
         
         # Add to history for context in next turn
-        conversation_history.append({"role": "assistant", "content": assistant_text})
+        state.history[:] = working_history
+        state.history.append({"role": "assistant", "content": assistant_text})
+        _compact_history(state)
+        state.updated_at = time.time()
 
         # Update response mode tracking AFTER successful LLM response —
         # prevents stale state when LLM times out or fails.
         # This is NOT unused: _last_response_mode is read at line 456 on the
         # next request to classify continuation intent (e.g., "yes" / "more").
-        _last_response_mode = response_mode  # noqa: F841
+        state.last_response_mode = response_mode
+        if conversation_id is None:
+            _last_response_mode = response_mode
         
         logger.debug(f"LLM result ({response_mode}): {assistant_text}")
         return {"status": "ok", "text": assistant_text, "responseMode": response_mode}

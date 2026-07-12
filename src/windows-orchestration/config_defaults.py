@@ -40,10 +40,12 @@ STT_MIN_RMS: float = 0.0005
 STT_MIN_PEAK: float = 0.005
 STT_MIN_AVG_LOGPROB: float = -1.0
 STT_MAX_NO_SPEECH_PROB: float = 0.6
+STT_BEAM_SIZE: int = 1
 
 # LLM prompt-length limits
 MAX_USER_CHARS: int = 400
 MAX_CONTEXT_CHARS: int = 5000
+MAX_CONTEXT_TOKENS: int = 1200
 
 # ---------------------------------------------------------------------------
 # Misty controller (misty_controller.py)
@@ -54,7 +56,7 @@ MISTY_IP: str = "10.0.0.23"
 ORCHESTRATION_URL: str = "http://localhost:5000"
 
 # Audio recording
-RECORDING_DURATION_S: float = 6.0
+RECORDING_DURATION_S: float = 1.25
 
 # Follow-up conversation
 FOLLOWUP_ENABLED: bool = True
@@ -88,6 +90,7 @@ OWW_THRESHOLD: float = 0.85
 # Require the wake model to cross threshold on consecutive audio frames before
 # firing. This suppresses single-frame background false positives.
 OWW_TRIGGER_FRAMES: int = 2
+WAKE_WORD_MIN_RMS: int = 100
 LAPTOP_MIC_DEVICE: str = ""
 
 # Face recognition (issue #16)

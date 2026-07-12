@@ -69,12 +69,16 @@ RESUME_COOLDOWN_S = float(os.getenv("WAKE_WORD_RESUME_COOLDOWN_S", "1.5"))
 
 # Minimum RMS energy required to run wake word inference.  Frames below
 # this threshold are silence/noise and would cause false-positive detections.
-WAKE_WORD_MIN_RMS = int(os.getenv("WAKE_WORD_MIN_RMS", "40"))
+WAKE_WORD_MIN_RMS = int(
+    os.getenv("WAKE_WORD_MIN_RMS", str(config_defaults.WAKE_WORD_MIN_RMS))
+)
 
 # Speech monitor settings (for VAD-controlled recording)
 SPEECH_RMS_THRESHOLD = int(os.getenv("SPEECH_RMS_THRESHOLD", "80"))
 SPEECH_SILENCE_DURATION_S = float(os.getenv("SPEECH_SILENCE_DURATION_S", "1.5"))
-SPEECH_MIN_DURATION_S = float(os.getenv("SPEECH_MIN_DURATION_S", "3.0"))
+SPEECH_MIN_DURATION_S = float(
+    os.getenv("SPEECH_MIN_DURATION_S", str(config_defaults.RECORDING_DURATION_S))
+)
 SPEECH_MAX_DURATION_S = float(os.getenv("SPEECH_MAX_DURATION_S", "15.0"))
 SPEECH_NO_SPEECH_TIMEOUT_S = float(os.getenv("SPEECH_NO_SPEECH_TIMEOUT_S", "4.0"))
 
@@ -497,8 +501,11 @@ class WakeWordListener:
                 if len(self._recent_rms) > 20:
                     self._recent_rms = self._recent_rms[-10:]
 
-                # Run openWakeWord inference on ALL frames
-                if self._oww_model and not in_cooldown:
+                # Silence cannot contain a useful wake phrase; avoid unnecessary
+                # OpenWakeWord inference and clear any partial trigger streak.
+                if frame_rms < WAKE_WORD_MIN_RMS:
+                    self._detection_streaks.clear()
+                elif self._oww_model and not in_cooldown:
                     predictions = self._oww_model.predict(pcm)
                     self._handle_wake_predictions(predictions)
                 elif in_cooldown:
@@ -540,8 +547,10 @@ class WakeWordListener:
 
             # Energy validation: reject if no recent frame had speech-level RMS.
             # This prevents false triggers on silence/ambient noise.
-            max_recent_rms = max(self._recent_rms[-10:]) if self._recent_rms else 0
-            if max_recent_rms < WAKE_WORD_MIN_RMS:
+            max_recent_rms = (
+                max(self._recent_rms[-10:]) if self._recent_rms else None
+            )
+            if max_recent_rms is not None and max_recent_rms < WAKE_WORD_MIN_RMS:
                 logger.debug(
                     f"Wake word '{model_name}' rejected — low energy "
                     f"(max_rms={max_recent_rms}, min={WAKE_WORD_MIN_RMS})"
