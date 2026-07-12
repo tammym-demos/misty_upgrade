@@ -36,8 +36,8 @@ TTS_CACHE_MAX: int = 200
 # STT (faster-whisper)
 STT_DEVICE: str = "cpu"
 STT_COMPUTE_TYPE: str = "int8"
-STT_MIN_RMS: float = 0.002
-STT_MIN_PEAK: float = 0.02
+STT_MIN_RMS: float = 0.0005
+STT_MIN_PEAK: float = 0.005
 STT_MIN_AVG_LOGPROB: float = -1.0
 STT_MAX_NO_SPEECH_PROB: float = 0.6
 
@@ -57,7 +57,7 @@ ORCHESTRATION_URL: str = "http://localhost:5000"
 RECORDING_DURATION_S: float = 6.0
 
 # Follow-up conversation
-FOLLOWUP_ENABLED: bool = False
+FOLLOWUP_ENABLED: bool = True
 FOLLOWUP_LISTEN_S: float = 5.0
 FOLLOWUP_TIMEOUT_S: float = 90.0
 FOLLOWUP_MAX_TURNS: int = 12
@@ -84,7 +84,7 @@ OWW_CUSTOM_MODEL_PATH: str = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "models", "hey_misty.onnx")
 )
 OWW_MODEL_NAME: str = "hey_misty"
-OWW_THRESHOLD: float = 0.7
+OWW_THRESHOLD: float = 0.85
 # Require the wake model to cross threshold on consecutive audio frames before
 # firing. This suppresses single-frame background false positives.
 OWW_TRIGGER_FRAMES: int = 2

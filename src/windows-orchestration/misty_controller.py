@@ -2612,7 +2612,7 @@ class MistyController:
             f"{ORCHESTRATION_URL}/api/orchestrate",
             files={"file": (RECORDING_FILENAME, audio_bytes, "audio/wav")},
             data=form_data,
-            timeout=30.0,
+            timeout=60.0,
         )
         result = response.json()
 
@@ -2818,7 +2818,7 @@ class MistyController:
                 f"{ORCHESTRATION_URL}/api/orchestrate",
                 files={"file": (RECORDING_FILENAME, audio_bytes, "audio/wav")},
                 data=form_data,
-                timeout=30.0,
+                timeout=60.0,
             )
             result = response.json()
 

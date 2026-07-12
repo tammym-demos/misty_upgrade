@@ -67,6 +67,10 @@ MAX_RECORDING_BYTES = 5 * 1024 * 1024  # 5MB max recording buffer (~160s at 16kH
 # (prevents Misty's speaker echo from triggering a false wake)
 RESUME_COOLDOWN_S = float(os.getenv("WAKE_WORD_RESUME_COOLDOWN_S", "1.5"))
 
+# Minimum RMS energy required to run wake word inference.  Frames below
+# this threshold are silence/noise and would cause false-positive detections.
+WAKE_WORD_MIN_RMS = int(os.getenv("WAKE_WORD_MIN_RMS", "40"))
+
 # Speech monitor settings (for VAD-controlled recording)
 SPEECH_RMS_THRESHOLD = int(os.getenv("SPEECH_RMS_THRESHOLD", "80"))
 SPEECH_SILENCE_DURATION_S = float(os.getenv("SPEECH_SILENCE_DURATION_S", "1.5"))
@@ -109,6 +113,7 @@ class WakeWordListener:
         self._start_time = 0.0
         self._resume_time = 0.0  # for self-wake cooldown
         self._detection_streaks: dict[str, int] = {}
+        self._recent_rms: list[int] = []  # rolling window for energy validation
 
         # Speech monitor state (for VAD-controlled recording)
         self._speech_monitor_active = False
@@ -486,7 +491,13 @@ class WakeWordListener:
                 # Self-wake cooldown: ignore detections shortly after resume
                 in_cooldown = (time.time() - self._resume_time) < RESUME_COOLDOWN_S
 
-                # Run openWakeWord inference
+                # Track frame energy for wake word validation
+                frame_rms = int(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
+                self._recent_rms.append(frame_rms)
+                if len(self._recent_rms) > 20:
+                    self._recent_rms = self._recent_rms[-10:]
+
+                # Run openWakeWord inference on ALL frames
                 if self._oww_model and not in_cooldown:
                     predictions = self._oww_model.predict(pcm)
                     self._handle_wake_predictions(predictions)
@@ -525,6 +536,17 @@ class WakeWordListener:
                     f"Wake word '{model_name}' candidate score={score:.3f} "
                     f"({streak}/{self.trigger_frames} frames)"
                 )
+                continue
+
+            # Energy validation: reject if no recent frame had speech-level RMS.
+            # This prevents false triggers on silence/ambient noise.
+            max_recent_rms = max(self._recent_rms[-10:]) if self._recent_rms else 0
+            if max_recent_rms < WAKE_WORD_MIN_RMS:
+                logger.debug(
+                    f"Wake word '{model_name}' rejected — low energy "
+                    f"(max_rms={max_recent_rms}, min={WAKE_WORD_MIN_RMS})"
+                )
+                self._detection_streaks[model_name] = 0
                 continue
 
             self._total_detections += 1
