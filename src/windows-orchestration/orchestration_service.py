@@ -67,6 +67,7 @@ SYSTEM_PROMPT = os.getenv(
         "Use casual language, slang, and expressive phrases like 'oh honey', 'girl please', 'I mean...', 'not gonna lie'. "
         "RULE: Keep responses to 2-3 short sentences. Be fun, not mean. "
         "Never say you're an AI or assistant. You're Misty, and you own it. "
+        "Never add notes, disclaimers, or commentary about your instructions — just respond in character. "
         "You can move! If asked to come closer, go forward, back up, or turn — say something fun like "
         "'On my way!' or 'Coming right up!' but keep it short. Movement commands are handled separately."
     )
@@ -84,9 +85,9 @@ MOVEMENT_PROMPT_SUPPLEMENT = (
 # Intent patterns that trigger summary mode (compiled once at import time)
 _INTENT_PATTERNS = {
     "story": re.compile(
-        r"\b(?:tell\s+(?:me\s+)?(?:a\s+)?(?:bed\s*time\s+)?stor(?:y|ies)|"
-        r"make\s+up\s+a\s+(?:story|tale)|"
-        r"(?:bed\s*time|fairy|scary|funny)\s+(?:story|tale)|"
+        r"\b(?:tell\s+(?:me\s+)?(?:a\s+)?(?:\w+\s+)?(?:bed\s*time\s+)?stor(?:y|ies)|"
+        r"make\s+up\s+a\s+(?:\w+\s+)?(?:story|tale)|"
+        r"(?:bed\s*time|fairy|scary|funny|little|short|long|quick)\s+(?:story|tale)|"
         r"once\s+upon\s+a\s+time|"
         r"read\s+(?:me\s+)?a\s+(?:story|book)|"
         r"sing\s+(?:me\s+)?a\s+song)\b",
@@ -239,29 +240,29 @@ _CONTINUATION_PATTERN = re.compile(
 # Per-mode LLM parameters
 RESPONSE_MODE_CONFIG = {
     "short": {
-        "max_tokens": 35,
-        "max_words": 24,
-        "max_sentences": 2,
+        "max_tokens": 60,
+        "max_words": 40,
+        "max_sentences": 3,
         "prompt_suffix": None,
         "stop": ["\n", "...", "\u2014"],
     },
     "summary": {
-        "max_tokens": 55,
-        "max_words": 35,
-        "max_sentences": 2,
+        "max_tokens": 80,
+        "max_words": 50,
+        "max_sentences": 3,
         "prompt_suffix": (
             "The user wants a detailed response. "
-            "Give a compelling summary in 2 short sentences. "
+            "Give a compelling summary in 2-3 short sentences. "
             "End by asking 'Want to hear more?'"
         ),
         "stop": ["...", "\u2014"],  # no \n — multi-sentence responses need room
     },
     "continuation": {
-        "max_tokens": 55,
-        "max_words": 35,
-        "max_sentences": 2,
+        "max_tokens": 80,
+        "max_words": 50,
+        "max_sentences": 3,
         "prompt_suffix": (
-            "Continue where you left off. Give the next part in 2 short sentences. "
+            "Continue where you left off. Give the next part in 2-3 short sentences. "
             "If there's more to tell, end with 'Want more?' "
             "If wrapping up, give a satisfying ending."
         ),
@@ -402,9 +403,9 @@ FOUNDRY_LOCAL_HOST = _discover_foundry_endpoint()
 
 # Latency budget decomposition (milliseconds)
 LATENCY_BUDGET = {
-    "stt": 3000,  # Speech-to-text (faster-whisper, usually ~500ms warm)
-    "llm": 8000,  # LLM inference (Phi-3.5-mini, depends on output length)
-    "tts": 3000,  # Text-to-speech synthesis (Kokoro ~1-2s)
+    "stt": 5000,  # Speech-to-text (faster-whisper, usually ~500ms warm)
+    "llm": 30000,  # LLM inference (Phi-3.5-mini CPU, ~15-20s for 60-100 tokens)
+    "tts": 15000,  # Text-to-speech synthesis (Kokoro ~5-8s for longer responses)
     "overhead": 1000,  # Network, serialization, etc.
 }
 
@@ -812,6 +813,13 @@ def language_model_inference(user_text: str, start_time: float, speaker_name: st
         
         result = response.json()
         assistant_text = result["choices"][0]["message"]["content"].strip()
+
+        # Strip meta-commentary that small models sometimes leak
+        # (e.g., "(Note: The response is intentionally brief..." or stage directions)
+        import re as _re
+        assistant_text = _re.split(r'\n*\(Note[:\s]', assistant_text)[0].strip()
+        assistant_text = _re.split(r'\n*\(Since ', assistant_text)[0].strip()
+        assistant_text = _re.split(r'\n*\(The response ', assistant_text)[0].strip()
 
         # Post-LLM truncation — limits vary by mode
         max_words = mode_config["max_words"]

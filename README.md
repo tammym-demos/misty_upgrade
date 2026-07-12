@@ -417,7 +417,41 @@ Controller test API:
 
 ---
 
-## Conference Mode
+## Operating Modes
+
+Misty has two operating modes:
+
+### Regular Mode (default)
+
+Live 1:1 conversation using the full STT → LLM → TTS pipeline. Say "Hey Misty"
+to start a conversation; she listens, thinks, and responds. After responding she
+continues listening for follow-up speech without requiring the wake word again
+(up to 90 seconds or 12 turns of silence).
+
+Start regular mode:
+
+```powershell
+npx . start
+# — or manually —
+python orchestration_service.py
+python misty_controller.py
+```
+
+Key configuration (in `.env` or `config_defaults.py`):
+
+| Variable | Default | Description |
+|---|---|---|
+| `OWW_THRESHOLD` | `0.85` | Wake word detection confidence threshold. |
+| `WAKE_WORD_MIN_RMS` | `40` | Minimum energy in recent frames to accept a wake word trigger. |
+| `FOLLOWUP_ENABLED` | `True` | Keep listening after response without wake word. |
+| `FOLLOWUP_TIMEOUT_S` | `90.0` | Max seconds of silence before ending follow-up. |
+| `FOLLOWUP_MAX_TURNS` | `12` | Max back-and-forth turns per conversation. |
+| `FOUNDRY_API_TIMEOUT` | `30.0` | Seconds to wait for Foundry LLM response. |
+| `STT_MIN_RMS` | `0.0005` | Silence gate for STT (float scale 0–1). |
+| `STT_MIN_PEAK` | `0.005` | Peak silence gate for STT (float scale 0–1). |
+| `LAPTOP_MIC_DEVICE` | `2` | PyAudio device index (MME recommended). |
+
+### Conference Mode
 
 Conference Mode lets Misty participate in scripted on-stage dialog by playing
 predetermined audio cues instead of using the live STT → LLM → TTS path.
