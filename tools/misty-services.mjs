@@ -717,73 +717,80 @@ function stopFoundry(state, options) {
   delete state.foundry;
 }
 
-function chatModelIsLoaded() {
+function configuredChatModel(env = {}) {
+  const modelId = (env.CHAT_MODEL_ID || DEFAULTS.chatModelId).trim();
+  const alias = (env.CHAT_MODEL_ALIAS || modelId.split("-instruct-")[0] || modelId).trim();
+  return { modelId, alias };
+}
+
+function chatModelIsLoaded(model) {
   const result = run("foundry", ["service", "ps"], { timeout: 30000 });
   return result.ok && (
-    result.stdout.includes(DEFAULTS.chatModelId)
-    || result.stdout.includes(DEFAULTS.chatModelAlias)
+    result.stdout.includes(model.modelId)
+    || result.stdout.includes(model.alias)
   );
 }
 
-function chatModelIsCached() {
+function chatModelIsCached(model) {
   const result = run("foundry", ["cache", "list"], { timeout: 30000 });
   return result.ok && (
-    result.stdout.includes(DEFAULTS.chatModelId)
-    || result.stdout.includes(DEFAULTS.chatModelAlias)
+    result.stdout.includes(model.modelId)
+    || result.stdout.includes(model.alias)
   );
 }
 
-function ensureChatModelCached() {
-  if (chatModelIsCached()) {
+function ensureChatModelCached(model) {
+  if (chatModelIsCached(model)) {
     return;
   }
 
-  console.log(`Foundry chat model: downloading ${DEFAULTS.chatModelAlias} (${DEFAULTS.chatModelId})`);
+  console.log(`Foundry chat model: downloading ${model.alias} (${model.modelId})`);
   const result = runInherited("foundry", [
     "model",
     "download",
-    DEFAULTS.chatModelId,
+    model.modelId,
   ], { timeout: 1800000 });
 
-  if (result.status !== 0 && !chatModelIsCached()) {
+  if (result.status !== 0 && !chatModelIsCached(model)) {
     throw new Error(`Unable to download Foundry chat model; foundry exited with code ${result.status}`);
   }
 }
 
-function loadChatModel(state, options) {
+function loadChatModel(state, options, env) {
   if (options.skipFoundry || options.skipModelLoad) {
     console.log("Foundry chat model: skipped");
     return;
   }
 
-  if (chatModelIsLoaded()) {
-    console.log(`Foundry chat model: already loaded (${DEFAULTS.chatModelAlias})`);
+  const model = configuredChatModel(env);
+  if (chatModelIsLoaded(model)) {
+    console.log(`Foundry chat model: already loaded (${model.alias})`);
     state.chatModel = {
-      alias: DEFAULTS.chatModelAlias,
-      modelId: DEFAULTS.chatModelId,
+      alias: model.alias,
+      modelId: model.modelId,
       loadedAt: state.chatModel?.loadedAt || new Date().toISOString(),
     };
     return;
   }
 
-  ensureChatModelCached();
+  ensureChatModelCached(model);
 
-  console.log(`Foundry chat model: loading ${DEFAULTS.chatModelAlias}`);
+  console.log(`Foundry chat model: loading ${model.alias}`);
   const result = run("foundry", [
     "model",
     "load",
-    DEFAULTS.chatModelId,
+    model.modelId,
     "--ttl",
     String(DEFAULTS.modelTtlSeconds),
   ], { timeout: 180000 });
 
-  if (!result.ok && !chatModelIsLoaded()) {
+  if (!result.ok && !chatModelIsLoaded(model)) {
     throw new Error(`Unable to load Foundry chat model:\n${result.stderr || result.stdout}`);
   }
 
   state.chatModel = {
-    alias: DEFAULTS.chatModelAlias,
-    modelId: DEFAULTS.chatModelId,
+    alias: model.alias,
+    modelId: model.modelId,
     ttlSeconds: DEFAULTS.modelTtlSeconds,
     loadedAt: new Date().toISOString(),
   };
@@ -1020,7 +1027,7 @@ async function start(options) {
   state.startedAt = state.startedAt || new Date().toISOString();
 
   startFoundry(state, options);
-  loadChatModel(state, options);
+  loadChatModel(state, options, env);
 
   const orchestrationAlreadyRunning = await httpRequest(DEFAULTS.orchestrationHealthUrl, { timeoutMs: 1500 })
     .then((response) => [200, 503].includes(response.statusCode))
@@ -1197,10 +1204,14 @@ Options are passed directly to conference_mode.py.
   // For "run", stop the main controller service if it's running — it holds the
   // laptop mic wake word listener and will conflict with conference mode.
   const subcommand = subArgs[0];
+  let restartRegularMode = false;
   if (subcommand === "run") {
     const state = readState();
     if (state.controller?.pid && isPidRunning(state.controller.pid)) {
+      restartRegularMode = true;
       console.log(`Stopping main controller (PID ${state.controller.pid}) to free laptop mic...`);
+      await gracefulControllerShutdown(state, options);
+      await waitForPidExit(state.controller.pid, 10000);
       await stopPid("Misty controller", state.controller.pid, "SIGTERM");
       delete state.controller;
       writeState(state);
@@ -1216,9 +1227,16 @@ Options are passed directly to conference_mode.py.
   }
 
   console.log(`Running: ${python} conference_mode.py ${subArgs.join(" ")}`);
-  const result = runInherited(python, [script, ...subArgs], { cwd: ORCH_DIR });
-  if (result.status !== 0) {
-    process.exitCode = result.status ?? 1;
+  try {
+    const result = runInherited(python, [script, ...subArgs], { cwd: ORCH_DIR });
+    if (result.status !== 0) {
+      process.exitCode = result.status ?? 1;
+    }
+  } finally {
+    if (restartRegularMode) {
+      console.log("Restoring regular mode after conference...");
+      await start(options);
+    }
   }
 }
 

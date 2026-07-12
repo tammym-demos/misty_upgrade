@@ -46,6 +46,7 @@ STT_BEAM_SIZE: int = 1
 MAX_USER_CHARS: int = 400
 MAX_CONTEXT_CHARS: int = 5000
 MAX_CONTEXT_TOKENS: int = 1200
+GROUNDING_SOURCES: str = "../../README.md,../../docs/conference-mode.md"
 
 # ---------------------------------------------------------------------------
 # Misty controller (misty_controller.py)

@@ -355,6 +355,9 @@ MAX_CONTEXT_CHARS = int(os.getenv("MAX_CONTEXT_CHARS", str(config_defaults.MAX_C
 MAX_CONTEXT_TOKENS = int(
     os.getenv("MAX_CONTEXT_TOKENS", str(config_defaults.MAX_CONTEXT_TOKENS))
 )
+GROUNDING_SOURCES = os.getenv(
+    "GROUNDING_SOURCES", config_defaults.GROUNDING_SOURCES
+)
 
 # Locked v1 model stack
 # Foundry Local requires full model IDs for inference calls
@@ -463,6 +466,42 @@ def _compact_history(state: ConversationState) -> None:
     if removed:
         compact = " | ".join(removed)
         state.summary = (state.summary + " | " + compact).strip(" |")[-1200:]
+
+
+def get_current_datetime() -> str:
+    """Approved deterministic tool for questions about the current date/time."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def retrieve_local_context(query: str, limit: int = 4) -> list[str]:
+    """Return small, cited excerpts from explicitly approved local sources."""
+    terms = {
+        token
+        for token in re.findall(r"[a-z0-9]{4,}", (query or "").lower())
+        if token not in {"what", "when", "where", "which", "about", "misty"}
+    }
+    if not terms:
+        return []
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    matches: list[str] = []
+    for configured_path in GROUNDING_SOURCES.split(","):
+        configured_path = configured_path.strip()
+        if not configured_path:
+            continue
+        path = os.path.abspath(os.path.join(base_dir, configured_path))
+        try:
+            with open(path, "r", encoding="utf-8") as source:
+                for line_number, line in enumerate(source, 1):
+                    text = line.strip()
+                    if text and any(term in text.lower() for term in terms):
+                        matches.append(
+                            f"[{os.path.basename(path)}:{line_number}] {text[:240]}"
+                        )
+                        if len(matches) >= limit:
+                            return matches
+        except OSError:
+            logger.warning("Configured grounding source is unavailable: %s", path)
+    return matches
 
 # ============================================================================
 # FLASK APP SETUP
@@ -900,6 +939,9 @@ def language_model_inference(
                 f" Don't announce that you recognized them every time."
             )
             logger.info(f"Speaker identified: {speaker_name}")
+        grounded_context = retrieve_local_context(user_text)
+        if grounded_context:
+            system_prompt += " Approved local context: " + " ".join(grounded_context)
         messages = [{"role": "system", "content": system_prompt}]
         if state.summary:
             messages.append(
