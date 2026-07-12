@@ -155,3 +155,52 @@ After ~20+ recording cycles in a session:
 - Use **unique timestamped event names** (e.g., `WakeWord_{unix_timestamp}`)
 - Full WebSocket reconnect on every re-arm cycle
 - `DebounceMs=0` for all subscriptions (250ms was swallowing events)
+
+---
+
+## Windows MME Microphone Stream Dies After Idle — Intermittent Zero-Out
+
+**Date discovered**: 2026-07-12
+**Severity**: Operational, workaround available
+
+### Symptoms
+
+- Laptop mic (MME device 2, 16kHz mono) works fine for the first few conversation turns
+- After 2-5 minutes of idle or after several turns, the audio stream starts returning all-zero PCM data
+- Speech monitor shows `RMS=0, 0, 0, 0, 2, 1, 1` for the entire recording
+- Wake word still triggers (OWW can hallucinate on zero data) but recordings contain no speech
+- Restarting the controller (re-opening the audio stream) fixes it immediately
+
+### Root Cause
+
+The Windows MME audio device appears to release or go dormant after a period without active reading, or when system audio policy changes occur (e.g., another app briefly claims the device, power management, or USB audio sleep). Unlike DirectSound (which zeros out when WASAPI apps run), MME zeroes out spontaneously even with no competing app visible.
+
+This was observed with Teams **not** running. The issue is likely Windows audio session management or power-saving behavior on the USB/internal mic hardware.
+
+### What We Tried
+
+| Attempt | Result |
+|---------|--------|
+| DirectSound (device 9) | Zeroed out immediately when Teams/Slack use WASAPI |
+| WASAPI (device 18) | Doesn't support 16kHz sample rate (-9997 error) |
+| MME (device 2) | Works initially, intermittently zeros after idle |
+| Closing Teams/Slack | MME still zeros — not caused by competing apps |
+
+### Workaround (current)
+
+- Restart the controller to re-open the mic stream
+- The wake word listener and recording both use the same `sounddevice.InputStream` opened at startup
+- A fresh open always recovers the mic
+
+### Recommended Fix (TODO)
+
+Add mic health monitoring to the wake word listener:
+- Track rolling RMS average over the last N frames
+- If RMS stays below a threshold (e.g., < 5) for more than 10 seconds of continuous streaming, log a warning and automatically re-open the audio stream
+- This would make the system self-healing without manual restarts
+
+### Related Issues
+
+- DirectSound vs WASAPI conflict (resolved by switching to MME)
+- OWW false triggers on zero-data (resolved with energy validation at trigger time)
+- ADR-001: Companion device architecture means all audio flows through the laptop mic
