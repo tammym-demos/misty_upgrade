@@ -127,6 +127,8 @@ The `npx .` wrapper provides a shorter entry point from the repository root:
 ```powershell
 npx . conference dry-run                        # Preview cue plan
 npx . conference prepare                        # Generate/reuse TTS audio
+npx . conference prepare --script talks/my-talk.md --no-reuse
+                                                # Regenerate all custom-script cues
 npx . conference verify                         # Confirm showtime-ready
 npx . conference run                            # Live runner (auto-advance)
 npx . conference run --no-auto                  # Manual-only mode
@@ -148,7 +150,9 @@ The default talk script is `talks/20260710-2.md`. Override with `--script`.
 
 **Notes:**
 - `npx . conference run` automatically stops the main controller service to free the laptop mic.
-- Auto-advance uses the laptop mic (configured via `LAPTOP_MIC_DEVICE`) to detect when the presenter finishes speaking (default: 2 s trailing silence).
+- Auto-advance uses the laptop mic (configured via `LAPTOP_MIC_DEVICE`) to detect when the presenter finishes speaking (default: 3 s trailing silence).
+- Presenter waits allow up to 120 seconds; reaching that safety cap yields to manual control and never plays a cue.
+- `CONFERENCE_PRESENTER_RMS_THRESHOLD` sets the initial presenter-speech energy threshold before ambient calibration (default: `30`).
 - Generated audio and the manifest are cached in `data/conference/`. Re-running `prepare` reuses unchanged cues.
 - Set `CONFERENCE_MODE_ENABLED=true` in `.env` to enable live mode.
 

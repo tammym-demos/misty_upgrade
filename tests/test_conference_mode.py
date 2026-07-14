@@ -19,6 +19,7 @@ Foundry Local, or Windows audio:
 import io
 import os
 import sys
+import threading
 import types
 import wave
 
@@ -545,6 +546,10 @@ def test_presenter_wait_passes_silence_setting_and_yields_on_timeout():
     assert wait() is False
     assert listener.kwargs["min_duration"] == 0.25
     assert listener.kwargs["silence_duration"] == 0.25
+    assert (
+        listener.kwargs["rms_threshold"]
+        == cm.CONFERENCE_PRESENTER_RMS_THRESHOLD
+    )
     assert listener.kwargs["max_duration"] > 0.01
     assert listener.stopped is True
 
@@ -574,6 +579,27 @@ def test_presenter_wait_does_not_advance_on_no_speech_timeout():
             pass
 
     wait = cm._build_presenter_wait(Listener(), max_wait_s=1.0, silence_s=0.25)
+    assert wait() is False
+
+
+def test_presenter_wait_ambient_loop_cannot_overshoot_timeout(monkeypatch):
+    class Listener:
+        speech_detected = True
+
+        def start_speech_monitor(self, **kwargs):
+            threading.Timer(0.03, kwargs["on_speech_end"]).start()
+
+        def stop_speech_monitor(self):
+            pass
+
+    monkeypatch.setattr(__import__("random"), "uniform", lambda _a, _b: 0.03)
+    wait = cm._build_presenter_wait(
+        Listener(),
+        max_wait_s=0.01,
+        silence_s=0.25,
+        ambient_fn=lambda: None,
+    )
+
     assert wait() is False
 
 

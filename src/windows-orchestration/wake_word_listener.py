@@ -41,7 +41,9 @@ logger = logging.getLogger("wake_word_listener")
 # openWakeWord settings
 OWW_MODEL_NAME = os.getenv("OWW_MODEL_NAME", config_defaults.OWW_MODEL_NAME).strip()
 OWW_THRESHOLD = float(os.getenv("OWW_THRESHOLD", str(config_defaults.OWW_THRESHOLD)))
-OWW_VAD_THRESHOLD = float(os.getenv("OWW_VAD_THRESHOLD", "0"))  # 0 = disabled
+OWW_VAD_THRESHOLD = float(
+    os.getenv("OWW_VAD_THRESHOLD", str(config_defaults.OWW_VAD_THRESHOLD))
+)
 OWW_CUSTOM_MODEL_PATH = os.getenv(
     "OWW_CUSTOM_MODEL_PATH",
     config_defaults.OWW_CUSTOM_MODEL_PATH,
@@ -65,7 +67,12 @@ MAX_RECORDING_BYTES = 5 * 1024 * 1024  # 5MB max recording buffer (~160s at 16kH
 
 # Self-wake suppression: ignore detections for this many seconds after resume
 # (prevents Misty's speaker echo from triggering a false wake)
-RESUME_COOLDOWN_S = float(os.getenv("WAKE_WORD_RESUME_COOLDOWN_S", "1.5"))
+RESUME_COOLDOWN_S = float(
+    os.getenv(
+        "WAKE_WORD_RESUME_COOLDOWN_S",
+        str(config_defaults.WAKE_WORD_RESUME_COOLDOWN_S),
+    )
+)
 
 # Minimum RMS energy required to run wake word inference.  Frames below
 # this threshold are silence/noise and would cause false-positive detections.
@@ -73,8 +80,21 @@ WAKE_WORD_MIN_RMS = int(
     os.getenv("WAKE_WORD_MIN_RMS", str(config_defaults.WAKE_WORD_MIN_RMS))
 )
 
+if not 0.0 <= OWW_THRESHOLD <= 1.0:
+    raise ValueError("OWW_THRESHOLD must be between 0.0 and 1.0")
+if not 0.0 <= OWW_VAD_THRESHOLD <= 1.0:
+    raise ValueError("OWW_VAD_THRESHOLD must be between 0.0 and 1.0")
+if not 1 <= OWW_TRIGGER_FRAMES <= 20:
+    raise ValueError("OWW_TRIGGER_FRAMES must be between 1 and 20")
+if WAKE_WORD_MIN_RMS < 0:
+    raise ValueError("WAKE_WORD_MIN_RMS must be non-negative")
+if RESUME_COOLDOWN_S < 0:
+    raise ValueError("WAKE_WORD_RESUME_COOLDOWN_S must be non-negative")
+
 # Speech monitor settings (for VAD-controlled recording)
-SPEECH_RMS_THRESHOLD = int(os.getenv("SPEECH_RMS_THRESHOLD", "80"))
+SPEECH_RMS_THRESHOLD = int(
+    os.getenv("SPEECH_RMS_THRESHOLD", str(config_defaults.SPEECH_RMS_THRESHOLD))
+)
 SPEECH_SILENCE_DURATION_S = float(os.getenv("SPEECH_SILENCE_DURATION_S", "1.5"))
 SPEECH_MIN_DURATION_S = float(
     os.getenv("SPEECH_MIN_DURATION_S", str(config_defaults.RECORDING_DURATION_S))
@@ -118,6 +138,9 @@ class WakeWordListener:
         self._resume_time = 0.0  # for self-wake cooldown
         self._detection_streaks: dict[str, int] = {}
         self._recent_rms: list[int] = []  # rolling window for energy validation
+        self._accepted_candidates = 0
+        self._rejected_candidates = 0
+        self._last_candidate: dict | None = None
 
         # Speech monitor state (for VAD-controlled recording)
         self._speech_monitor_active = False
@@ -299,6 +322,7 @@ class WakeWordListener:
         min_duration: float = SPEECH_MIN_DURATION_S,
         max_duration: float = SPEECH_MAX_DURATION_S,
         silence_duration: float = SPEECH_SILENCE_DURATION_S,
+        rms_threshold: int | None = None,
     ):
         """Begin monitoring laptop mic for speech end during Misty recording.
         
@@ -311,6 +335,7 @@ class WakeWordListener:
             min_duration: Minimum monitoring time before allowing early stop
             max_duration: Maximum monitoring time (hard cap)
             silence_duration: Trailing silence required after speech
+            rms_threshold: Initial speech energy threshold before calibration
         """
         self._speech_monitor_callback = on_speech_end
         self._speech_monitor_start_time = time.time()
@@ -321,7 +346,9 @@ class WakeWordListener:
         self._speech_monitor_silence_s = silence_duration
         self._calibration_samples = []
         self._calibration_done = False
-        self._speech_rms_threshold = SPEECH_RMS_THRESHOLD  # reset to default until calibrated
+        self._speech_rms_threshold = (
+            SPEECH_RMS_THRESHOLD if rms_threshold is None else int(rms_threshold)
+        )
         # Drain any stale audio frames from the queue before starting
         drained = 0
         while not self._audio_queue.empty():
@@ -428,6 +455,12 @@ class WakeWordListener:
             "model": self.model_name,
             "threshold": self.threshold,
             "trigger_frames": self.trigger_frames,
+            "vad_threshold": OWW_VAD_THRESHOLD,
+            "min_rms": WAKE_WORD_MIN_RMS,
+            "resume_cooldown_s": RESUME_COOLDOWN_S,
+            "accepted_candidates": self._accepted_candidates,
+            "rejected_candidates": self._rejected_candidates,
+            "last_candidate": self._last_candidate,
             "source": "laptop_mic",
             "custom_model_path": self.custom_model_path or None,
             "model_source": "custom" if self.custom_model_path else "missing_config",
@@ -501,15 +534,7 @@ class WakeWordListener:
                 if len(self._recent_rms) > 20:
                     self._recent_rms = self._recent_rms[-10:]
 
-                # Silence cannot contain a useful wake phrase; avoid unnecessary
-                # OpenWakeWord inference and clear any partial trigger streak.
-                if frame_rms < WAKE_WORD_MIN_RMS:
-                    self._detection_streaks.clear()
-                elif self._oww_model and not in_cooldown:
-                    predictions = self._oww_model.predict(pcm)
-                    self._handle_wake_predictions(predictions)
-                elif in_cooldown:
-                    self._detection_streaks.clear()
+                self._run_wake_inference(pcm, in_cooldown)
 
                 self._consecutive_errors = 0
 
@@ -529,11 +554,26 @@ class WakeWordListener:
 
         logger.info("Wake word processing loop ended")
 
+    def _run_wake_inference(self, pcm: np.ndarray, in_cooldown: bool) -> bool:
+        """Feed every frame to OpenWakeWord so its temporal context stays intact."""
+        if in_cooldown:
+            self._detection_streaks.clear()
+            return False
+        if not self._oww_model:
+            return False
+
+        predictions = self._oww_model.predict(pcm)
+        return self._handle_wake_predictions(predictions)
+
     def _handle_wake_predictions(self, predictions: dict[str, float]) -> bool:
         """Handle openWakeWord scores and fire only after sustained evidence."""
         for model_name, score in predictions.items():
             if score < self.threshold:
                 self._detection_streaks[model_name] = 0
+                if score >= max(0.1, self.threshold * 0.8):
+                    self._record_candidate(
+                        model_name, score, 0, "below_threshold", accepted=False
+                    )
                 continue
 
             streak = self._detection_streaks.get(model_name, 0) + 1
@@ -555,6 +595,9 @@ class WakeWordListener:
                     f"Wake word '{model_name}' rejected — low energy "
                     f"(max_rms={max_recent_rms}, min={WAKE_WORD_MIN_RMS})"
                 )
+                self._record_candidate(
+                    model_name, score, streak, "low_energy", accepted=False
+                )
                 self._detection_streaks[model_name] = 0
                 continue
 
@@ -564,6 +607,7 @@ class WakeWordListener:
                 f"Wake word '{model_name}' detected! score={score:.3f} "
                 f"(threshold={self.threshold}, frames={streak}/{self.trigger_frames})"
             )
+            self._record_candidate(model_name, score, streak, "accepted", accepted=True)
             self._detection_streaks.clear()
             # Reset model to prevent repeated triggers
             if self._oww_model:
@@ -576,6 +620,30 @@ class WakeWordListener:
             return True
 
         return False
+
+    def _record_candidate(
+        self,
+        model_name: str,
+        score: float,
+        streak: int,
+        reason: str,
+        *,
+        accepted: bool,
+    ) -> None:
+        max_recent_rms = max(self._recent_rms[-10:]) if self._recent_rms else None
+        self._last_candidate = {
+            "model": model_name,
+            "score": round(float(score), 4),
+            "streak": streak,
+            "max_recent_rms": max_recent_rms,
+            "reason": reason,
+            "accepted": accepted,
+            "timestamp": time.time(),
+        }
+        if accepted:
+            self._accepted_candidates += 1
+        else:
+            self._rejected_candidates += 1
 
     # --- Speech monitor helpers ---
 
@@ -591,25 +659,40 @@ class WakeWordListener:
         # Compute RMS energy
         rms = int(np.sqrt(np.mean(pcm.astype(np.float64) ** 2)))
 
-        # Phase 1: Calibration (~1.5s = ~18 frames at 80ms each)
-        CALIBRATION_FRAMES = 18
+        # Learn ambient noise without discarding initial presenter speech. Frames
+        # above the initial threshold are treated as speech, not calibration data.
+        CALIBRATION_DURATION_S = 1.5
         if not self._calibration_done:
-            self._calibration_samples.append(rms)
-            if len(self._calibration_samples) >= CALIBRATION_FRAMES:
-                # Set threshold as noise floor mean + 2x standard deviation, minimum 30
-                noise_mean = np.mean(self._calibration_samples)
-                noise_std = np.std(self._calibration_samples)
-                # Threshold = noise floor + margin (at least 2x std, minimum absolute of 30)
-                margin = max(noise_std * 3, 30)
-                self._speech_rms_threshold = int(noise_mean + margin)
+            speech_during_calibration = (
+                self._speech_detected or rms > self._speech_rms_threshold
+            )
+            if not speech_during_calibration:
+                self._calibration_samples.append(rms)
+            if elapsed >= CALIBRATION_DURATION_S:
+                # Set threshold from quiet samples only so speech cannot inflate it.
+                if self._calibration_samples and not speech_during_calibration:
+                    noise_mean = np.mean(self._calibration_samples)
+                    noise_std = np.std(self._calibration_samples)
+                    margin = max(noise_std * 3, 30)
+                    self._speech_rms_threshold = int(noise_mean + margin)
+                else:
+                    noise_mean = (
+                        float(np.mean(self._calibration_samples))
+                        if self._calibration_samples
+                        else 0
+                    )
+                    noise_std = (
+                        float(np.std(self._calibration_samples))
+                        if self._calibration_samples
+                        else 0
+                    )
                 self._calibration_done = True
                 logger.info(
                     f"Speech monitor: calibrated — noise_floor={noise_mean:.0f} "
                     f"std={noise_std:.0f} → threshold={self._speech_rms_threshold}"
                 )
-            return  # don't process speech during calibration
 
-        # Phase 2: Speech detection
+        # Detect speech during calibration too, using the initial threshold.
         is_speech = rms > self._speech_rms_threshold
 
         # Log RMS periodically for diagnostics (every ~0.5s = ~6 frames at 80ms)

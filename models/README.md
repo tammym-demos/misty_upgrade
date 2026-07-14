@@ -32,18 +32,29 @@ model with a retrained or alternate artifact:
 ```env
 OWW_CUSTOM_MODEL_PATH=C:\path\to\misty_upgrade\models\hey_misty.onnx
 OWW_MODEL_NAME=hey_misty
-OWW_THRESHOLD=0.7
+OWW_THRESHOLD=0.85
 ```
 
 Or use environment variables directly when starting the controller.
 
 ## Threshold Tuning
 
-- **0.7** (default): Balanced — good detection with low false positives.
-- **0.6**: More sensitive — catches quieter/further speech but may fire on "Hey Missy" etc.
-- **0.8**: More selective — fewer false positives but may miss soft utterances.
+- **0.85** (default): Conservative runtime baseline.
+- Lower values are more sensitive and increase false activations.
+- Higher values are more selective and may miss soft or distant wake phrases.
 
-Adjust based on your environment's background noise level.
+Do not tune on synthetic validation accuracy alone. The bundled model's training
+set is synthetic, so evaluate it against real local room speech before changing
+the deployed threshold:
+
+```powershell
+python tools\evaluate_wake_word.py `
+  --positive-dir C:\wake-eval\positive `
+  --negative-dir C:\wake-eval\meeting-speech
+```
+
+Both directories must contain local 16 kHz, 16-bit mono WAV files. Do not commit
+recorded room or meeting audio.
 
 ## Retraining / Refreshing the Model
 

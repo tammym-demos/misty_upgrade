@@ -175,6 +175,40 @@ class RecognitionResult:
         self.confidence = min(1.0, max(0.0, raw))
 
 
+@dataclass(frozen=True)
+class FaceDetection:
+    """A detected face location in image pixels."""
+
+    x: float
+    y: float
+    width: float
+    height: float
+    confidence: float
+    frame_width: int
+    frame_height: int
+
+    @property
+    def area(self) -> float:
+        return max(0.0, self.width) * max(0.0, self.height)
+
+    @property
+    def area_ratio(self) -> float:
+        return self.area / max(1, self.frame_width * self.frame_height)
+
+    @property
+    def center_x_normalized(self) -> float:
+        return ((self.x + self.width / 2.0) / max(1, self.frame_width)) - 0.5
+
+    @property
+    def center_y_normalized(self) -> float:
+        return ((self.y + self.height / 2.0) / max(1, self.frame_height)) - 0.5
+
+
+def select_largest_face(detections: Sequence[FaceDetection]) -> Optional[FaceDetection]:
+    """Return the largest detected face, used as the closest-person proxy."""
+    return max(detections, key=lambda detection: detection.area, default=None)
+
+
 # ---------------------------------------------------------------------------
 # Math helpers
 # ---------------------------------------------------------------------------
@@ -210,6 +244,77 @@ class FaceEmbedder:
 
     def extract_embeddings(self, frame: Frame) -> List[np.ndarray]:  # pragma: no cover - interface
         raise NotImplementedError
+
+
+class OnnxFaceDetector:
+    """OpenCV YuNet-compatible detector that does not require face enrollment."""
+
+    def __init__(
+        self,
+        model_path: str,
+        score_threshold: float = 0.6,
+        max_input_dimension: int = 1280,
+    ):
+        self.model_path = model_path
+        self.score_threshold = score_threshold
+        self.max_input_dimension = max(320, int(max_input_dimension))
+        self._detector = None
+
+    def _ensure_loaded(self):
+        if self._detector is not None:
+            return
+        try:
+            import cv2
+        except Exception as exc:  # pragma: no cover - depends on host env
+            raise FaceModelUnavailable(
+                "OpenCV (cv2) is required for face detection; install "
+                "opencv-python-headless (or opencv-python). Original error: " + str(exc)
+            )
+        if not self.model_path or not os.path.isfile(self.model_path):
+            raise FaceModelUnavailable(
+                f"Face detector model file not found: {self.model_path!r}. "
+                "Set FACE_DETECTOR_MODEL_PATH to a YuNet-compatible ONNX model."
+            )
+        try:
+            self._detector = cv2.FaceDetectorYN_create(
+                self.model_path, "", (320, 320), self.score_threshold
+            )
+        except Exception as exc:  # pragma: no cover - depends on host env
+            raise FaceModelUnavailable("Failed to initialize face detector: " + str(exc))
+
+    def detect(self, frame: Frame) -> List[FaceDetection]:  # pragma: no cover - needs cv2/model
+        self._ensure_loaded()
+        import cv2
+
+        if frame is None or getattr(frame, "size", 0) == 0:
+            raise FrameSourceError("empty frame supplied to detector")
+        height, width = frame.shape[:2]
+        scale = min(1.0, self.max_input_dimension / max(height, width))
+        inference_frame = frame
+        if scale < 1.0:
+            inference_frame = cv2.resize(
+                frame,
+                (max(1, round(width * scale)), max(1, round(height * scale))),
+            )
+        inference_height, inference_width = inference_frame.shape[:2]
+        self._detector.setInputSize((inference_width, inference_height))
+        _, faces = self._detector.detect(inference_frame)
+        if faces is None:
+            return []
+        coordinate_scale = 1.0 / scale
+        return [
+            FaceDetection(
+                x=float(face[0]) * coordinate_scale,
+                y=float(face[1]) * coordinate_scale,
+                width=float(face[2]) * coordinate_scale,
+                height=float(face[3]) * coordinate_scale,
+                confidence=float(face[-1]),
+                frame_width=width,
+                frame_height=height,
+            )
+            for face in faces
+            if float(face[-1]) >= self.score_threshold
+        ]
 
 
 class OnnxFaceEmbedder(FaceEmbedder):
