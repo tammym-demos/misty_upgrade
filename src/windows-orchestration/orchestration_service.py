@@ -175,6 +175,20 @@ def classify_movement_intent(user_text: str) -> dict | None:
     return None
 
 
+def classify_control_intent(user_text: str) -> dict | None:
+    """Recognize explicit local controller commands that must bypass the LLM."""
+    normalized = re.sub(r"[^a-z0-9]+", " ", (user_text or "").lower()).strip()
+    if normalized in {
+        "quiet misty",
+        "misty quiet",
+        "be quiet misty",
+        "misty be quiet",
+    }:
+        logger.info("Control intent detected: mute")
+        return {"command": "mute"}
+    return None
+
+
 import random
 
 # Pre-built movement acknowledgments (#55) — short, sassy, no LLM needed
@@ -212,6 +226,10 @@ _MOVEMENT_ACKS = {
     ],
 }
 
+_CONTROL_ACKS = {
+    "mute": "Okay, going quiet.",
+}
+
 
 # Fixed phrases used by the Misty controller (greeting + thinking audio).
 # These are uploaded to Misty at startup and must be pre-warmed so the first
@@ -226,6 +244,10 @@ def _get_movement_acknowledgment(command: str) -> str:
     """Get a random sassy acknowledgment for a movement command."""
     acks = _MOVEMENT_ACKS.get(command, ["Okay!"])
     return random.choice(acks)
+
+
+def _get_control_acknowledgment(command: str) -> str:
+    return _CONTROL_ACKS.get(command, "Okay.")
 
 
 _CONTINUATION_PATTERN = re.compile(
@@ -624,6 +646,34 @@ def orchestrate():
         
         logger.info(f"[STT {stt_ms:.0f}ms] {user_text}")
 
+        # Step 1.5: Local controller commands bypass movement and the LLM.
+        control = classify_control_intent(user_text)
+        if control:
+            ack_text = _get_control_acknowledgment(control["command"])
+            tts_start = time.time()
+            tts_result = text_to_speech(ack_text, tts_start)
+            tts_ms = (time.time() - tts_start) * 1000
+            total_ms = (time.time() - start_time) * 1000
+            logger.info(
+                f"[Pipeline {total_ms:.0f}ms] Control: {control['command']} "
+                f"(STT={stt_ms:.0f}ms, TTS={tts_ms:.0f}ms)"
+            )
+            result = {
+                "status": "ok",
+                "type": "control",
+                "control": control,
+                "user_text": user_text,
+                "response_text": ack_text,
+                "pipeline_ms": round(total_ms),
+            }
+            if tts_result.get("status") == "ok":
+                result["audio_file"] = tts_result.get("audio_file")
+                if return_audio_bytes:
+                    result["audioBytes"] = _read_audio_bytes_b64(
+                        tts_result.get("audio_file")
+                    )
+            return jsonify(result), 200
+
         # Step 1.5: Check for movement intent (#54, #55) — short-circuit for direct commands
         movement = classify_movement_intent(user_text)
         if movement:
@@ -810,6 +860,19 @@ def orchestrate_stream():
     @stream_with_context
     def generate():
         with state.lock:
+            control = classify_control_intent(user_text)
+            if control:
+                acknowledgment = _get_control_acknowledgment(control["command"])
+                tts = text_to_speech(acknowledgment, time.time())
+                yield "data: " + json.dumps(
+                    {
+                        "type": "control",
+                        "control": control,
+                        "text": acknowledgment,
+                        "audioBytes": _read_audio_bytes_b64(tts.get("audio_file")),
+                    }
+                ) + "\n\n"
+                return
             movement = classify_movement_intent(user_text)
             if movement:
                 acknowledgment = _get_movement_acknowledgment(movement["command"])
@@ -1028,16 +1091,25 @@ def speech_to_text(audio_bytes: bytes, start_time: float) -> Dict[str, Any]:
             avg_logprob = sum(getattr(seg, "avg_logprob", 0.0) for seg in segment_list) / len(segment_list)
             max_no_speech_prob = max(getattr(seg, "no_speech_prob", 0.0) for seg in segment_list)
             if avg_logprob < STT_MIN_AVG_LOGPROB or max_no_speech_prob > STT_MAX_NO_SPEECH_PROB:
-                logger.info(
-                    "Rejecting low-confidence STT result: avg_logprob=%.3f < %.3f "
-                    "or no_speech_prob=%.3f > %.3f | text=%r",
-                    avg_logprob,
-                    STT_MIN_AVG_LOGPROB,
-                    max_no_speech_prob,
-                    STT_MAX_NO_SPEECH_PROB,
-                    text,
-                )
-                return {"status": "empty", "text": "", "latency_ms": 0}
+                if classify_control_intent(text):
+                    logger.info(
+                        "Accepting exact local control despite low STT confidence: "
+                        "avg_logprob=%.3f no_speech_prob=%.3f text=%r",
+                        avg_logprob,
+                        max_no_speech_prob,
+                        text,
+                    )
+                else:
+                    logger.info(
+                        "Rejecting low-confidence STT result: avg_logprob=%.3f < %.3f "
+                        "or no_speech_prob=%.3f > %.3f | text=%r",
+                        avg_logprob,
+                        STT_MIN_AVG_LOGPROB,
+                        max_no_speech_prob,
+                        STT_MAX_NO_SPEECH_PROB,
+                        text,
+                    )
+                    return {"status": "empty", "text": "", "latency_ms": 0}
 
         if _looks_like_repeated_short_hallucination(text):
             logger.info("Rejecting repeated short STT hallucination: text=%r", text)

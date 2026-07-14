@@ -88,6 +88,34 @@ FACE_RECOGNITION_MIN_SAMPLES = int(os.getenv("FACE_RECOGNITION_MIN_SAMPLES", str
 FACE_DETECTOR_MODEL_PATH = os.getenv("FACE_DETECTOR_MODEL_PATH", config_defaults.FACE_DETECTOR_MODEL_PATH)
 FACE_EMBEDDER_MODEL_PATH = os.getenv("FACE_EMBEDDER_MODEL_PATH", config_defaults.FACE_EMBEDDER_MODEL_PATH)
 
+# Generic face presence tracking. This uses only the detector model and does
+# not require enrolled profiles or the embedding model.
+USE_FACE_TRACKING = os.getenv(
+    "USE_FACE_TRACKING", str(config_defaults.USE_FACE_TRACKING)
+).lower() in ("1", "true", "yes")
+FACE_TRACKING_POLL_INTERVAL_S = float(os.getenv("FACE_TRACKING_POLL_INTERVAL_S", str(config_defaults.FACE_TRACKING_POLL_INTERVAL_S)))
+FACE_TRACKING_DETECTOR_CONFIDENCE = float(os.getenv("FACE_TRACKING_DETECTOR_CONFIDENCE", str(config_defaults.FACE_TRACKING_DETECTOR_CONFIDENCE)))
+FACE_TRACKING_MAX_INPUT_DIMENSION = int(os.getenv("FACE_TRACKING_MAX_INPUT_DIMENSION", str(config_defaults.FACE_TRACKING_MAX_INPUT_DIMENSION)))
+FACE_TRACKING_MIN_FACE_AREA_RATIO = float(os.getenv("FACE_TRACKING_MIN_FACE_AREA_RATIO", str(config_defaults.FACE_TRACKING_MIN_FACE_AREA_RATIO)))
+FACE_TRACKING_HORIZONTAL_DEAD_ZONE = float(os.getenv("FACE_TRACKING_HORIZONTAL_DEAD_ZONE", str(config_defaults.FACE_TRACKING_HORIZONTAL_DEAD_ZONE)))
+FACE_TRACKING_VERTICAL_DEAD_ZONE = float(os.getenv("FACE_TRACKING_VERTICAL_DEAD_ZONE", str(config_defaults.FACE_TRACKING_VERTICAL_DEAD_ZONE)))
+FACE_TRACKING_YAW_GAIN = float(os.getenv("FACE_TRACKING_YAW_GAIN", str(config_defaults.FACE_TRACKING_YAW_GAIN)))
+FACE_TRACKING_PITCH_GAIN = float(os.getenv("FACE_TRACKING_PITCH_GAIN", str(config_defaults.FACE_TRACKING_PITCH_GAIN)))
+FACE_TRACKING_MAX_STEP_DEG = float(os.getenv("FACE_TRACKING_MAX_STEP_DEG", str(config_defaults.FACE_TRACKING_MAX_STEP_DEG)))
+FACE_TRACKING_YAW_LIMIT_DEG = float(os.getenv("FACE_TRACKING_YAW_LIMIT_DEG", str(config_defaults.FACE_TRACKING_YAW_LIMIT_DEG)))
+FACE_TRACKING_PITCH_MIN_DEG = float(os.getenv("FACE_TRACKING_PITCH_MIN_DEG", str(config_defaults.FACE_TRACKING_PITCH_MIN_DEG)))
+FACE_TRACKING_PITCH_MAX_DEG = float(os.getenv("FACE_TRACKING_PITCH_MAX_DEG", str(config_defaults.FACE_TRACKING_PITCH_MAX_DEG)))
+FACE_TRACKING_PITCH_CENTER_DEG = float(os.getenv("FACE_TRACKING_PITCH_CENTER_DEG", str(config_defaults.FACE_TRACKING_PITCH_CENTER_DEG)))
+FACE_TRACKING_HEAD_VELOCITY = float(os.getenv("FACE_TRACKING_HEAD_VELOCITY", str(config_defaults.FACE_TRACKING_HEAD_VELOCITY)))
+FACE_TRACKING_CONFIRM_FRAMES = int(os.getenv("FACE_TRACKING_CONFIRM_FRAMES", str(config_defaults.FACE_TRACKING_CONFIRM_FRAMES)))
+FACE_TRACKING_MISSING_FRAMES = int(os.getenv("FACE_TRACKING_MISSING_FRAMES", str(config_defaults.FACE_TRACKING_MISSING_FRAMES)))
+FACE_GREETING_RESET_MISSING_FRAMES = int(os.getenv("FACE_GREETING_RESET_MISSING_FRAMES", str(config_defaults.FACE_GREETING_RESET_MISSING_FRAMES)))
+FACE_TRACKING_RECENTER_DELAY_S = float(os.getenv("FACE_TRACKING_RECENTER_DELAY_S", str(config_defaults.FACE_TRACKING_RECENTER_DELAY_S)))
+FACE_GREETING_TEXT = os.getenv("FACE_GREETING_TEXT", config_defaults.FACE_GREETING_TEXT)
+FACE_GREETING_AUDIO_FILENAME = os.getenv(
+    "FACE_GREETING_AUDIO_FILENAME", config_defaults.FACE_GREETING_AUDIO_FILENAME
+)
+
 # Face animation (#73) — state-driven animated expressions
 USE_FACE_ANIMATION = os.getenv("USE_FACE_ANIMATION", "").lower() in ("1", "true", "yes")
 FACE_ANIMATION_MAX_FPS = float(os.getenv("FACE_ANIMATION_MAX_FPS", str(config_defaults.FACE_ANIMATION_MAX_FPS)))
@@ -308,6 +336,13 @@ class MistyController:
         self.turn_id = 0
         self.running = True
         self._conversation_id: str | None = None
+        self._muted = os.getenv("MISTY_START_MUTED", "false").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+        self._mute_lock = threading.Lock()
+        self._audio_action_lock = threading.Lock()
 
         # Battery monitoring
         self.battery = BatteryState()
@@ -350,6 +385,43 @@ class MistyController:
         # replaces Misty's unreliable on-chip pipeline. None until first use;
         # set to False if construction fails so we don't retry every turn.
         self._laptop_face_recognizer = None
+
+        self._preloaded_audio_durations: dict[str, float] = {}
+        self._face_tracker = None
+        if USE_FACE_TRACKING:
+            from face_recognition_service import MistyCameraFrameSource, OnnxFaceDetector
+            from face_tracker import FaceTracker
+
+            self._face_tracker = FaceTracker(
+                source=MistyCameraFrameSource(
+                    MISTY_IP, timeout_s=max(2.0, FACE_TRACKING_POLL_INTERVAL_S * 2)
+                ),
+                detector=OnnxFaceDetector(
+                    FACE_DETECTOR_MODEL_PATH,
+                    score_threshold=FACE_TRACKING_DETECTOR_CONFIDENCE,
+                    max_input_dimension=FACE_TRACKING_MAX_INPUT_DIMENSION,
+                ),
+                move_head=self.move_head,
+                safety_gate=self._face_tracking_safe,
+                on_face_appeared=self._greet_detected_face,
+                enabled=True,
+                poll_interval_s=FACE_TRACKING_POLL_INTERVAL_S,
+                min_face_area_ratio=FACE_TRACKING_MIN_FACE_AREA_RATIO,
+                horizontal_dead_zone=FACE_TRACKING_HORIZONTAL_DEAD_ZONE,
+                vertical_dead_zone=FACE_TRACKING_VERTICAL_DEAD_ZONE,
+                yaw_gain=FACE_TRACKING_YAW_GAIN,
+                pitch_gain=FACE_TRACKING_PITCH_GAIN,
+                max_step_deg=FACE_TRACKING_MAX_STEP_DEG,
+                yaw_limit_deg=FACE_TRACKING_YAW_LIMIT_DEG,
+                pitch_min_deg=FACE_TRACKING_PITCH_MIN_DEG,
+                pitch_max_deg=FACE_TRACKING_PITCH_MAX_DEG,
+                pitch_center_deg=FACE_TRACKING_PITCH_CENTER_DEG,
+                velocity=FACE_TRACKING_HEAD_VELOCITY,
+                confirm_frames=FACE_TRACKING_CONFIRM_FRAMES,
+                missing_frames=FACE_TRACKING_MISSING_FRAMES,
+                greeting_reset_missing_frames=FACE_GREETING_RESET_MISSING_FRAMES,
+                recenter_delay_s=FACE_TRACKING_RECENTER_DELAY_S,
+            )
 
         # Face animation (#73) — state-driven animated expressions.
         # The FaceAnimator is ALWAYS constructed so custom face identity, emotion
@@ -414,7 +486,19 @@ class MistyController:
 
     def _expressions_safe_to_move(self) -> bool:
         """Safety gate for the ExpressionCoordinator's motor gestures (#74)."""
-        return bool(getattr(self, "running", False)) and self.state in self.SAFE_EXPRESSION_STATES
+        return (
+            bool(getattr(self, "running", False))
+            and not self.is_muted
+            and self.state in self.SAFE_EXPRESSION_STATES
+        )
+
+    def _face_tracking_safe(self) -> bool:
+        """Face tracking is allowed only while the controller is safely idle."""
+        return (
+            bool(getattr(self, "running", False))
+            and not self.is_muted
+            and self.get_state() == State.IDLE
+        )
 
     # Representative state -> expression intent mapping (#74). Only a small,
     # unambiguous subset drives expressions from state transitions; richer
@@ -680,9 +764,7 @@ class MistyController:
     def _resume_wake_word_after_movement(self):
         """Resume wake word listener after movement + settle time (#53)."""
         time.sleep(self.MOVEMENT_SETTLE_MS / 1000.0)
-        if self._wake_word_listener:
-            self._wake_word_listener.resume()
-            logger.info("Wake word resumed after movement")
+        self._resume_wake_word_if_allowed("Wake word resumed after movement")
 
     def start_moving(self, reason: str = "command") -> bool:
         """Transition to MOVING state if safe to do so.
@@ -1037,12 +1119,16 @@ class MistyController:
     def upload_and_play_audio(self, wav_bytes: bytes, filename: str) -> float:
         """Upload audio to Misty and play it, raising a retryable error on failure."""
         b64_data = base64.b64encode(wav_bytes).decode("ascii")
-        result = self.misty_post("/api/audio", {
-            "FileName": filename,
-            "Data": b64_data,
-            "ImmediatelyApply": True,
-            "OverwriteExisting": True,
-        }, timeout=15.0)
+        with self._audio_action_lock:
+            if self.is_muted:
+                logger.info("Skipping audio playback while controller is muted")
+                return 0.0
+            result = self.misty_post("/api/audio", {
+                "FileName": filename,
+                "Data": b64_data,
+                "ImmediatelyApply": True,
+                "OverwriteExisting": True,
+            }, timeout=15.0)
 
         # Estimate playback duration from WAV data
         duration = self._wav_duration(wav_bytes)
@@ -1051,11 +1137,15 @@ class MistyController:
             return duration
         raise RuntimeError(f"SaveAudio failed; playback can be retried: {result}")
 
-    def play_preloaded_audio(self, filename: str) -> bool:
+    def play_preloaded_audio(self, filename: str, volume: int = 100) -> bool:
         """Play a verified on-robot asset without uploading it again."""
-        result = self.misty_post(
-            "/api/audio/play", {"FileName": filename, "Volume": 100}
-        )
+        with self._audio_action_lock:
+            if self.is_muted:
+                logger.info("Skipping preloaded audio playback while controller is muted")
+                return False
+            result = self.misty_post(
+                "/api/audio/play", {"FileName": filename, "Volume": volume}
+            )
         if result and result.get("status") == "Success":
             return True
         raise RuntimeError(f"PlayAudio failed; playback can be retried: {result}")
@@ -1096,6 +1186,8 @@ class MistyController:
             "greeting_whatsup.wav": "What's up baby?",
             "thinking.wav": "Let me think about that.",
         }
+        if USE_FACE_TRACKING:
+            phrases[FACE_GREETING_AUDIO_FILENAME] = FACE_GREETING_TEXT
         for filename, text in phrases.items():
             try:
                 response = requests.post(
@@ -1112,6 +1204,7 @@ class MistyController:
                     logger.warning(f"TTS for '{filename}' too small: {len(audio_data)} bytes")
                     continue
 
+                self._preloaded_audio_durations[filename] = self._wav_duration(audio_data)
                 audio_b64 = base64.b64encode(audio_data).decode("ascii")
                 self.misty_post("/api/audio", {
                     "FileName": filename,
@@ -1122,6 +1215,35 @@ class MistyController:
                 logger.info(f"Uploaded '{filename}' to Misty ({len(audio_data)} bytes)")
             except Exception as e:
                 logger.warning(f"Failed to upload '{filename}': {e}")
+
+    def _greet_detected_face(self):
+        """Greet once for a newly established face-presence session."""
+        if self.is_muted or not getattr(self, "running", False) or not self.try_set_state(
+            State.IDLE, State.PLAYING
+        ):
+            return
+        wake_listener = self._wake_word_listener
+        if wake_listener:
+            wake_listener.pause()
+        try:
+            self.set_led(128, 0, 255)
+            self.show_face("face_talking_happy.gif")
+            self.play_preloaded_audio(FACE_GREETING_AUDIO_FILENAME)
+            duration = self._preloaded_audio_durations.get(
+                FACE_GREETING_AUDIO_FILENAME, 3.0
+            )
+            time.sleep(duration + 0.3)
+        except Exception as exc:
+            logger.warning("Face greeting failed: %s", exc)
+        finally:
+            if self.running and self.get_state() == State.PLAYING:
+                self.set_state(State.IDLE)
+                self.set_led(0, 0 if self.is_muted else 255, 0)
+                self.show_face("face_idle.gif")
+            if wake_listener and self.running:
+                self._resume_wake_word_if_allowed(
+                    "Wake word resumed after face greeting"
+                )
 
     def _get_misty_image_names(self) -> set[str]:
         """Return the set of image filenames currently stored on Misty.
@@ -1222,6 +1344,41 @@ class MistyController:
             self._face_animator.set_custom_faces_available(all_available)
 
         return all_available
+
+    def _apply_voice_control(
+        self,
+        turn: int,
+        control: dict,
+        *,
+        audio_bytes: bytes | None = None,
+        audio_file: str | None = None,
+    ) -> None:
+        """Play a control acknowledgment, then apply the local command."""
+        command = control.get("command")
+        try:
+            response_wav = audio_bytes
+            if response_wav is None and audio_file:
+                audio_resp = requests.get(
+                    f"{ORCHESTRATION_URL}/api/audio/{audio_file}", timeout=10.0
+                )
+                audio_resp.raise_for_status()
+                response_wav = audio_resp.content
+            if response_wav:
+                self.set_state(State.PLAYING)
+                self.set_led(148, 0, 211)
+                self.show_face("face_talking_happy.gif")
+                duration = self.upload_and_play_audio(
+                    response_wav, "voice_control_ack.wav"
+                )
+                time.sleep(duration + 0.2)
+        except Exception as exc:
+            logger.warning(
+                "[Turn %s] Voice control acknowledgment failed: %s", turn, exc
+            )
+        finally:
+            if command == "mute":
+                logger.info("[Turn %s] Applying voice control: mute", turn)
+                self.mute()
 
     def check_orchestration_health(self) -> bool:
         try:
@@ -1867,13 +2024,14 @@ class MistyController:
         """Resume normal operation from charging mode."""
         # In laptop wake word mode, resume the listener instead of Misty's keyphrase
         if self._wake_word_listener:
-            self._wake_word_listener.resume()
-            self.set_led(0, 255, 0)
+            resumed = self._resume_wake_word_if_allowed(
+                "Exited charging mode — resumed laptop wake word listener"
+            )
+            self.set_led(0, 255 if resumed else 0, 0)
             self.show_face("face_idle.gif")
             self.last_activity_time = time.time()
             self._is_dimmed = False
             self.set_state(State.IDLE)
-            logger.info("Exited charging mode — resumed laptop wake word listener")
         elif self.start_keyphrase(force_restart=True):
             self.set_led(0, 255, 0)
             self.show_face("face_idle.gif")
@@ -1893,6 +2051,8 @@ class MistyController:
             return  # Already shut down
         logger.info("Shutting down...")
         self.running = False
+        if self._face_tracker:
+            self._face_tracker.stop(center=False)
         # Stop face animator first (§6.3 — before existing cleanup sequence)
         if getattr(self, "_expression_coordinator", None):
             self._expression_coordinator.cancel()  # halt any in-flight gesture (#74)
@@ -2256,6 +2416,67 @@ class MistyController:
 
     # --- Laptop wake word listener (issue #44) ---
 
+    @property
+    def is_muted(self) -> bool:
+        lock = getattr(self, "_mute_lock", None)
+        if lock is None:
+            return bool(getattr(self, "_muted", False))
+        with lock:
+            return self._muted
+
+    def _resume_wake_word_if_allowed(self, message: str) -> bool:
+        listener = getattr(self, "_wake_word_listener", None)
+        if not listener:
+            return False
+        if self.is_muted:
+            listener.pause()
+            logger.info("Wake word remains paused while operator mute is enabled")
+            return False
+        listener.resume()
+        logger.info(message)
+        return True
+
+    def mute(self) -> bool:
+        """Immediately quiet Misty while leaving companion services running."""
+        with self._mute_lock:
+            changed = not self._muted
+            self._muted = True
+
+        if self._wake_word_listener:
+            self._wake_word_listener.pause()
+        if getattr(self, "_expression_coordinator", None):
+            self._expression_coordinator.cancel()
+        if self._talking_head:
+            self._talking_head.stop()
+        with self._audio_action_lock:
+            self.misty_post("/api/audio/stop")
+            self.misty_post("/api/audio/record/stop")
+            self.misty_post("/api/audio/keyphrase/stop")
+        self.halt()
+        self.show_face("face_idle.gif")
+        self.set_led(0, 0, 0)
+        logger.info("Operator mute enabled" if changed else "Operator mute already enabled")
+        return changed
+
+    def unmute(self) -> bool:
+        """Re-arm wake detection after an operator mute."""
+        with self._mute_lock:
+            changed = self._muted
+            self._muted = False
+
+        if self.get_state() == State.IDLE and self._wake_word_listener:
+            self._wake_word_listener.resume()
+            self.set_led(0, 255, 0)
+            self.show_face("face_idle.gif")
+            self.last_activity_time = time.time()
+        elif changed:
+            logger.info(
+                "Operator mute disabled; wake listener will resume when the "
+                f"controller returns to IDLE (state={self.get_state().name})"
+            )
+        logger.info("Operator mute disabled" if changed else "Operator mute already disabled")
+        return changed
+
     def _get_wake_word_status(self) -> dict:
         """Return the active wake-word configuration for logs and status endpoints."""
         if self._wake_word_listener:
@@ -2266,6 +2487,14 @@ class MistyController:
                 "model_path": health.get("custom_model_path"),
                 "threshold": health.get("threshold"),
                 "active": bool(health.get("running")),
+                "paused": bool(health.get("paused")),
+                "trigger_frames": health.get("trigger_frames"),
+                "vad_threshold": health.get("vad_threshold"),
+                "min_rms": health.get("min_rms"),
+                "resume_cooldown_s": health.get("resume_cooldown_s"),
+                "accepted_candidates": health.get("accepted_candidates", 0),
+                "rejected_candidates": health.get("rejected_candidates", 0),
+                "last_candidate": health.get("last_candidate"),
                 "error": None,
             }
 
@@ -2275,6 +2504,14 @@ class MistyController:
             "model_path": self._wake_word_model_path,
             "threshold": self._wake_word_threshold,
             "active": False,
+            "paused": False,
+            "trigger_frames": None,
+            "vad_threshold": None,
+            "min_rms": None,
+            "resume_cooldown_s": None,
+            "accepted_candidates": 0,
+            "rejected_candidates": 0,
+            "last_candidate": None,
             "error": self._wake_word_config_error,
         }
 
@@ -2311,6 +2548,9 @@ class MistyController:
                     f"(model={self._wake_word_model_name}, path={self._wake_word_model_path or 'default'}, "
                     f"threshold={self._wake_word_threshold})"
                 )
+                if self.is_muted:
+                    self._wake_word_listener.pause()
+                    logger.info("Laptop wake word listener started paused (operator mute)")
             else:
                 self._wake_word_listener = None
                 self._wake_word_source = "error"
@@ -2340,6 +2580,9 @@ class MistyController:
 
     def _on_laptop_wake_word(self):
         """Callback fired by laptop wake word listener on detection."""
+        if self.is_muted:
+            logger.info("[Wake] Laptop wake word ignored while operator mute is enabled")
+            return
         self.last_activity_time = time.time()
         self._last_wake_event_time = time.time()
         self._watchdog_recovery_level = 0
@@ -2369,6 +2612,9 @@ class MistyController:
     def _handle_conversation_turn(self):
         turn = self.turn_id
         turn_start = time.time()
+        if self.is_muted:
+            logger.info(f"[Turn {turn}] Suppressed because operator mute is enabled")
+            return
         self._conversation_id = str(uuid.uuid4())
         logger.info(f"[Turn {turn}] Starting conversation turn")
 
@@ -2387,6 +2633,9 @@ class MistyController:
 
         try:
             exchange_result = self._do_conversation_exchange(turn, turn_start)
+            if self.is_muted:
+                logger.info(f"[Turn {turn}] Ending after operator mute")
+                return
 
             # Determine if speech was detected and if movement was requested
             if isinstance(exchange_result, dict):
@@ -2422,6 +2671,9 @@ class MistyController:
             followup_start = time.time()
             followup_count = 0
             while (time.time() - followup_start) < FOLLOWUP_TIMEOUT_S:
+                if self.is_muted:
+                    logger.info(f"[Turn {turn}] Follow-up ended by operator mute")
+                    break
                 followup_count += 1
 
                 # Cap recording cycles to prevent Snapdragon 410 mic degradation
@@ -2496,12 +2748,12 @@ class MistyController:
         # Play "What's up baby?" greeting via pre-uploaded TTS audio.
         # Falls back to chime if greeting audio isn't available.
         # Note: misty_post returns None on failure (doesn't raise), so check return value.
-        greeting_result = self.misty_post("/api/audio/play", {"FileName": "greeting_whatsup.wav", "Volume": 40})
+        greeting_result = self.play_preloaded_audio("greeting_whatsup.wav", volume=40)
         if greeting_result:
             time.sleep(0.2)
         else:
             logger.debug(f"[Turn {turn}] Greeting playback failed, trying chime")
-            chime_result = self.misty_post("/api/audio/play", {"FileName": "s_Awe3.wav", "Volume": 30})
+            chime_result = self.play_preloaded_audio("s_Awe3.wav", volume=30)
             if chime_result:
                 time.sleep(0.2)
             else:
@@ -2590,7 +2842,7 @@ class MistyController:
 
         # Play thinking phrase so the user knows Misty heard them
         try:
-            self.misty_post("/api/audio/play", {"FileName": "thinking.wav", "Volume": 40})
+            self.play_preloaded_audio("thinking.wav", volume=40)
         except Exception as e:
             logger.debug(f"[Turn {turn}] Thinking sound failed: {e}")
 
@@ -2667,6 +2919,19 @@ class MistyController:
 
         if result.get("status") != "ok":
             raise RuntimeError(f"Orchestration error: {result.get('error', 'unknown')}")
+
+        if result.get("type") == "control":
+            control = result.get("control", {})
+            response_wav = None
+            if result.get("audioBytes"):
+                response_wav = base64.b64decode(result["audioBytes"], validate=True)
+            self._apply_voice_control(
+                turn,
+                control,
+                audio_bytes=response_wav,
+                audio_file=result.get("audio_file"),
+            )
+            return {"control": control, "had_speech": True}
 
         # --- Movement response (#56) ---
         if result.get("type") == "movement":
@@ -2817,6 +3082,19 @@ class MistyController:
                 continue
             event = json.loads(raw_line[5:].strip())
             event_type = event.get("type")
+            if event_type == "control":
+                self._apply_voice_control(
+                    turn,
+                    event.get("control", {}),
+                    audio_bytes=base64.b64decode(
+                        event["audioBytes"], validate=True
+                    ),
+                )
+                response.close()
+                return {
+                    "control": event.get("control", {}),
+                    "had_speech": True,
+                }
             if event_type in ("audio", "movement"):
                 if event_type == "audio":
                     sequence = int(event.get("sequence", -1))
@@ -2972,6 +3250,20 @@ class MistyController:
                 logger.warning(f"[Turn {turn}] Follow-up: orchestration error: {result.get('error', 'unknown')}")
                 return False
 
+            if result.get("type") == "control":
+                response_wav = None
+                if result.get("audioBytes"):
+                    response_wav = base64.b64decode(
+                        result["audioBytes"], validate=True
+                    )
+                self._apply_voice_control(
+                    turn,
+                    result.get("control", {}),
+                    audio_bytes=response_wav,
+                    audio_file=result.get("audio_file"),
+                )
+                return {"control": result.get("control", {}), "had_speech": True}
+
             # Movement response in follow-up (#56)
             if result.get("type") == "movement":
                 movement = result.get("movement", {})
@@ -3076,6 +3368,16 @@ class MistyController:
 
         # Normal re-arm: audio resource cleanup before re-arming.
         self.stop_recording()
+        if self.is_muted:
+            if self._wake_word_listener:
+                self._wake_word_listener.pause()
+            self.misty_post("/api/audio/stop")
+            self.misty_post("/api/audio/record/stop")
+            self.show_face("face_idle.gif")
+            self.set_led(0, 0, 0)
+            self.set_state(State.IDLE)
+            logger.info("Re-arm held while operator mute is enabled")
+            return
         if self._wake_word_listener:
             # Laptop mode — no keyphrase to restart, shorter cooldown needed.
 
@@ -3097,9 +3399,9 @@ class MistyController:
 
                 self.set_state(State.IDLE)
 
-                self._wake_word_listener.resume()
-
-                logger.info("Fast re-arm complete — laptop wake word resumed; WebSocket kept open")
+                self._resume_wake_word_if_allowed(
+                    "Fast re-arm complete — laptop wake word resumed; WebSocket kept open"
+                )
 
                 return
 
@@ -3133,9 +3435,7 @@ class MistyController:
             time.sleep(6.0)  # keyphrase needs time to arm
 
         # Resume laptop wake word listener after conversation ends
-        if self._wake_word_listener:
-            self._wake_word_listener.resume()
-            logger.info("Laptop wake word listener resumed")
+        self._resume_wake_word_if_allowed("Laptop wake word listener resumed")
 
     def _proactive_reboot(self):
         """Proactive reboot to prevent keyphrase silent failure (#22).
@@ -3220,9 +3520,9 @@ class MistyController:
             logger.warning(f"Proactive reboot: recovery incomplete (state={self.get_state().value})")
 
         # Resume laptop wake word listener after reboot recovery
-        if self._wake_word_listener:
-            self._wake_word_listener.resume()
-            logger.info("Proactive reboot: laptop wake word listener resumed")
+        self._resume_wake_word_if_allowed(
+            "Proactive reboot: laptop wake word listener resumed"
+        )
 
     def _play_reboot_announcement(self):
         """Play a reboot announcement on Misty via orchestration TTS.
@@ -3251,7 +3551,7 @@ class MistyController:
 
             f"{'laptop_openwakeword (required)' if USE_LAPTOP_WAKE_WORD else 'unsupported (USE_LAPTOP_WAKE_WORD=false)'}"
 
-            self.misty_post("/api/audio/play", {"FileName": "s_Awe2.wav"})
+            self.play_preloaded_audio("s_Awe2.wav")
         except Exception as e:
             logger.debug(f"Proactive reboot: built-in fallback sound failed: {e}")
             pass
@@ -3331,6 +3631,9 @@ class MistyController:
             self.set_state(State.CHARGING)
             self._apply_charging_mode()
 
+        if self._face_tracker:
+            self._face_tracker.start()
+
         # Health check loop
         try:
             while self.running:
@@ -3389,8 +3692,14 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
             ctrl = self.controller
             battery = ctrl.get_battery_snapshot()
             wake_status = ctrl._get_wake_word_status()
+            face_tracking = (
+                ctrl._face_tracker.status()
+                if getattr(ctrl, "_face_tracker", None)
+                else {"enabled": False, "active": False, "face_present": False, "error": None}
+            )
             self._send_json(200, {
                 "state": ctrl.get_state().name,
+                "muted": ctrl.is_muted,
                 "turn_id": ctrl.turn_id,
                 "conversation_cycles": ctrl._conversation_cycles,
                 "proactive_reboot_at": PROACTIVE_REBOOT_AFTER_CYCLES,
@@ -3399,9 +3708,18 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
                 "wake_model_name": wake_status["model_name"],
                 "wake_model_path": wake_status["model_path"],
                 "wake_threshold": wake_status["threshold"],
+                "wake_paused": wake_status["paused"],
+                "wake_trigger_frames": wake_status["trigger_frames"],
+                "wake_vad_threshold": wake_status["vad_threshold"],
+                "wake_min_rms": wake_status["min_rms"],
+                "wake_resume_cooldown_s": wake_status["resume_cooldown_s"],
+                "wake_accepted_candidates": wake_status["accepted_candidates"],
+                "wake_rejected_candidates": wake_status["rejected_candidates"],
+                "wake_last_candidate": wake_status["last_candidate"],
                 "wake_error": wake_status["error"],
                 "laptop_misty_recording_mode": LAPTOP_MISTY_RECORDING_MODE,
                 "laptop_misty_tally_recording_s": max(0.0, LAPTOP_MISTY_TALLY_RECORDING_S),
+                "face_tracking": face_tracking,
                 "battery_percent": round(battery.charge_percent * 100),
                 "battery_charging": battery.is_charging,
                 "uptime_s": round(time.time() - ctrl._start_time) if hasattr(ctrl, "_start_time") else None,
@@ -3420,6 +3738,13 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
         if self.path == "/api/test/trigger":
             ctrl = self.controller
             state = ctrl.get_state()
+
+            if ctrl.is_muted:
+                self._send_json(409, {
+                    "error": "muted",
+                    "message": "Controller is muted; unmute before triggering",
+                })
+                return
 
             if state != State.IDLE:
                 self._send_json(409, {
@@ -3458,6 +3783,12 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
         elif self.path == "/api/move":
             # Teleop movement endpoint (#51) — strict parameter validation
             ctrl = self.controller
+            if ctrl.is_muted:
+                self._send_json(409, {
+                    "error": "muted",
+                    "message": "Controller is muted; unmute before moving Misty",
+                })
+                return
             try:
                 content_len = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(content_len)) if content_len > 0 else {}
@@ -3560,6 +3891,26 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
             ctrl = self.controller
             snapshot = ctrl.get_hazard_snapshot()
             self._send_json(200, {"status": "ok", **snapshot})
+
+        elif self.path == "/api/mute":
+            ctrl = self.controller
+            changed = ctrl.mute()
+            self._send_json(200, {
+                "status": "ok",
+                "muted": True,
+                "changed": changed,
+                "message": "Misty muted" if changed else "Misty was already muted",
+            })
+
+        elif self.path == "/api/unmute":
+            ctrl = self.controller
+            changed = ctrl.unmute()
+            self._send_json(200, {
+                "status": "ok",
+                "muted": False,
+                "changed": changed,
+                "message": "Misty unmuted" if changed else "Misty was already unmuted",
+            })
 
         elif self.path == "/api/shutdown":
             ctrl = self.controller

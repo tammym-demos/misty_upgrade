@@ -109,6 +109,12 @@ CONFERENCE_AUTO_ADVANCE = _env_bool(
 CONFERENCE_PRESENTER_SILENCE_S = _env_float(
     "CONFERENCE_PRESENTER_SILENCE_S", config_defaults.CONFERENCE_PRESENTER_SILENCE_S
 )
+CONFERENCE_PRESENTER_RMS_THRESHOLD = int(
+    _env_float(
+        "CONFERENCE_PRESENTER_RMS_THRESHOLD",
+        config_defaults.CONFERENCE_PRESENTER_RMS_THRESHOLD,
+    )
+)
 CONFERENCE_PRESENTER_MAX_WAIT_S = _env_float(
     "CONFERENCE_PRESENTER_MAX_WAIT_S", config_defaults.CONFERENCE_PRESENTER_MAX_WAIT_S
 )
@@ -1261,6 +1267,7 @@ def _build_presenter_wait(
             min_duration=silence_s,
             max_duration=max_wait_s + max(1.0, silence_s),
             silence_duration=silence_s,
+            rms_threshold=CONFERENCE_PRESENTER_RMS_THRESHOLD,
         )
         try:
             if ambient_fn is None:
@@ -1271,18 +1278,20 @@ def _build_presenter_wait(
                     if done.wait(timeout=0.1):
                         return result["presenter_finished"]
                 return False
-            # Run ambient motion loop while waiting for presenter to finish
-            elapsed = 0.0
-            while elapsed < max_wait_s:
+            # Run ambient motion without allowing a random interval to overshoot
+            # the stage-safety deadline and turn the monitor's hard cap into a cue.
+            deadline = time.monotonic() + max_wait_s
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
                 interval = _random.uniform(3.0, 5.0)
-                if done.wait(timeout=interval):
-                    break
+                if done.wait(timeout=min(interval, remaining)):
+                    return result["presenter_finished"]
                 if cancel_event is not None and cancel_event.is_set():
                     return False
-                elapsed += interval
                 if not done.is_set():
                     ambient_fn()
-            return done.is_set() and result["presenter_finished"]
         finally:
             listener.stop_speech_monitor()
 
@@ -1669,6 +1678,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "run":
+        log_dir = os.path.normpath(
+            os.path.join(os.path.dirname(__file__), "..", "..", "logs", "services")
+        )
+        os.makedirs(log_dir, exist_ok=True)
+        file_handler = logging.FileHandler(
+            os.path.join(log_dir, "conference-mode.log"),
+            mode="w",
+            encoding="utf-8",
+        )
+        file_handler.setFormatter(
+            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+        )
+        logging.getLogger().addHandler(file_handler)
     return args.func(args)
 
 

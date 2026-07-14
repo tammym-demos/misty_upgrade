@@ -106,6 +106,25 @@ class TestOrchestrationSttConfidence(unittest.TestCase):
         self.assertEqual(result["status"], "empty")
         self.assertEqual(result["text"], "")
 
+    def test_exact_voice_control_survives_low_confidence_filter(self):
+        model = unittest.mock.MagicMock()
+        model.transcribe.return_value = (
+            [
+                SimpleNamespace(
+                    text="Quiet, Misty.",
+                    avg_logprob=-1.135,
+                    no_speech_prob=0.135,
+                )
+            ],
+            SimpleNamespace(),
+        )
+
+        with unittest.mock.patch.object(self._svc, "_get_whisper_model", return_value=model):
+            result = self._svc.speech_to_text(b"not-a-real-wav", time.time())
+
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["text"], "Quiet, Misty.")
+
 
 class TestLaptopMistyRecordingConfig(unittest.TestCase):
     """Unit tests for laptop-mode Misty recording configuration (#66)."""
@@ -347,6 +366,116 @@ class TestWakeWordConfiguration(unittest.TestCase):
         callback.assert_called_once()
         listener._oww_model.reset.assert_called_once()
 
+    def test_wake_word_health_reports_candidate_diagnostics(self):
+        if self._listener_module is None:
+            self.skipTest("wake_word_listener could not be imported")
+
+        listener = self._listener_module.WakeWordListener(
+            on_wake_word=lambda: None,
+            threshold=0.7,
+            custom_model_path=__file__,
+        )
+        listener.trigger_frames = 1
+        listener._recent_rms = [self._listener_module.WAKE_WORD_MIN_RMS + 1]
+        listener._oww_model = unittest.mock.MagicMock()
+
+        self.assertTrue(listener._handle_wake_predictions({"hey_misty": 0.9}))
+        health = listener.get_health()
+
+        self.assertEqual(health["accepted_candidates"], 1)
+        self.assertEqual(health["last_candidate"]["reason"], "accepted")
+        self.assertEqual(health["last_candidate"]["model"], "hey_misty")
+
+    def test_low_energy_frames_still_feed_openwakeword_context(self):
+        """Quiet frames must reach OpenWakeWord because its model is temporal."""
+        if self._listener_module is None:
+            self.skipTest("wake_word_listener could not be imported")
+
+        callback = unittest.mock.MagicMock()
+        listener = self._listener_module.WakeWordListener(
+            on_wake_word=callback,
+            threshold=0.7,
+            custom_model_path=__file__,
+        )
+        listener.trigger_frames = 1
+        listener._oww_model = unittest.mock.MagicMock()
+        listener._oww_model.predict.return_value = {"hey_misty": 0.9}
+        listener._recent_rms = [self._listener_module.WAKE_WORD_MIN_RMS - 1]
+        pcm = self._listener_module.np.zeros(
+            self._listener_module.FRAME_SAMPLES,
+            dtype=self._listener_module.np.int16,
+        )
+
+        self.assertFalse(listener._run_wake_inference(pcm, in_cooldown=False))
+        listener._oww_model.predict.assert_called_once_with(pcm)
+        callback.assert_not_called()
+
+    def test_speech_monitor_detects_presenter_during_calibration(self):
+        """Initial presenter speech must not be discarded as ambient noise."""
+        if self._listener_module is None:
+            self.skipTest("wake_word_listener could not be imported")
+
+        listener = self._listener_module.WakeWordListener(
+            on_wake_word=lambda: None,
+            custom_model_path=__file__,
+        )
+        listener._speech_monitor_start_time = 100.0
+        listener._speech_monitor_min_s = 3.0
+        listener._speech_monitor_max_s = 45.0
+        listener._speech_monitor_silence_s = 3.0
+        listener._speech_rms_threshold = 80
+        listener._calibration_done = False
+        listener._calibration_samples = []
+        listener._speech_detected = False
+        listener._last_speech_time = 0.0
+        pcm = self._listener_module.np.full(
+            self._listener_module.FRAME_SAMPLES,
+            200,
+            dtype=self._listener_module.np.int16,
+        )
+
+        with unittest.mock.patch.object(
+            self._listener_module.time, "time", return_value=100.5
+        ):
+            listener._process_speech_monitor_frame(pcm)
+
+        self.assertTrue(listener._speech_detected)
+        self.assertEqual(listener._last_speech_time, 100.5)
+        self.assertEqual(listener._calibration_samples, [])
+
+    def test_presenter_speech_prevents_threshold_inflation(self):
+        """Immediate speech must keep calibration from learning voice as noise."""
+        if self._listener_module is None:
+            self.skipTest("wake_word_listener could not be imported")
+
+        listener = self._listener_module.WakeWordListener(
+            on_wake_word=lambda: None,
+            custom_model_path=__file__,
+        )
+        listener._speech_monitor_start_time = 100.0
+        listener._speech_monitor_min_s = 3.0
+        listener._speech_monitor_max_s = 45.0
+        listener._speech_monitor_silence_s = 3.0
+        listener._speech_rms_threshold = 30
+        listener._calibration_done = False
+        listener._calibration_samples = [5, 10, 15]
+        listener._speech_detected = True
+        listener._last_speech_time = 101.0
+        pcm = self._listener_module.np.full(
+            self._listener_module.FRAME_SAMPLES,
+            40,
+            dtype=self._listener_module.np.int16,
+        )
+
+        with unittest.mock.patch.object(
+            self._listener_module.time, "time", return_value=101.6
+        ):
+            listener._process_speech_monitor_frame(pcm)
+
+        self.assertTrue(listener._calibration_done)
+        self.assertEqual(listener._speech_rms_threshold, 30)
+        self.assertEqual(listener._last_speech_time, 101.6)
+
 
 class TestLaptopFastRearm(unittest.TestCase):
     """Unit tests for laptop wake-word re-arm behavior (#65)."""
@@ -383,8 +512,67 @@ class TestLaptopFastRearm(unittest.TestCase):
         ctrl.misty_post = unittest.mock.MagicMock()
         ctrl.set_led = unittest.mock.MagicMock()
         ctrl.display_image = unittest.mock.MagicMock()
+        ctrl.show_face = unittest.mock.MagicMock()
+        ctrl.halt = unittest.mock.MagicMock()
+        ctrl._expression_coordinator = unittest.mock.MagicMock()
+        ctrl._talking_head = unittest.mock.MagicMock()
         ctrl._connect_ws = unittest.mock.MagicMock()
         return ctrl
+
+    def test_operator_mute_is_idempotent_and_quiets_robot(self):
+        ctrl = self._controller_with_mocks()
+        ctrl._wake_word_listener = unittest.mock.MagicMock()
+
+        self.assertTrue(ctrl.mute())
+        self.assertFalse(ctrl.mute())
+
+        self.assertTrue(ctrl.is_muted)
+        ctrl._wake_word_listener.pause.assert_called()
+        ctrl.misty_post.assert_any_call("/api/audio/stop")
+        ctrl.misty_post.assert_any_call("/api/audio/record/stop")
+        ctrl.halt.assert_called()
+        ctrl.set_led.assert_called_with(0, 0, 0)
+
+    def test_muted_rearm_does_not_resume_wake_listener(self):
+        ctrl = self._controller_with_mocks()
+        ctrl._wake_word_listener = unittest.mock.MagicMock()
+        ctrl.mute()
+        ctrl._wake_word_listener.reset_mock()
+
+        ctrl._rearm()
+
+        ctrl._wake_word_listener.pause.assert_called_once()
+        ctrl._wake_word_listener.resume.assert_not_called()
+        self.assertEqual(ctrl.get_state(), self._controller_module.State.IDLE)
+
+    def test_unmute_resumes_only_from_idle(self):
+        ctrl = self._controller_with_mocks()
+        ctrl._wake_word_listener = unittest.mock.MagicMock()
+        ctrl.mute()
+        ctrl._wake_word_listener.reset_mock()
+        ctrl.set_state(self._controller_module.State.PROCESSING)
+
+        self.assertTrue(ctrl.unmute())
+        ctrl._wake_word_listener.resume.assert_not_called()
+
+    def test_voice_mute_acknowledges_before_muting(self):
+        ctrl = self._controller_with_mocks()
+        ctrl.upload_and_play_audio = unittest.mock.MagicMock(return_value=0.0)
+        ctrl.mute = unittest.mock.MagicMock()
+
+        with unittest.mock.patch.object(
+            self._controller_module.time, "sleep"
+        ):
+            ctrl._apply_voice_control(
+                1,
+                {"command": "mute"},
+                audio_bytes=b"test-wav",
+            )
+
+        ctrl.upload_and_play_audio.assert_called_once_with(
+            b"test-wav", "voice_control_ack.wav"
+        )
+        ctrl.mute.assert_called_once()
 
     def test_laptop_rearm_keeps_healthy_websocket_open(self):
         """Normal laptop-mode re-arm must resume listening without reconnecting."""
@@ -1309,6 +1497,9 @@ class TestMovementIntentClassification(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["command"], "forward")
 
+    def test_quiet_misty_is_not_a_movement_command(self):
+        self.assertIsNone(self._svc.classify_movement_intent("quiet Misty"))
+
     def test_move_ahead(self):
         result = self._svc.classify_movement_intent("move ahead")
         self.assertIsNotNone(result)
@@ -1443,6 +1634,41 @@ class TestMovementIntentClassification(unittest.TestCase):
     def test_system_prompt_mentions_movement(self):
         """System prompt should mention Misty can move."""
         self.assertIn("move", self._svc.SYSTEM_PROMPT.lower())
+
+
+class TestControlIntentClassification(unittest.TestCase):
+    """Unit tests for deterministic local controller voice commands."""
+
+    _svc = None
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import orchestration_service
+            cls._svc = orchestration_service
+        except Exception:
+            cls._svc = None
+
+    def setUp(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+
+    def test_quiet_misty_mutes(self):
+        self.assertEqual(
+            self._svc.classify_control_intent("Quiet, Misty!"),
+            {"command": "mute"},
+        )
+
+    def test_misty_be_quiet_mutes(self):
+        self.assertEqual(
+            self._svc.classify_control_intent("Misty, be quiet."),
+            {"command": "mute"},
+        )
+
+    def test_unrelated_quiet_request_does_not_mute(self):
+        self.assertIsNone(
+            self._svc.classify_control_intent("Please speak more quietly")
+        )
 
 
 class TestDrivePrimitives(unittest.TestCase):

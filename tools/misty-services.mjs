@@ -40,6 +40,8 @@ Commands:
   stop      Gracefully stop the controller, orchestration service, and Foundry Local
   restart   Stop then start all services
   status    Show service status
+  mute      Immediately quiet Misty while leaving services running
+  unmute    Re-enable wake-word conversations without restarting services
   conference <subcommand> [opts]
             Run Conference Mode (scripted stage dialog).
             Subcommands: dry-run, prepare, verify, run
@@ -53,6 +55,7 @@ Options:
   --orchestration-url <url>
                           Override ORCHESTRATION_URL for the controller
   --controller-port <n>   Override controller API port (default: 5001)
+  --muted                 Start the controller with operator mute enabled
   --python <command>      Python executable to use (default: python)
   --yes                   Assume yes for install prompts
   --no-install            Do not prompt to install missing prerequisites
@@ -78,6 +81,7 @@ function parseArgs(argv) {
     pythonExplicit: false,
     yes: false,
     install: true,
+    startMuted: false,
   };
   if (options.command === "-h" || options.command === "--help") {
     options.command = "help";
@@ -104,6 +108,8 @@ function parseArgs(argv) {
       options.orchestrationUrl = argv[++index];
     } else if (arg === "--controller-port") {
       options.controllerPort = Number(argv[++index]);
+    } else if (arg === "--muted") {
+      options.startMuted = true;
     } else if (arg === "--python") {
       options.python = argv[++index];
       options.pythonExplicit = true;
@@ -168,6 +174,9 @@ function serviceEnv(options, state = {}) {
   }
   env.CONTROLLER_API_PORT = String(options.controllerPort);
   env.USE_LAPTOP_WAKE_WORD = env.USE_LAPTOP_WAKE_WORD || "true";
+  if (options.startMuted) {
+    env.MISTY_START_MUTED = "true";
+  }
   return env;
 }
 
@@ -1057,6 +1066,9 @@ async function start(options) {
     .catch(() => false);
   if (controllerAlreadyRunning) {
     console.log("Misty controller: already running");
+    if (options.startMuted) {
+      await setControllerMute(options, true);
+    }
   } else {
     await pingMisty(env, state, options);
     console.log("Misty controller: starting");
@@ -1074,6 +1086,24 @@ async function start(options) {
 
   writeState(state);
   console.log("Misty services are running");
+}
+
+async function setControllerMute(options, muted) {
+  const action = muted ? "mute" : "unmute";
+  const response = await httpRequest(
+    `http://127.0.0.1:${options.controllerPort}/api/${action}`,
+    { method: "POST", timeoutMs: 5000 },
+  ).catch((error) => {
+    throw new Error(`Misty controller is unavailable; cannot ${action} (${error.message})`);
+  });
+
+  const payload = parseJsonObject(response.body);
+  if (response.statusCode !== 200 || payload?.status !== "ok") {
+    throw new Error(
+      `Misty controller ${action} failed (HTTP ${response.statusCode})`,
+    );
+  }
+  console.log(payload.message || `Misty ${muted ? "muted" : "unmuted"}`);
 }
 
 async function gracefulControllerShutdown(state, options) {
@@ -1177,7 +1207,13 @@ async function status(options) {
     .then((response) => [200, 503].includes(response.statusCode) ? `running (HTTP ${response.statusCode})` : `unexpected HTTP ${response.statusCode}`)
     .catch(() => "not reachable");
   const controller = await httpRequest(`http://127.0.0.1:${options.controllerPort}/api/status`, { timeoutMs: 1500 })
-    .then((response) => response.statusCode === 200 ? "running" : `unexpected HTTP ${response.statusCode}`)
+    .then((response) => {
+      if (response.statusCode !== 200) {
+        return `unexpected HTTP ${response.statusCode}`;
+      }
+      const payload = parseJsonObject(response.body);
+      return payload?.muted ? "running (muted)" : "running";
+    })
     .catch(() => "not reachable");
   const foundry = options.skipFoundry ? "skipped" : foundryIsRunning() ? "running" : "not running";
 
@@ -1189,7 +1225,7 @@ async function status(options) {
 async function conference(options) {
   // Conference Mode delegates to conference_mode.py with the remaining argv.
   // Usage: npx . conference <subcommand> [opts]
-  // e.g.:  npx . conference dry-run --script ../../talks/20260710-2.md
+  // e.g.:  npx . conference dry-run --script talks/20260710-2.md
   const subArgs = process.argv.slice(3); // everything after "conference"
   if (subArgs.length === 0 || subArgs[0] === "--help" || subArgs[0] === "-h") {
     console.log(`Usage: npx . conference <subcommand> [options]
@@ -1225,6 +1261,21 @@ Options are passed directly to conference_mode.py.
   selectCompatiblePython(options);
   const python = options.python;
   const script = path.join(ORCH_DIR, "conference_mode.py");
+  const pathOptions = new Set(["--script", "--out", "--recorded", "--manifest"]);
+  const resolvedSubArgs = subArgs.map((arg, index) => {
+    const previous = subArgs[index - 1];
+    if (pathOptions.has(previous) && !path.isAbsolute(arg)) {
+      return path.resolve(REPO_ROOT, arg);
+    }
+    for (const option of pathOptions) {
+      const prefix = `${option}=`;
+      if (arg.startsWith(prefix)) {
+        const value = arg.slice(prefix.length);
+        return `${prefix}${path.isAbsolute(value) ? value : path.resolve(REPO_ROOT, value)}`;
+      }
+    }
+    return arg;
+  });
 
   if (!fs.existsSync(script)) {
     throw new Error(`Conference Mode module not found: ${script}`);
@@ -1232,7 +1283,7 @@ Options are passed directly to conference_mode.py.
 
   console.log(`Running: ${python} conference_mode.py ${subArgs.join(" ")}`);
   try {
-    const result = runInherited(python, [script, ...subArgs], { cwd: ORCH_DIR });
+    const result = runInherited(python, [script, ...resolvedSubArgs], { cwd: ORCH_DIR });
     if (result.status !== 0) {
       process.exitCode = result.status ?? 1;
     }
@@ -1259,6 +1310,12 @@ async function main() {
       break;
     case "status":
       await status(options);
+      break;
+    case "mute":
+      await setControllerMute(options, true);
+      break;
+    case "unmute":
+      await setControllerMute(options, false);
       break;
     case "conference":
       await conference(options);

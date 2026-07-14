@@ -9,6 +9,8 @@
   "scripts": {
     "misty:start": "node tools/misty-services.mjs start",
     "misty:stop": "node tools/misty-services.mjs stop",
+    "misty:mute": "node tools/misty-services.mjs mute",
+    "misty:unmute": "node tools/misty-services.mjs unmute",
     "misty:status": "node tools/misty-services.mjs status"
   },
   "engines": {

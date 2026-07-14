@@ -14,6 +14,16 @@ Run these from the Windows companion device. One-command local startup/shutdown 
 # Start Foundry Local, load Phi-3.5-mini, the orchestration service, and the Misty controller
 npx . start
 
+# Event-safe startup: keep services warm without accepting wake words
+npx . start --muted
+
+# Re-enable or immediately quiet Misty without restarting services
+npx . unmute
+npx . mute
+
+# Voice mute: say "Hey Misty", then "quiet Misty"
+# Re-enable afterward from the companion terminal with: npx . unmute
+
 # Windows ARM64 companion laptops should use x64 Python for faster-whisper/STT
 npx . start --python C:\Users\<you>\AppData\Local\Programs\Python\Python312-x64\python.exe
 
@@ -215,8 +225,11 @@ Common environment variables:
 | `USE_LAPTOP_WAKE_WORD` | `true` | Required wake-word mode; the controller will fail fast if laptop wake-word startup is unavailable. |
 | `OWW_CUSTOM_MODEL_PATH` | `models\hey_misty.onnx` | Optional override path to a custom "Hey Misty" OpenWakeWord model artifact. |
 | `OWW_MODEL_NAME` | `hey_misty` | Model label for the configured wake-word artifact. |
-| `OWW_THRESHOLD` | `0.7` | Confidence threshold for wake-word inference. |
+| `OWW_THRESHOLD` | `0.85` | Confidence threshold for wake-word inference. |
+| `OWW_VAD_THRESHOLD` | `0.5` | OpenWakeWord voice-activity gate. |
 | `OWW_TRIGGER_FRAMES` | `2` | Consecutive above-threshold OpenWakeWord frames required before triggering; suppresses single-frame false positives. |
+| `WAKE_WORD_MIN_RMS` | `100` | Minimum recent frame energy required to accept a trigger. |
+| `WAKE_WORD_RESUME_COOLDOWN_S` | `1.5` | Ignore detections briefly after re-arming. |
 | `LAPTOP_MIC_DEVICE` | OS default | Optional `sounddevice` input device index or name for laptop wake-word/STT capture. |
 | `CHAT_MODEL_ID` | `Phi-3.5-mini-instruct-generic-cpu:2` | Foundry Local chat model ID used for `/v1/chat/completions`. |
 | `STT_DEVICE` | `cpu` | faster-whisper device; default avoids accidental CUDA selection on non-CUDA Windows laptops. |
@@ -356,6 +369,23 @@ Key settings (`config_defaults.py` is the single source of truth):
 3. Set `USE_LAPTOP_FACE_RECOGNITION=true`, start the services, and confirm Misty naturally uses Tammy's name in conversation.
 4. Confirm an unknown face falls back gracefully (no name injected, conversation continues).
 
+### Untrained face detection and head tracking
+
+Misty can also detect any human face without enrollment and follow the
+largest/closest face with head pan/tilt while the controller is `IDLE`. Enable
+`USE_FACE_TRACKING=true` and set `FACE_DETECTOR_MODEL_PATH` to the same
+YuNet-compatible detector used by laptop-side recognition; no embedding model
+or face profile is required. On a confirmed new appearance, Misty plays the
+fixed local-TTS `FACE_GREETING_TEXT` once, then returns to idle and still
+requires `Hey Misty` to begin a conversation.
+
+Tracking pauses during recording, processing, playback, follow-up listening,
+movement, charging, reboot, errors, and shutdown. It never drives the treads.
+Frames are processed transiently and are not stored. Detection/miss hysteresis,
+dead zones, gains, head limits, polling rate, re-center delay, velocity, and the
+greeting phrase are configurable through the `FACE_TRACKING_*` and
+`FACE_GREETING_*` settings documented in `.env.example`.
+
 ---
 
 ## Orchestration API
@@ -442,7 +472,9 @@ Key configuration (in `.env` or `config_defaults.py`):
 | Variable | Default | Description |
 |---|---|---|
 | `OWW_THRESHOLD` | `0.85` | Wake word detection confidence threshold. |
-| `WAKE_WORD_MIN_RMS` | `40` | Minimum energy in recent frames to accept a wake word trigger. |
+| `OWW_VAD_THRESHOLD` | `0.5` | Voice-activity gate applied by OpenWakeWord. |
+| `OWW_TRIGGER_FRAMES` | `2` | Consecutive qualifying frames required to trigger. |
+| `WAKE_WORD_MIN_RMS` | `100` | Minimum energy in recent frames to accept a wake word trigger. |
 | `FOLLOWUP_ENABLED` | `True` | Keep listening after response without wake word. |
 | `FOLLOWUP_TIMEOUT_S` | `90.0` | Max seconds of silence before ending follow-up. |
 | `FOLLOWUP_MAX_TURNS` | `12` | Max back-and-forth turns per conversation. |
@@ -459,6 +491,8 @@ predetermined audio cues instead of using the live STT → LLM → TTS path.
 ```powershell
 npx . conference dry-run      # Preview cue plan (no hardware needed)
 npx . conference prepare      # Generate TTS audio for all cues
+npx . conference prepare --script talks\my-talk.md --no-reuse
+                              # Regenerate every cue from a custom script
 npx . conference run          # Live interactive stage runner
 ```
 

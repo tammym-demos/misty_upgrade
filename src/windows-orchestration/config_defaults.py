@@ -90,11 +90,15 @@ OWW_CUSTOM_MODEL_PATH: str = os.path.normpath(
 )
 OWW_MODEL_NAME: str = "hey_misty"
 OWW_THRESHOLD: float = 0.85
+OWW_VAD_THRESHOLD: float = 0.5
 # Require the wake model to cross threshold on consecutive audio frames before
 # firing. This suppresses single-frame background false positives.
 OWW_TRIGGER_FRAMES: int = 2
 WAKE_WORD_MIN_RMS: int = 100
+WAKE_WORD_RESUME_COOLDOWN_S: float = 1.5
 LAPTOP_MIC_DEVICE: str = ""
+# Initial RMS threshold for conversational speech monitoring before calibration.
+SPEECH_RMS_THRESHOLD: int = 80
 
 # Face recognition (issue #16)
 FACE_RECOGNITION_TIMEOUT_S: float = 3.0
@@ -133,6 +137,29 @@ FACE_RECOGNITION_MIN_SAMPLES: int = 5
 # (*.onnx is gitignored) — see the README for how to obtain them.
 FACE_DETECTOR_MODEL_PATH: str = os.environ.get("FACE_DETECTOR_MODEL_PATH", "")
 FACE_EMBEDDER_MODEL_PATH: str = os.environ.get("FACE_EMBEDDER_MODEL_PATH", "")
+
+# Generic face presence and head tracking (no enrollment required).
+USE_FACE_TRACKING: bool = False
+FACE_TRACKING_POLL_INTERVAL_S: float = 0.5
+FACE_TRACKING_DETECTOR_CONFIDENCE: float = 0.6
+FACE_TRACKING_MAX_INPUT_DIMENSION: int = 1280
+FACE_TRACKING_MIN_FACE_AREA_RATIO: float = 0.01
+FACE_TRACKING_HORIZONTAL_DEAD_ZONE: float = 0.10
+FACE_TRACKING_VERTICAL_DEAD_ZONE: float = 0.10
+FACE_TRACKING_YAW_GAIN: float = 18.0
+FACE_TRACKING_PITCH_GAIN: float = 14.0
+FACE_TRACKING_MAX_STEP_DEG: float = 5.0
+FACE_TRACKING_YAW_LIMIT_DEG: float = 55.0
+FACE_TRACKING_PITCH_MIN_DEG: float = -30.0
+FACE_TRACKING_PITCH_MAX_DEG: float = 15.0
+FACE_TRACKING_PITCH_CENTER_DEG: float = -10.0
+FACE_TRACKING_HEAD_VELOCITY: float = 35.0
+FACE_TRACKING_CONFIRM_FRAMES: int = 2
+FACE_TRACKING_MISSING_FRAMES: int = 6
+FACE_GREETING_RESET_MISSING_FRAMES: int = 30
+FACE_TRACKING_RECENTER_DELAY_S: float = 2.0
+FACE_GREETING_TEXT: str = "Hi, how are you today?"
+FACE_GREETING_AUDIO_FILENAME: str = "greeting_face_detected.wav"
 
 # Face animation (issue #73, Phase 2)
 USE_FACE_ANIMATION: bool = False
@@ -230,10 +257,12 @@ CONFERENCE_MISTY_FILENAME_PREFIX: str = "conf_"
 # available at all times regardless of this setting.
 CONFERENCE_AUTO_ADVANCE: bool = True
 # Seconds of trailing presenter silence that mark end-of-speech for auto-advance.
-CONFERENCE_PRESENTER_SILENCE_S: float = 1.5
+CONFERENCE_PRESENTER_SILENCE_S: float = 3.0
+# Lower initial threshold for a presenter speaking farther from the laptop mic.
+CONFERENCE_PRESENTER_RMS_THRESHOLD: int = 30
 # Maximum seconds to wait for the presenter to finish before an auto-advance
 # attempt gives up and yields to manual control (stage-safety timeout).
-CONFERENCE_PRESENTER_MAX_WAIT_S: float = 45.0
+CONFERENCE_PRESENTER_MAX_WAIT_S: float = 120.0
 # Explicit fallback to live TTS for a scripted cue whose predetermined audio is
 # missing. Off by default so showtime uses prepared audio unless enabled.
 CONFERENCE_TTS_FALLBACK: bool = False
