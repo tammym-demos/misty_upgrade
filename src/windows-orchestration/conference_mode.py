@@ -18,7 +18,7 @@ Design goals
   behavior in ``misty_controller.py`` is unchanged when the mode is off.
 * **Deterministic and testable.** Script parsing, cue-ID assignment, manifest
   generation and the control state machine are pure companion-side logic. All
-  hardware/live dependencies (Misty playback, presenter voice-activity
+  hardware/live dependencies (selected audio output, presenter voice-activity
   detection, Foundry Local TTS) are injected callables, so the logic is fully
   unit-testable in the cloud without a robot, Foundry Local or Windows audio.
 * **No LLM at showtime.** Runtime never invokes the LLM for a scripted cue.
@@ -91,6 +91,13 @@ def _env_float(name: str, default: float) -> float:
 CONFERENCE_MODE_ENABLED = _env_bool(
     "CONFERENCE_MODE_ENABLED", config_defaults.CONFERENCE_MODE_ENABLED
 )
+CONFERENCE_AUDIO_OUTPUT = os.getenv(
+    "CONFERENCE_AUDIO_OUTPUT", config_defaults.CONFERENCE_AUDIO_OUTPUT
+).strip().lower()
+CONFERENCE_LAPTOP_AUDIO_DEVICE = os.getenv(
+    "CONFERENCE_LAPTOP_AUDIO_DEVICE",
+    config_defaults.CONFERENCE_LAPTOP_AUDIO_DEVICE,
+).strip()
 CONFERENCE_SCRIPT_PATH = os.getenv(
     "CONFERENCE_SCRIPT_PATH", config_defaults.CONFERENCE_SCRIPT_PATH
 )
@@ -155,23 +162,34 @@ PRESENTER_GLANCE_YAW = 40.0
 PRESENTER_GLANCE_PITCH = -25.0
 
 GESTURE_LIBRARY = {
-    "wave": {"arms": [-30, 0], "head": [0, 0, 5], "face": "e_Joy.jpg"},
+    "wave": {
+        "arms": [-30, 0],
+        "head": [0, 0, 5],
+        "face": "face_talking_happy.gif",
+    },
     "shrug": {"arms": [-20, -20], "head": [0, 0, 0]},
     "nod": {"head_motion": "nod"},
-    "excited": {"arms": [-40, -40], "face": "e_Joy.jpg"},
-    "thinking": {"head": [0, 10, 0], "face": "e_ApprehensionConcerned.jpg"},
+    "excited": {"arms": [-40, -40], "face": "face_talking_excited.gif"},
+    "thinking": {"head": [0, 10, 0], "face": "face_talking_curious.gif"},
     "talking": {"face": "__talking__"},
     "glance": {"head_motion": "glance_presenter"},
 }
 
 _FACE_ALIASES = {
-    "happy": "e_Joy.jpg",
-    "joy": "e_Joy.jpg",
-    "excited": "e_Joy.jpg",
-    "sarcastic": "e_Disgust.jpg",
-    "thinking": "e_ApprehensionConcerned.jpg",
-    "thoughtful": "e_ApprehensionConcerned.jpg",
-    "neutral": "e_DefaultContent.jpg",
+    "happy": "face_talking_happy.gif",
+    "joy": "face_talking_happy.gif",
+    "excited": "face_talking_excited.gif",
+    "curious": "face_talking_curious.gif",
+    "sad": "face_talking_sad.gif",
+    "contempt": "face_talking_contempt.gif",
+    "blink": "face_talking_blink.gif",
+    "confused": "face_talking_confused.gif",
+    "sly": "face_talking_sly.gif",
+    "wink": "face_talking_wink.gif",
+    "sarcastic": "face_talking_sly.gif",
+    "thinking": "face_talking_curious.gif",
+    "thoughtful": "face_talking_curious.gif",
+    "neutral": "face_talking_neutral.gif",
     "talking": "__talking__",
 }
 
@@ -190,6 +208,26 @@ class ConferencePreparationError(ConferenceError):
 
 class ConferenceAssetMissing(ConferenceError):
     """Raised when a scripted cue has no resolvable predetermined audio."""
+
+
+def _normalize_audio_output(value: str) -> str:
+    output = str(value or "").strip().lower()
+    if output not in {"misty", "laptop"}:
+        raise ConferenceError(
+            "Conference audio output must be 'misty' or 'laptop', "
+            f"not {value!r}"
+        )
+    return output
+
+
+def _parse_output_device(value: str):
+    device = str(value or "").strip()
+    if not device:
+        return None
+    try:
+        return int(device)
+    except ValueError:
+        return device
 
 
 # ---------------------------------------------------------------------------
@@ -398,44 +436,50 @@ def _merge_movements(base: dict, overlay: dict) -> dict:
     return merged
 
 
+def _parse_annotation_component(component: str) -> dict:
+    """Parse one gesture or parameterized component from an annotation."""
+    tag, separator, raw_value = component.strip().partition(":")
+    tag = tag.strip().lower()
+    value = raw_value.strip() if separator else ""
+
+    if tag in GESTURE_LIBRARY and not value:
+        return deepcopy(GESTURE_LIBRARY[tag])
+    if tag == "face" and value:
+        return {"face": _resolve_face_name(value)}
+    if tag == "arms" and value:
+        return {"arms": _parse_floats(value, 2, tag)}
+    if tag == "head" and value:
+        return {"head": _parse_floats(value, 3, tag)}
+    raise ScriptParseError(
+        f"Unsupported conference annotation component: "
+        f"[{tag}{':' + value if value else ''}]"
+    )
+
+
 def parse_annotations(text: str) -> tuple[str, list[dict]]:
     """Strip inline movement annotations from spoken text and return movements.
 
-    Supports ``+`` chaining: ``[talking+excited]`` merges the gesture dicts so
-    you get excited arms *and* the talking face in a single movement entry.
+    Supports ``+`` chaining, including parameterized components such as
+    ``[glance+face:happy]`` and ``[nod+arms:45,45]``. Later components override
+    earlier values for the same movement key.
     """
     movements: list[dict] = []
     for match in _ANNOTATION_RE.finditer(text):
         full_tag = match.group("tag").strip().lower()
         value = (match.group("value") or "").strip()
+        annotation = full_tag + (f":{value}" if value else "")
+        parts = [part.strip() for part in annotation.split("+") if part.strip()]
 
-        # Chained gestures: [talking+excited], [wave+nod], etc.
-        if "+" in full_tag and not value:
-            parts = [p.strip() for p in full_tag.split("+") if p.strip()]
+        if len(parts) > 1:
             merged: dict = {}
             for part in parts:
-                if part not in GESTURE_LIBRARY:
-                    raise ScriptParseError(
-                        f"Unknown gesture '{part}' in chained annotation [{full_tag}]"
-                    )
-                merged = _merge_movements(merged, GESTURE_LIBRARY[part])
-            movements.append(deepcopy(merged))
+                merged = _merge_movements(
+                    merged, _parse_annotation_component(part)
+                )
+            movements.append(merged)
             continue
 
-        tag = full_tag
-        if tag in GESTURE_LIBRARY and not value:
-            movements.append(deepcopy(GESTURE_LIBRARY[tag]))
-            continue
-        if tag == "face" and value:
-            movements.append({"face": _resolve_face_name(value)})
-            continue
-        if tag == "arms" and value:
-            movements.append({"arms": _parse_floats(value, 2, tag)})
-            continue
-        if tag == "head" and value:
-            movements.append({"head": _parse_floats(value, 3, tag)})
-            continue
-        raise ScriptParseError(f"Unsupported conference annotation: [{tag}{':' + value if value else ''}]")
+        movements.append(_parse_annotation_component(annotation))
     return _WS_RE.sub(" ", _ANNOTATION_RE.sub("", text)).strip(), movements
 
 
@@ -567,6 +611,80 @@ def _sha256(text: str) -> str:
 TtsFn = Callable[[str], bytes]
 
 
+def _split_tts_text(text: str, max_chars: int = 500) -> list[str]:
+    """Split long scripted speech at sentence/word boundaries for /api/tts."""
+    normalized = _WS_RE.sub(" ", text).strip()
+    if len(normalized) <= max_chars:
+        return [normalized]
+
+    chunks: list[str] = []
+    current = ""
+    sentences = re.split(r"(?<=[.!?])\s+", normalized)
+    for sentence in sentences:
+        words = sentence.split()
+        for word in words:
+            candidate = f"{current} {word}".strip()
+            if len(candidate) <= max_chars:
+                current = candidate
+                continue
+            if current:
+                chunks.append(current)
+            if len(word) <= max_chars:
+                current = word
+            else:
+                chunks.extend(
+                    word[index:index + max_chars]
+                    for index in range(0, len(word), max_chars)
+                )
+                current = ""
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _concatenate_wavs(wav_parts: list[bytes]) -> bytes:
+    """Join compatible PCM WAV byte strings without re-encoding."""
+    if not wav_parts:
+        raise ConferencePreparationError("TTS returned no WAV segments")
+    if len(wav_parts) == 1:
+        return wav_parts[0]
+
+    parameters = None
+    frames: list[bytes] = []
+    for part in wav_parts:
+        try:
+            with wave.open(io.BytesIO(part), "rb") as wav_file:
+                current = (
+                    wav_file.getnchannels(),
+                    wav_file.getsampwidth(),
+                    wav_file.getframerate(),
+                    wav_file.getcomptype(),
+                    wav_file.getcompname(),
+                )
+                if parameters is None:
+                    parameters = current
+                elif current != parameters:
+                    raise ConferencePreparationError(
+                        "TTS WAV segments use incompatible audio formats"
+                    )
+                frames.append(wav_file.readframes(wav_file.getnframes()))
+        except (wave.Error, EOFError) as exc:
+            raise ConferencePreparationError(
+                "TTS returned an invalid WAV segment"
+            ) from exc
+
+    output = io.BytesIO()
+    channels, sample_width, sample_rate, compression, compression_name = parameters
+    with wave.open(output, "wb") as wav_file:
+        wav_file.setnchannels(channels)
+        wav_file.setsampwidth(sample_width)
+        wav_file.setframerate(sample_rate)
+        wav_file.setcomptype(compression, compression_name)
+        for frame_data in frames:
+            wav_file.writeframes(frame_data)
+    return output.getvalue()
+
+
 def http_tts(orchestration_url: str, timeout: float = 30.0) -> TtsFn:
     """Build a TTS function that calls the orchestration ``/api/tts`` endpoint.
 
@@ -577,15 +695,77 @@ def http_tts(orchestration_url: str, timeout: float = 30.0) -> TtsFn:
 
     url = orchestration_url.rstrip("/") + "/api/tts"
 
-    def _tts(text: str) -> bytes:
-        payload = json.dumps({"text": text}).encode("utf-8")
+    def _request(chunk: str) -> bytes:
+        payload = json.dumps({"text": chunk}).encode("utf-8")
         req = urllib.request.Request(
             url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read()
 
+    def _tts(text: str) -> bytes:
+        chunks = _split_tts_text(text)
+        return _concatenate_wavs([_request(chunk) for chunk in chunks])
+
     return _tts
+
+
+class LaptopAudioPlayer:
+    """Non-blocking WAV playback through a sounddevice output."""
+
+    def __init__(self, device=None) -> None:
+        try:
+            import sounddevice as sd
+            import soundfile as sf
+        except ImportError as exc:
+            raise ConferenceError(
+                "Laptop conference audio requires sounddevice and soundfile. "
+                "Install src\\windows-orchestration\\requirements.txt."
+            ) from exc
+
+        self._sd = sd
+        self._sf = sf
+        self.device = device
+        try:
+            self._sd.check_output_settings(device=self.device)
+        except Exception as exc:
+            label = self.device if self.device is not None else "Windows default"
+            raise ConferenceError(
+                f"Laptop conference audio device {label!r} is unavailable: {exc}"
+            ) from exc
+
+    def _play_source(self, source, description: str) -> float:
+        try:
+            samples, sample_rate = self._sf.read(
+                source, dtype="float32", always_2d=False
+            )
+            if sample_rate <= 0 or len(samples) == 0:
+                raise ValueError("WAV contains no playable samples")
+            self._sd.play(
+                samples,
+                sample_rate,
+                device=self.device,
+                blocking=False,
+            )
+            return float(len(samples)) / float(sample_rate)
+        except ConferenceError:
+            raise
+        except Exception as exc:
+            raise ConferenceError(
+                f"Could not play {description} through the laptop speakers: {exc}"
+            ) from exc
+
+    def play_file(self, wav_path: str) -> float:
+        return self._play_source(wav_path, wav_path)
+
+    def play_bytes(self, wav_bytes: bytes, description: str = "TTS fallback audio") -> float:
+        return self._play_source(io.BytesIO(wav_bytes), description)
+
+    def stop(self) -> None:
+        try:
+            self._sd.stop()
+        except Exception as exc:
+            logger.warning("Could not stop laptop conference audio: %s", exc)
 
 
 def prepare_assets(
@@ -798,7 +978,7 @@ class ConferenceController:
     Hardware/live dependencies are injected so the control logic is fully
     unit-testable without a robot or live services:
 
-    * ``play_fn(cue_asset)`` performs the actual Misty upload/playback.
+    * ``play_fn(cue_asset)`` performs playback through the selected output.
     * ``wait_for_presenter_fn()`` performs presenter voice-activity detection and
       returns True once the presenter has finished speaking (auto-advance).
     * ``shutdown_hooks`` releases audio/recording/skills/movement on stop.
@@ -829,6 +1009,7 @@ class ConferenceController:
         interrupt_event: Optional[threading.Event] = None,
         cancel_playback_fn: Optional[Callable[[], None]] = None,
         presenter_match_fn: Optional[Callable[[str], bool]] = None,
+        face_refresh_interval_s: float = 2.0,
     ) -> None:
         self.manifest = manifest
         self._play_fn = play_fn
@@ -846,6 +1027,7 @@ class ConferenceController:
         self._interrupt = interrupt_event or threading.Event()
         self._cancel_playback_fn = cancel_playback_fn
         self._presenter_match_fn = presenter_match_fn
+        self._face_refresh_interval_s = max(0.01, float(face_refresh_interval_s))
         self._play_lock = threading.Lock()
         self._auto_thread: Optional[threading.Thread] = None
 
@@ -923,16 +1105,20 @@ class ConferenceController:
         resolvable = bool(asset.wav_path) and _wav_file_duration(asset.wav_path) > 0
 
         # Apply gesture movements (arms/head) before audio starts
-        if self._movement_fn is not None and asset.movements:
+        cue_talking_face = self._talking_face
+        if asset.movements:
             resolved = deepcopy(asset.movements)
             for m in resolved:
                 if m.get("face") == "__talking__":
                     m["face"] = self._talking_face
-            self._movement_fn(resolved)
+                if m.get("face"):
+                    cue_talking_face = m["face"]
+            if self._movement_fn is not None:
+                self._movement_fn(resolved)
 
         # Set talking face BEFORE audio — visible during upload/buffering.
         if self._face_fn:
-            self._face_fn(self._talking_face)
+            self._face_fn(cue_talking_face)
 
         if not resolvable:
             if self.use_tts_fallback and self._tts_fallback_fn is not None:
@@ -953,11 +1139,23 @@ class ConferenceController:
         # Re-set talking face AFTER play starts — Misty's firmware resets the
         # display when audio playback begins, so override again immediately.
         if self._face_fn:
-            self._face_fn(self._talking_face)
+            self._face_fn(cue_talking_face)
 
         if duration > 0:
             if self._sleep_fn is time.sleep:
-                interrupted = self._interrupt.wait(max(0.0, duration))
+                deadline = time.monotonic() + max(0.0, duration)
+                interrupted = False
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    interrupted = self._interrupt.wait(
+                        min(self._face_refresh_interval_s, remaining)
+                    )
+                    if interrupted:
+                        break
+                    if self._face_fn and deadline - time.monotonic() > 0:
+                        self._face_fn(cue_talking_face)
             else:
                 self._sleep_fn(max(0.0, duration))
                 interrupted = self._interrupt.is_set()
@@ -1300,6 +1498,9 @@ def _build_presenter_wait(
 
 def _build_live_controller(args):  # pragma: no cover - requires Misty + services
     """Wire the state machine to a live MistyController for on-stage use."""
+    audio_output = _normalize_audio_output(
+        getattr(args, "audio_output", None) or CONFERENCE_AUDIO_OUTPUT
+    )
     manifest = ConferenceManifest.load(args.manifest)
     problems = verify_manifest(
         manifest, allow_audio_fallback=CONFERENCE_TTS_FALLBACK
@@ -1317,8 +1518,29 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
     battery = robot.check_battery() if hasattr(robot, "check_battery") else None
     if battery and battery.charge_percent < 0.10:
         raise ConferenceError("Conference preflight failed: Misty battery is below 10%")
-    if hasattr(robot, "misty_post"):
+    if hasattr(robot, "ensure_face_assets"):
+        if not robot.ensure_face_assets(overwrite=True):
+            raise ConferenceError(
+                "Conference preflight failed: current custom face assets could "
+                "not be synchronized to Misty"
+            )
+    if hasattr(robot, "_cancel_all_skills"):
+        robot._cancel_all_skills()
+
+    # Conference Mode drives faces directly for cue choreography. The regular
+    # FaceAnimator loop retains its previous state and would otherwise refresh
+    # that state later, overwriting the conference talking face mid-cue.
+    face_animator = getattr(robot, "_face_animator", None)
+    if face_animator is not None and hasattr(face_animator, "stop"):
+        face_animator.stop()
+    if audio_output == "misty" and hasattr(robot, "misty_post"):
         preload_conference_assets(robot, manifest)
+
+    laptop_player = None
+    if audio_output == "laptop":
+        laptop_player = LaptopAudioPlayer(
+            _parse_output_device(CONFERENCE_LAPTOP_AUDIO_DEVICE)
+        )
 
     # Start the laptop wake word listener explicitly — normally done inside
     # MistyController.run(), but conference mode doesn't call run().  Needed for
@@ -1335,11 +1557,13 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
             logger.warning("Could not start laptop wake word listener: %s", exc)
 
     def play_fn(asset: CueAsset):
-        # Pause wake word during playback to prevent self-wake from Misty's speaker
+        # Pause wake word/VAD during playback to prevent speaker feedback.
         listener = getattr(robot, "_wake_word_listener", None)
         if listener is not None:
             listener.pause()
         try:
+            if laptop_player is not None:
+                return laptop_player.play_file(asset.wav_path)
             filename = asset.misty_filename or os.path.basename(asset.wav_path)
             robot.play_preloaded_audio(filename)
             return float(asset.duration_s)
@@ -1357,6 +1581,8 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
             listener.pause()
         try:
             wav_bytes = tts_fallback_backend(text)
+            if laptop_player is not None:
+                return laptop_player.play_bytes(wav_bytes)
             return float(robot.upload_and_play_audio(wav_bytes, "conference_fallback.wav") or 0.0)
         except Exception:
             if listener is not None:
@@ -1370,10 +1596,12 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
     _presenter_yaw = PRESENTER_GLANCE_YAW if CONFERENCE_PRESENTER_SIDE == "left" else -PRESENTER_GLANCE_YAW
 
     def face_fn(filename: str) -> None:
-        if hasattr(robot, "show_face"):
-            robot.show_face(filename)
-        elif hasattr(robot, "display_image"):
+        # Conference Mode owns the display and must bypass FaceAnimator's
+        # last-displayed cache because firmware/skills can change the screen.
+        if hasattr(robot, "display_image"):
             robot.display_image(filename)
+        elif hasattr(robot, "show_face"):
+            robot.show_face(filename)
 
     def glance_fn() -> None:
         """Glance up and toward the presenter then back to audience (neutral head)."""
@@ -1384,8 +1612,7 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
                 yaw=_clamp(_presenter_yaw, HEAD_YAW_MIN, HEAD_YAW_MAX),
                 velocity=30,
             )
-        if hasattr(robot, "show_face"):
-            robot.show_face("face_idle.gif")
+        face_fn("face_idle.gif")
 
     def ambient_fn() -> None:
         """Subtle random idle motion while the presenter speaks.
@@ -1432,10 +1659,7 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         for movement in movements:
             face = movement.get("face")
             if face:
-                if hasattr(robot, "show_face"):
-                    robot.show_face(face)
-                elif hasattr(robot, "display_image"):
-                    robot.display_image(face)
+                face_fn(face)
 
             arms = movement.get("arms")
             if arms and hasattr(robot, "move_arms"):
@@ -1477,8 +1701,7 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
                 )
 
     def neutral_fn() -> None:
-        if hasattr(robot, "show_face"):
-            robot.show_face("face_idle.gif")
+        face_fn("face_idle.gif")
         if hasattr(robot, "move_arms"):
             robot.move_arms(left=NEUTRAL_ARMS[0], right=NEUTRAL_ARMS[1], velocity=40)
         if hasattr(robot, "move_head"):
@@ -1495,6 +1718,8 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
     def _release_audio():
         # First safe-shutdown step: release the mic/audio stack so keyphrase and
         # recording stop holding the device.
+        if laptop_player is not None:
+            laptop_player.stop()
         listener = getattr(robot, "_wake_word_listener", None)
         if listener is not None:
             if hasattr(listener, "stop_speech_monitor"):
@@ -1507,8 +1732,7 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
             robot.misty_post("/api/audio/keyphrase/stop")
 
     def _rest_state():
-        if hasattr(robot, "show_face"):
-            robot.show_face("face_idle.gif")
+        face_fn("face_idle.gif")
         robot.move_head(pitch=0, roll=0, yaw=0)
         if hasattr(robot, "set_led"):
             robot.set_led(0, 0, 0)
@@ -1537,7 +1761,12 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
             cancel_event=interrupt_event,
         )
 
-    return ConferenceController(
+    def cancel_playback_fn() -> None:
+        if laptop_player is not None:
+            laptop_player.stop()
+        robot.halt()
+
+    controller = ConferenceController(
         manifest,
         play_fn,
         wait_for_presenter_fn=wait_fn,
@@ -1551,8 +1780,10 @@ def _build_live_controller(args):  # pragma: no cover - requires Misty + service
         face_fn=face_fn,
         talking_face=CONFERENCE_TALKING_FACE,
         interrupt_event=interrupt_event,
-        cancel_playback_fn=robot.halt,
+        cancel_playback_fn=cancel_playback_fn,
     )
+    controller.audio_output = audio_output
+    return controller
 
 
 def _cmd_run(args) -> int:  # pragma: no cover - requires Misty + live services
@@ -1570,8 +1801,10 @@ def _cmd_run(args) -> int:  # pragma: no cover - requires Misty + live services
         return 2
     controller = _build_live_controller(args)
     controller.start()
+    audio_output = getattr(controller, "audio_output", CONFERENCE_AUDIO_OUTPUT)
     print(
-        "Conference Mode live. Controls: [n]ext [r]eplay [p]revious "
+        f"Conference Mode live (audio: {audio_output}). "
+        "Controls: [n]ext [r]eplay [p]revious "
         "[space]pause/resume [a]uto [s]top"
     )
     workers: list[threading.Thread] = []
@@ -1669,6 +1902,13 @@ def build_parser() -> argparse.ArgumentParser:
                        default=CONFERENCE_AUTO_ADVANCE,
                        help="Enable silence-triggered auto-advance (default from "
                             "CONFERENCE_AUTO_ADVANCE); use --no-auto for manual only.")
+    p_run.add_argument(
+        "--audio-output",
+        choices=("misty", "laptop"),
+        default=CONFERENCE_AUDIO_OUTPUT,
+        help="Play cues through Misty or the laptop speakers (default from "
+        "CONFERENCE_AUDIO_OUTPUT).",
+    )
     p_run.set_defaults(func=_cmd_run)
 
     return parser

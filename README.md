@@ -494,11 +494,13 @@ npx . conference prepare      # Generate TTS audio for all cues
 npx . conference prepare --script talks\my-talk.md --no-reuse
                               # Regenerate every cue from a custom script
 npx . conference run          # Live interactive stage runner
+npx . conference run --audio-output laptop
+                              # Play Misty's cues through laptop speakers
 ```
 
 See [`docs/conference-mode.md`](docs/conference-mode.md) for full documentation
-including variable substitution, gesture annotations, live controls, and
-configuration.
+including audio routing, variable substitution, gesture annotations, live
+controls, and configuration.
 
 ---
 

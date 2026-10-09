@@ -65,7 +65,8 @@ Conference Mode (npx . conference <subcommand>):
   dry-run [--script <path>]       Preview the ordered cue plan (no hardware)
   prepare [--script <path>]       Generate/import/reuse cue audio + manifest
   verify                          Confirm every cue has playable audio
-  run [--auto|--no-auto]          Live interactive stage runner (requires Misty)
+  run [--auto|--no-auto] [--audio-output misty|laptop]
+                                  Live interactive stage runner (requires Misty)
 `);
 }
 
@@ -1234,7 +1235,8 @@ Subcommands:
   dry-run [--script <path>]       Preview the ordered cue plan (no hardware)
   prepare [--script <path>]       Generate/import/reuse cue audio + manifest
   verify                          Confirm every cue has playable audio
-  run [--auto|--no-auto]          Live interactive stage runner (requires Misty)
+  run [--auto|--no-auto] [--audio-output misty|laptop]
+                                  Live interactive stage runner (requires Misty)
 
 Options are passed directly to conference_mode.py.
 `);

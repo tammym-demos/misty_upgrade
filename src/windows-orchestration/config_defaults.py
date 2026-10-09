@@ -183,6 +183,11 @@ REQUIRED_FACE_ASSETS: tuple = (
     "face_talking_excited.gif",
     "face_talking_sad.gif",
     "face_talking_curious.gif",
+    "face_talking_contempt.gif",
+    "face_talking_blink.gif",
+    "face_talking_confused.gif",
+    "face_talking_sly.gif",
+    "face_talking_wink.gif",
 )
 
 # Face asset replacement / sync behavior (issue #116).
@@ -237,6 +242,12 @@ EXPRESSION_SENSOR_MIN_INTERVAL_S: float = 3.0
 # unchanged whenever this flag is off. Runtime never invokes the LLM for a
 # scripted Misty cue; optional fallback only re-synthesizes known scripted text.
 CONFERENCE_MODE_ENABLED: bool = False
+# Audio output used by the live runner: "misty" preserves existing robot-speaker
+# playback; "laptop" plays the same prepared WAVs through Windows speakers.
+CONFERENCE_AUDIO_OUTPUT: str = "misty"
+# Optional sounddevice output device index or name for laptop playback.
+# Empty uses the Windows default output device.
+CONFERENCE_LAPTOP_AUDIO_DEVICE: str = ""
 # Default talk script parsed into ordered presenter/Misty cue pairs.
 CONFERENCE_SCRIPT_PATH: str = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "talks", "20260710-2.md")
