@@ -30,9 +30,21 @@ npx . start --python C:\Users\<you>\AppData\Local\Programs\Python\Python312-x64\
 # Check service status
 npx . status
 
+# Guided travel Wi-Fi setup (requires an existing robot connection)
+npx . wifi setup
+npx . wifi verify
+
 # Gracefully stop the controller, put Misty in a safe rest state, and stop owned services
 npx . stop
 ```
+
+For venue Wi-Fi, see [Travel Wi-Fi setup](docs/travel-wifi.md). The guided
+`wifi setup` command supports a private laptop hotspot or direct shared-password
+Wi-Fi; `wifi verify` checks the expected robot over REST and WebSocket. Windows
+network changes remain manual, and initial setup needs an existing robot link.
+Hotspot setup is the default: it discovers the SSID/private adapter, derives the
+subnet, and normally asks only for a hidden password and final confirmation.
+Ambiguous discovery falls back to manual selection instead of guessing.
 
 The CLI reads `src\windows-orchestration\.env` when present. Startup loads `Phi-3.5-mini-instruct-generic-cpu:2` into Foundry Local with a 1-hour TTL before starting the controller, so the first chat does not pay model-load latency. Before launching services, startup preflights the full local runtime: STT/TTS imports (`faster_whisper`, `kokoro_onnx`, `soundfile`), Kokoro model assets (`kokoro-v1.0.int8.onnx`, `voices-v1.0.bin`), the laptop wake-word path (`numpy`, `sounddevice`, `openwakeword`), bundled OpenWakeWord resource models, and the bundled `models\hey_misty.onnx` custom wake-word model unless `OWW_CUSTOM_MODEL_PATH` overrides it. It also warns when the selected Python path appears to be Windows ARM64, because live STT may require x64 Python on ARM companion devices. Finally, it checks Misty's REST API at `http://<MISTY_IP>/api/device`. If the configured IP is stale, it scans local private IPv4 `/24` networks for Misty's device API, stores the discovered IP and broadcast/reverse-DNS name in `.misty-services.json`, and reuses that address next time. Override common settings inline:
 

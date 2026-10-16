@@ -12,6 +12,7 @@ Usage:
 """
 
 import json
+import ipaddress
 import logging
 import os
 import socket
@@ -33,6 +34,79 @@ _DISCOVERY_FILE = Path(__file__).parent / "misty_ip.json"
 
 # How long a cached IP is considered valid before re-probing (seconds)
 _CACHE_TTL_S = 300  # 5 minutes
+
+
+def private_ipv4(value: str) -> str:
+    """Validate an explicit RFC1918 host address, not a hostname or public target."""
+    address = ipaddress.IPv4Address(value)
+    if not any(address in ipaddress.IPv4Network(block)
+               for block in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")):
+        raise ValueError("Use a private IPv4 address on an approved local network.")
+    return str(address)
+
+
+def approved_subnet(value: str) -> ipaddress.IPv4Network:
+    """Limit opt-in discovery to at most one explicitly approved /24."""
+    network = ipaddress.IPv4Network(value, strict=True)
+    private_ipv4(str(network.network_address))
+    private_ipv4(str(network.broadcast_address))
+    if network.prefixlen < 24:
+        raise ValueError("Discovery is limited to one /24 or smaller subnet.")
+    return network
+
+
+def probe_misty_identity(ip: str, timeout: float = 2.0) -> Optional[dict]:
+    """Read a robot identity without trusting proxies, response text, or cached data."""
+    ip = private_ipv4(ip)
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(f"http://{ip}/api/device", timeout=timeout,
+                                   allow_redirects=False)
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+    except (requests.RequestException, ValueError):
+        return None
+    result = payload.get("result") if isinstance(payload, dict) else None
+    if (not isinstance(payload, dict) or payload.get("status") != "Success" or not isinstance(result, dict)
+            or not all(isinstance(result.get(key), str) and result[key]
+                       for key in ("serialNumber", "robotId", "robotVersion"))):
+        return None
+    # Use the address that actually responded; device metadata can contain a stale IP.
+    return {
+        "ipAddress": ip,
+        "serialNumber": result["serialNumber"],
+        "robotId": result["robotId"],
+        "robotVersion": result["robotVersion"],
+        "networkProfileName": result.get("currentProfileName"),
+        "macAddress": result.get("macAddress"),
+    }
+
+
+def discover_misty_scoped(subnet: str, serial_number: str,
+                          robot_id: str, candidate_ip: Optional[str] = None) -> Optional[dict]:
+    """Find one expected robot only inside an operator-approved private subnet."""
+    network = approved_subnet(subnet)
+    if candidate_ip:
+        candidate = private_ipv4(candidate_ip)
+        if ipaddress.IPv4Address(candidate) not in network:
+            raise ValueError("The target IP must be inside the approved subnet.")
+        found = probe_misty_identity(candidate)
+        if found and found["serialNumber"] == serial_number and found["robotId"] == robot_id:
+            return found
+        # An explicit target never authorizes scanning other addresses.
+        return None
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = [executor.submit(probe_misty_identity, str(ip), 1.0)
+                   for ip in network.hosts()]
+        for future in as_completed(futures):
+            found = future.result()
+            if found and found["serialNumber"] == serial_number and found["robotId"] == robot_id:
+                for pending in futures:
+                    pending.cancel()
+                return found
+    return None
 
 
 def _get_local_subnets() -> list[str]:
