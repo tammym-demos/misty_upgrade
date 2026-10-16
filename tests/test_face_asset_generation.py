@@ -4,7 +4,7 @@ import importlib.util
 import sys
 from pathlib import Path
 
-from PIL import Image, ImageStat
+from PIL import Image, ImageChops, ImageStat
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -98,10 +98,26 @@ def test_generated_faces_are_readable_without_washing_out():
         assert 25 <= luma <= 180, filename
 
 
+def test_talking_emotions_remain_distinct_in_grayscale():
+    assets_dir = REPO_ROOT / "assets"
+    generator = _load_generator()
+
+    with Image.open(assets_dir / "face_talking_neutral.png").convert("L") as neutral:
+        for emotion in generator.EMOTIONS:
+            if emotion == "neutral":
+                continue
+            with Image.open(
+                assets_dir / f"face_talking_{emotion}.png"
+            ).convert("L") as expression:
+                difference = ImageChops.difference(neutral, expression)
+                assert ImageStat.Stat(difference).mean[0] > 3.0, emotion
+
+
 def test_preview_contact_sheet_is_generated():
     assets_dir = REPO_ROOT / "assets"
     contact_sheet = assets_dir / _load_generator().PREVIEW_CONTACT_SHEET
 
     assert contact_sheet.exists()
     with Image.open(contact_sheet) as image:
-        assert image.size == (480, 544)
+        expected_rows = (3 + len(_load_generator().EMOTIONS) + 1) // 2
+        assert image.size == (480, 136 * expected_rows)

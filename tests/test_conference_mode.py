@@ -224,7 +224,7 @@ def test_parse_annotations_extracts_gestures():
     assert movements == [
         cm.GESTURE_LIBRARY["wave"],
         {"head": [10.0, 5.0, 0.0]},
-        {"face": "e_Joy.jpg"},
+        {"face": "face_talking_happy.gif"},
     ]
 
 
@@ -350,7 +350,7 @@ def test_movements_in_manifest(tmp_path):
 
     assert manifest.cues[0].movements == [
         cm.GESTURE_LIBRARY["wave"],
-        {"face": "e_Joy.jpg"},
+        {"face": "face_talking_happy.gif"},
     ]
     assert manifest.cues[0].to_dict()["movements"] == manifest.cues[0].movements
 
@@ -403,7 +403,7 @@ def test_dry_run_shows_movements():
 
     output = stream.getvalue()
     assert "Movements:" in output
-    assert "face=e_Joy.jpg" in output
+    assert "face=face_talking_happy.gif" in output
 
 
 # ---------------------------------------------------------------------------
@@ -655,7 +655,9 @@ def test_controller_calls_movement_fn(tmp_path):
     controller.start()
     controller.play_next()
 
-    assert calls == [[cm.GESTURE_LIBRARY["wave"], {"face": "e_Joy.jpg"}]]
+    assert calls == [
+        [cm.GESTURE_LIBRARY["wave"], {"face": "face_talking_happy.gif"}]
+    ]
 
 
 def test_controller_restores_neutral(tmp_path):
@@ -913,6 +915,79 @@ def test_talking_face_always_applied_during_playback(tmp_path):
     ]
 
 
+def test_explicit_cue_face_persists_through_playback(tmp_path):
+    face_calls = []
+    controller, _, _ = build_ready_controller(
+        tmp_path,
+        face_fn=lambda filename: face_calls.append(filename),
+    )
+    controller.manifest.cues[0].movements = [
+        {"face": "face_talking_contempt.gif"}
+    ]
+
+    controller.start()
+    controller.play_next()
+
+    assert face_calls == [
+        "face_talking_contempt.gif",
+        "face_talking_contempt.gif",
+    ]
+
+
+def test_active_face_is_reasserted_during_long_playback(tmp_path):
+    _, _, manifest = build_ready_controller(tmp_path)
+    face_calls = []
+    controller = ConferenceController(
+        manifest,
+        lambda asset: 0.06,
+        enabled=True,
+        face_fn=lambda filename: face_calls.append(filename),
+        talking_face="face_talking_happy.gif",
+        sleep_fn=cm.time.sleep,
+        face_refresh_interval_s=0.01,
+    )
+
+    controller.start()
+    controller.play_next()
+
+    assert len(face_calls) >= 3
+    assert set(face_calls) == {"face_talking_happy.gif"}
+
+
+@pytest.mark.parametrize("action", ["pause", "stop"])
+def test_cancellation_during_slow_face_refresh_does_not_advance(tmp_path, monkeypatch, action):
+    _, _, manifest = build_ready_controller(tmp_path)
+    clock = [0.0]
+    face_calls = []
+    monkeypatch.setattr(cm.time, "monotonic", lambda: clock[0])
+
+    def refresh_face(filename):
+        face_calls.append(filename)
+        if len(face_calls) == 3:
+            getattr(controller, action)()
+            clock[0] += 2.0
+
+    controller = ConferenceController(
+        manifest, lambda asset: 1.0, enabled=True,
+        face_fn=refresh_face, sleep_fn=cm.time.sleep,
+        face_refresh_interval_s=0.1,
+    )
+
+    def wait(seconds):
+        clock[0] += seconds
+        return controller._interrupt.is_set()
+
+    monkeypatch.setattr(controller._interrupt, "wait", wait)
+    controller.start()
+    assert controller.play_next() is None
+    assert len(face_calls) == 3
+    assert controller.play_count == 0
+    assert controller.peek_next() == manifest.cues[0]
+    if action == "pause":
+        controller.resume()
+        assert controller.play_next() == manifest.cues[0]
+
+
 def test_glance_fn_called_during_auto_advance(tmp_path):
     """Glance function is called while waiting for presenter to finish."""
     glance_calls = []
@@ -946,7 +1021,7 @@ def test_chained_gesture_merges_movements():
     merged = movements[0]
     # excited provides arms and face; talking face is overwritten by excited's
     assert merged["arms"] == [-40, -40]
-    assert merged["face"] == "e_Joy.jpg"
+    assert merged["face"] == "face_talking_excited.gif"
 
 
 def test_chained_gesture_last_wins_on_conflict():
@@ -957,13 +1032,46 @@ def test_chained_gesture_last_wins_on_conflict():
     # shrug arms overwrite wave arms
     assert merged["arms"] == [-20, -20]
     # wave face remains (shrug has no face)
-    assert merged["face"] == "e_Joy.jpg"
+    assert merged["face"] == "face_talking_happy.gif"
 
 
 def test_chained_unknown_gesture_raises():
     """Unknown gesture in chain raises ScriptParseError."""
-    with pytest.raises(cm.ScriptParseError, match="Unknown gesture 'dance'"):
+    with pytest.raises(cm.ScriptParseError, match="component.*dance"):
         cm.parse_annotations("Hi [dance+wave]")
+
+
+def test_chained_parameterized_annotations():
+    text, movements = cm.parse_annotations(
+        "Hello [glance+face:happy] [shrug+head:0,10,0] "
+        "[excited+arms:20,20]"
+    )
+
+    assert text == "Hello"
+    assert movements == [
+        {
+            "head_motion": "glance_presenter",
+            "face": "face_talking_happy.gif",
+        },
+        {"arms": [-20, -20], "head": [0.0, 10.0, 0.0]},
+        {"arms": [20.0, 20.0], "face": "face_talking_excited.gif"},
+    ]
+
+
+@pytest.mark.parametrize("annotation,head,arms", [
+    ("head:0,+10,0", [0.0, 10.0, 0.0], None),
+    ("head:0,1e+1,0", [0.0, 10.0, 0.0], None),
+    ("nod+arms:+45,+45", None, [45.0, 45.0]),
+    ("head:0,+10,0+arms:+4e+1,+45", [0.0, 10.0, 0.0], [40.0, 45.0]),
+])
+def test_annotation_chaining_preserves_numeric_signs_and_exponents(annotation, head, arms):
+    text, movements = cm.parse_annotations(f"Hello [{annotation}]")
+    assert text == "Hello"
+    assert len(movements) == 1
+    if head is not None:
+        assert movements[0]["head"] == head
+    if arms is not None:
+        assert movements[0]["arms"] == arms
 
 
 def test_talking_gesture_resolves_sentinel_at_runtime(tmp_path):
@@ -993,3 +1101,166 @@ def test_presenter_side_config_default():
     """CONFERENCE_PRESENTER_SIDE defaults to 'right'."""
     import config_defaults
     assert config_defaults.CONFERENCE_PRESENTER_SIDE == "right"
+
+
+def test_conference_audio_output_defaults_to_misty():
+    import config_defaults
+
+    assert config_defaults.CONFERENCE_AUDIO_OUTPUT == "misty"
+    assert config_defaults.CONFERENCE_LAPTOP_AUDIO_DEVICE == ""
+
+
+def test_audio_output_validation():
+    assert cm._normalize_audio_output(" MISTY ") == "misty"
+    assert cm._normalize_audio_output("laptop") == "laptop"
+    with pytest.raises(cm.ConferenceError, match="misty.*laptop"):
+        cm._normalize_audio_output("both")
+
+
+def test_parse_output_device():
+    assert cm._parse_output_device("") is None
+    assert cm._parse_output_device(" 7 ") == 7
+    assert cm._parse_output_device("Conference Speakers") == "Conference Speakers"
+
+
+def test_run_parser_accepts_laptop_audio_output():
+    args = cm.build_parser().parse_args(["run", "--audio-output", "laptop"])
+
+    assert args.audio_output == "laptop"
+
+
+def test_laptop_audio_player_plays_file_bytes_and_stops(monkeypatch):
+    calls = []
+
+    fake_sd = types.SimpleNamespace(
+        check_output_settings=lambda **kwargs: calls.append(("check", kwargs)),
+        play=lambda samples, sample_rate, **kwargs: calls.append(
+            ("play", samples, sample_rate, kwargs)
+        ),
+        stop=lambda: calls.append(("stop",)),
+    )
+    fake_sf = types.SimpleNamespace(
+        read=lambda source, **kwargs: ([0.0] * 8, 8)
+    )
+    monkeypatch.setitem(sys.modules, "sounddevice", fake_sd)
+    monkeypatch.setitem(sys.modules, "soundfile", fake_sf)
+
+    player = cm.LaptopAudioPlayer("Conference Speakers")
+
+    assert player.play_file("cue.wav") == 1.0
+    assert player.play_bytes(make_wav_bytes()) == 1.0
+    player.stop()
+    assert calls[0] == ("check", {"device": "Conference Speakers"})
+    assert calls[-1] == ("stop",)
+    assert len([call for call in calls if call[0] == "play"]) == 2
+
+
+def test_long_tts_text_splits_and_rejoins_wavs():
+    text = ("First sentence has useful words. " * 12) + (
+        "Second sentence also has useful words. " * 12
+    )
+
+    chunks = cm._split_tts_text(text, max_chars=120)
+
+    assert len(chunks) > 1
+    assert all(0 < len(chunk) <= 120 for chunk in chunks)
+    joined = cm._concatenate_wavs([make_wav_bytes(0.1), make_wav_bytes(0.2)])
+    assert cm.wav_duration(joined) == pytest.approx(0.3, abs=0.01)
+
+
+def test_live_controller_routes_audio_to_laptop(tmp_path, monkeypatch):
+    _, _, manifest = build_ready_controller(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest.save(str(manifest_path))
+
+    class FakeFaceAnimator:
+        def __init__(self):
+            self.stop_calls = 0
+
+        def stop(self):
+            self.stop_calls += 1
+
+    class FakeRobot:
+        def __init__(self):
+            self.played = []
+            self.halted = 0
+            self.face_sync_calls = []
+            self.displayed = []
+            self.cancel_skills_calls = 0
+            self._wake_word_listener = None
+            self._face_animator = FakeFaceAnimator()
+
+        def ensure_face_assets(self, *, overwrite=None):
+            self.face_sync_calls.append(overwrite)
+            return True
+
+        def play_preloaded_audio(self, filename):
+            self.played.append(filename)
+
+        def stop_recording(self):
+            pass
+
+        def _cancel_all_skills(self):
+            self.cancel_skills_calls += 1
+
+        def display_image(self, filename):
+            self.displayed.append(filename)
+
+        def halt(self):
+            self.halted += 1
+
+        def move_head(self, **kwargs):
+            pass
+
+    class FakeLaptopPlayer:
+        instances = []
+
+        def __init__(self, device):
+            self.device = device
+            self.played = []
+            self.stopped = 0
+            self.__class__.instances.append(self)
+
+        def play_file(self, wav_path):
+            self.played.append(wav_path)
+            return 0.0
+
+        def play_bytes(self, wav_bytes, description=""):
+            self.played.append(description or "bytes")
+            return 0.0
+
+        def stop(self):
+            self.stopped += 1
+
+    robot = FakeRobot()
+    monkeypatch.setitem(
+        sys.modules,
+        "misty_controller",
+        types.SimpleNamespace(MistyController=lambda: robot),
+    )
+    monkeypatch.setattr(cm, "CONFERENCE_MODE_ENABLED", True)
+    monkeypatch.setattr(cm, "CONFERENCE_LAPTOP_AUDIO_DEVICE", "4")
+    monkeypatch.setattr(cm, "LaptopAudioPlayer", FakeLaptopPlayer)
+
+    controller = cm._build_live_controller(
+        types.SimpleNamespace(
+            manifest=str(manifest_path),
+            auto=False,
+            audio_output="laptop",
+        )
+    )
+    controller.start()
+    controller.play_next()
+    controller.shutdown()
+
+    player = FakeLaptopPlayer.instances[0]
+    assert controller.audio_output == "laptop"
+    assert player.device == 4
+    assert player.played == [manifest.cues[0].wav_path]
+    assert player.stopped >= 1
+    assert robot.played == []
+    assert robot.halted >= 1
+    assert robot.face_sync_calls == [True]
+    assert robot.cancel_skills_calls >= 1
+    assert "face_talking_happy.gif" in robot.displayed
+    assert robot._face_animator.stop_calls == 1

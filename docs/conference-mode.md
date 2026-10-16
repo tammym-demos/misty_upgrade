@@ -79,17 +79,17 @@ spoken text before TTS/asset generation and stored in the manifest as planned
 
 #### Chaining gestures
 
-Use `+` to combine gestures in a single tag: `[talking+excited]` merges both
-movement dicts so Misty gets excited arms *and* the talking face. The **last**
-gesture in the chain wins on conflicting keys (e.g., both set `face`).
+Use `+` to combine gestures and parameterized actions in a single tag, such as
+`[talking+excited]`, `[glance+face:happy]`, `[shrug+head:0,10,0]`, or
+`[nod+arms:45,45]`. The **last** component wins on conflicting keys.
 
 #### Auto-talking face
 
-Misty always shows the configured talking face (`CONFERENCE_TALKING_FACE`,
-default `face_talking_happy.gif`) during audio playback — unconditionally, on
-every cue. Gesture annotations for arms, head, and motion still apply alongside
-the talking face. This means you never need to add `[talking]` manually; it
-happens automatically for every cue at runtime.
+Misty shows the configured talking face (`CONFERENCE_TALKING_FACE`, default
+`face_talking_happy.gif`) when a cue has no face annotation. When a cue includes
+`[face:X]` or a named gesture with a face, the final annotated face remains
+active throughout that cue. Gesture annotations for arms, head, and motion apply
+alongside the selected talking face.
 
 #### Presenter glance
 
@@ -115,6 +115,9 @@ python conference_mode.py verify
 
 # Live interactive stage runner (requires Misty hardware + orchestration)
 python conference_mode.py run
+
+# Loud-room option: keep Misty's animation but use the laptop speakers
+python conference_mode.py run --audio-output laptop
 ```
 
 `dry-run` now prints any planned movement annotations beside each cue so you can
@@ -131,6 +134,7 @@ npx . conference prepare --script talks/my-talk.md --no-reuse
                                                 # Regenerate all custom-script cues
 npx . conference verify                         # Confirm showtime-ready
 npx . conference run                            # Live runner (auto-advance)
+npx . conference run --audio-output laptop      # Laptop-only cue audio
 npx . conference run --no-auto                  # Manual-only mode
 npx . conference dry-run --script talks/my-talk.md   # Custom script
 ```
@@ -155,6 +159,12 @@ The default talk script is `talks/20260710-2.md`. Override with `--script`.
 - `CONFERENCE_PRESENTER_RMS_THRESHOLD` sets the initial presenter-speech energy threshold before ambient calibration (default: `30`).
 - Generated audio and the manifest are cached in `data/conference/`. Re-running `prepare` reuses unchanged cues.
 - Set `CONFERENCE_MODE_ENABLED=true` in `.env` to enable live mode.
+- `CONFERENCE_AUDIO_OUTPUT` selects `misty` (default) or `laptop`. The
+  `--audio-output` run option overrides it for a single rehearsal.
+- `CONFERENCE_LAPTOP_AUDIO_DEVICE` optionally selects a `sounddevice` output
+  device by index or name; leave it empty to use the Windows default speaker.
+- Laptop output is laptop-only. Misty still performs faces and movement, and the
+  presenter listener remains suppressed while each cue is audible.
 
 ### Preparation and the manifest
 
@@ -190,8 +200,10 @@ planned gesture/face/head actions for runtime playback.
 
 ## Verification
 
-The live runner preflights reachability and battery, uploads all verified WAVs
-with `ImmediatelyApply=false`, and then plays the named assets during the talk.
+The live runner preflights Misty reachability and battery. With `misty` output it
+uploads all verified WAVs with `ImmediatelyApply=false` and plays the named
+assets during the talk. With `laptop` output it skips robot audio upload and
+plays the manifest's local WAV paths through `sounddevice`.
 Playback and presenter waits run outside the CLI input loop, so pause or stop can
 cancel promptly without advancing the cue cursor. Optional presenter transcript
 matching is conservative: an uncertain match leaves the cue for manual advance.
@@ -212,6 +224,10 @@ environment, and must be validated during rehearsal:
 - Live TTS generation of cue audio via the orchestration `/api/tts` endpoint.
 - Actual cue playback on Misty (`upload_and_play_audio`) and, if used, validating
   pre-uploaded on-Misty audio filenames/storage.
+- Laptop-output playback through the intended Windows speaker or conference-room
+  audio device, including volume, cue timing, and immediate pause/stop behavior.
+- Confirmation that laptop playback does not trigger presenter detection and
+  that Misty's face and movement remain synchronized with the cue.
 - Real presenter voice-activity detection in the room (audience noise, applause,
   fan noise, room speakers) driving auto-advance thresholds.
 - End-to-end safe shutdown on the physical robot (audio/recording/skills/movement

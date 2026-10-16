@@ -3,6 +3,12 @@
 ## Context
 Attempted to connect Misty II (serial redacted, firmware 2.0.2.11660) to a new WiFi network (phone hotspot) after her primary home network became unstable.
 
+For the supported guided laptop-hotspot/direct Wi-Fi workflow, see
+[Travel Wi-Fi setup](travel-wifi.md). The notes below preserve historical
+investigation results, not guarantees of recovery: UART provisioning, USB
+networking, BLE pairing, and robot-hosted hotspot behavior still need validation
+on the actual hardware before being relied on during travel.
+
 ## Key Findings
 
 ### 1. Misty's USB port is micro-USB (charge-only?)
@@ -42,8 +48,8 @@ Attempted to connect Misty II (serial redacted, firmware 2.0.2.11660) to a new W
 - Cold boot with drive inserted — Misty did not connect to the specified network.
 - May not be supported on firmware 2.0.2.11660, or the file format/name is wrong.
 
-### 5. Misty only supports 2.4GHz WiFi
-- Confirmed by API response and documentation.
+### 5. Start compatibility testing with 2.4GHz WiFi
+- Earlier investigation treated Misty as 2.4GHz-only. Official Misty II specifications list both 2.4 and 5GHz; the limitation is not established for every hardware/firmware combination.
 - Pixel hotspot was set to 2.4GHz — not a band issue.
 
 ### 6. REST API is the primary provisioning path

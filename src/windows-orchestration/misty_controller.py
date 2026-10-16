@@ -1294,7 +1294,7 @@ class MistyController:
             logger.warning(f"Failed to upload face asset '{filename}': {e}")
             return False
 
-    def ensure_face_assets(self) -> bool:
+    def ensure_face_assets(self, *, overwrite: bool | None = None) -> bool:
         """Idempotently ensure custom face assets are present on Misty (#110).
 
         In the default ``missing`` sync mode, assets already on the device
@@ -1312,7 +1312,11 @@ class MistyController:
         Returns True if every required custom face is available on the device
         (already present or successfully uploaded); False otherwise.
         """
-        overwrite = FACE_ASSETS_SYNC_MODE == "overwrite"
+        overwrite = (
+            FACE_ASSETS_SYNC_MODE == "overwrite"
+            if overwrite is None
+            else bool(overwrite)
+        )
         inventory = set() if overwrite else self._get_misty_image_names()
         uploaded = 0
         skipped = 0

@@ -32,7 +32,18 @@ WIDTH, HEIGHT = 480, 272
 TARGET_ASPECT = WIDTH / HEIGHT
 SCALE = 3
 
-EMOTIONS = ("neutral", "happy", "excited", "sad", "curious")
+EMOTIONS = (
+    "neutral",
+    "happy",
+    "excited",
+    "sad",
+    "curious",
+    "contempt",
+    "blink",
+    "confused",
+    "sly",
+    "wink",
+)
 PREVIEW_CONTACT_SHEET = "face_preview_contact_sheet.png"
 
 LEFT_EYE = (132, 104)
@@ -60,6 +71,11 @@ EMOTION_ACCENT = {
     "excited": (118, 105, 255),
     "sad": (74, 118, 235),
     "curious": (74, 220, 255),
+    "contempt": (218, 104, 255),
+    "blink": (104, 145, 255),
+    "confused": (78, 205, 255),
+    "sly": (222, 92, 210),
+    "wink": (92, 196, 255),
 }
 
 EMOTION_EYE = {
@@ -68,6 +84,11 @@ EMOTION_EYE = {
     "excited": (132, 112, 255),
     "sad": (90, 125, 255),
     "curious": (80, 225, 255),
+    "contempt": (226, 112, 255),
+    "blink": (118, 150, 255),
+    "confused": (92, 214, 255),
+    "sly": (234, 104, 220),
+    "wink": (98, 206, 255),
 }
 
 
@@ -180,6 +201,31 @@ def draw_eye(
     return img
 
 
+def draw_expression_brows(
+    img: Image.Image,
+    emotion: str,
+    accent: tuple[int, int, int],
+) -> Image.Image:
+    """Add high-contrast brow geometry so expressions read without color."""
+    draw = ImageDraw.Draw(img)
+    color = _rgba(accent, 235)
+    width = _sc(7)
+
+    brows = {
+        "happy": [((72, 57), (132, 43), (192, 57)), ((288, 57), (348, 43), (408, 57))],
+        "excited": [((72, 64), (132, 36), (192, 64)), ((288, 64), (348, 36), (408, 64))],
+        "sad": [((72, 43), (132, 62), (192, 67)), ((288, 67), (348, 62), (408, 43))],
+        "curious": [((72, 62), (132, 43), (192, 50)), ((288, 48), (348, 38), (408, 48))],
+        "contempt": [((72, 46), (132, 61), (192, 65)), ((288, 65), (348, 54), (408, 43))],
+        "confused": [((72, 43), (132, 63), (192, 68)), ((288, 68), (348, 47), (408, 42))],
+        "sly": [((72, 57), (132, 65), (192, 58)), ((288, 57), (348, 45), (408, 51))],
+        "wink": [((72, 59), (132, 48), (192, 59)), ((288, 58), (348, 42), (408, 56))],
+    }
+    for points in brows.get(emotion, []):
+        draw.line([_pt(point) for point in points], fill=color, width=width, joint="curve")
+    return img
+
+
 def mouth_bounds(openness: float, width: int = MOUTH_MAX_WIDTH) -> tuple[int, int, int, int]:
     """Return the single animated mouth bounding box for a talking frame."""
     openness = max(0.0, min(1.0, openness))
@@ -196,10 +242,11 @@ def draw_mouth(
     openness: float = 0.2,
     smile: float = 0.0,
     sad: bool = False,
+    width: int = MOUTH_MAX_WIDTH,
 ) -> Image.Image:
     """Draw one coherent mouth; all talking frames use this same anchor."""
     draw = ImageDraw.Draw(img)
-    x1, y1, x2, y2 = mouth_bounds(openness)
+    x1, y1, x2, y2 = mouth_bounds(openness, width=width)
     draw.rounded_rectangle(_box((x1 - 9, y1 - 8, x2 + 9, y2 + 8)), radius=_sc(28), fill=(*PALETTE["mouth_shadow"], 255))
 
     lip_top = y1 + 2
@@ -264,11 +311,30 @@ def render_face_frame(
     accent = EMOTION_ACCENT[emotion]
     eye_accent = EMOTION_EYE[emotion]
     sad = emotion == "sad"
-    happy = emotion in {"happy", "excited"}
+    happy = emotion in {"happy", "excited", "sly", "wink"}
+    left_blink = blink
+    right_blink = blink
+    if emotion == "blink":
+        left_blink = right_blink = max(blink, 0.95)
+    elif emotion == "wink":
+        left_blink = max(blink, 0.95)
+    elif emotion == "confused":
+        left_blink = max(blink, 0.35)
+        gaze = gaze or 7
+    elif emotion == "sly":
+        left_blink = max(blink, 0.28)
+        gaze = gaze or 12
+    elif emotion == "contempt":
+        left_blink = right_blink = max(blink, 0.22)
+        gaze = gaze or -9
+    elif emotion == "curious":
+        left_blink = max(blink, 0.12)
+        gaze = gaze or 8
 
     img = draw_background(_hi_canvas(), accent, pulse)
-    img = draw_eye(img, LEFT_EYE, eye_accent, blink=blink, gaze=gaze, happy_arc=happy, sad=sad)
-    img = draw_eye(img, RIGHT_EYE, eye_accent, blink=blink, gaze=gaze, happy_arc=happy, sad=sad)
+    img = draw_eye(img, LEFT_EYE, eye_accent, blink=left_blink, gaze=gaze, happy_arc=happy, sad=sad)
+    img = draw_eye(img, RIGHT_EYE, eye_accent, blink=right_blink, gaze=gaze, happy_arc=happy, sad=sad)
+    img = draw_expression_brows(img, emotion, accent)
     img = draw_cheeks(img, accent, pulse)
     if listening:
         draw = ImageDraw.Draw(img)
@@ -278,7 +344,23 @@ def render_face_frame(
         img = draw_processing_scan(img, accent, processing_y)
     if sparkle:
         img = draw_sparkle(img, accent, sparkle)
-    img = draw_mouth(img, accent, openness=openness, smile=0.8 if happy else 0.0, sad=sad)
+    mouth_width = {
+        "excited": 220,
+        "curious": 108,
+        "contempt": 138,
+        "blink": 164,
+        "confused": 126,
+        "sly": 150,
+        "wink": 158,
+    }.get(emotion, MOUTH_MAX_WIDTH)
+    img = draw_mouth(
+        img,
+        accent,
+        openness=openness,
+        smile=0.8 if happy else 0.0,
+        sad=sad,
+        width=mouth_width,
+    )
     return _downsample(img)
 
 
@@ -301,7 +383,12 @@ def make_talking_gif(emotion: str = "neutral", duration_ms: int = 150):
     """Generate a four-frame talking animation from one mouth anchor."""
     poses = ((0.16, 0.45), (0.58, 0.65), (1.0, 0.9), (0.58, 0.65))
     frames = [
-        render_face_frame(emotion=emotion, openness=open_state, pulse=pulse, sparkle=int((pulse - 0.5) * 16))
+        render_face_frame(
+            emotion=emotion,
+            openness=open_state,
+            pulse=pulse,
+            sparkle=int((pulse - 0.5) * 16) if emotion == "excited" else 0,
+        )
         for open_state, pulse in poses
     ]
     return save_gif(frames, duration_ms), frames[0]
@@ -344,14 +431,10 @@ def make_contact_sheet(assets_dir: Path):
         "face_idle.png",
         "face_listening.png",
         "face_processing.png",
-        "face_talking_neutral.png",
-        "face_talking_happy.png",
-        "face_talking_excited.png",
-        "face_talking_sad.png",
-        "face_talking_curious.png",
-    ]
+    ] + [f"face_talking_{emotion}.png" for emotion in EMOTIONS]
     thumb_w, thumb_h = 240, 136
-    sheet = Image.new("RGB", (thumb_w * 2, thumb_h * 4), (8, 8, 14))
+    rows = (len(names) + 1) // 2
+    sheet = Image.new("RGB", (thumb_w * 2, thumb_h * rows), (8, 8, 14))
     for idx, name in enumerate(names):
         with Image.open(assets_dir / name).convert("RGB") as image:
             thumb = image.resize((thumb_w, thumb_h), Image.Resampling.LANCZOS)

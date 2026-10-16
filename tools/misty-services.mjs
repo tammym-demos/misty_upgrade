@@ -42,6 +42,8 @@ Commands:
   status    Show service status
   mute      Immediately quiet Misty while leaving services running
   unmute    Re-enable wake-word conversations without restarting services
+  wifi <setup|verify> [opts]
+            Guided travel Wi-Fi setup and scoped REST/WebSocket verification
   conference <subcommand> [opts]
             Run Conference Mode (scripted stage dialog).
             Subcommands: dry-run, prepare, verify, run
@@ -65,7 +67,8 @@ Conference Mode (npx . conference <subcommand>):
   dry-run [--script <path>]       Preview the ordered cue plan (no hardware)
   prepare [--script <path>]       Generate/import/reuse cue audio + manifest
   verify                          Confirm every cue has playable audio
-  run [--auto|--no-auto]          Live interactive stage runner (requires Misty)
+  run [--auto|--no-auto] [--audio-output misty|laptop]
+                                  Live interactive stage runner (requires Misty)
 `);
 }
 
@@ -87,8 +90,8 @@ function parseArgs(argv) {
     options.command = "help";
   }
 
-  // Conference passes all remaining args through to conference_mode.py.
-  if (options.command === "conference") {
+  // Python-backed subcommands handle their own remaining arguments.
+  if (options.command === "conference" || options.command === "wifi") {
     return options;
   }
 
@@ -198,7 +201,8 @@ function writeState(state) {
 
 function removeStateIfEmpty(state) {
   const hasProcess = state.orchestration?.pid || state.controller?.pid || state.foundry?.managed;
-  if (!hasProcess && fs.existsSync(STATE_PATH)) {
+  const hasRobotIdentity = state.misty?.serialNumber && state.misty?.robotId;
+  if (!hasProcess && !hasRobotIdentity && fs.existsSync(STATE_PATH)) {
     fs.rmSync(STATE_PATH);
   } else {
     writeState(state);
@@ -1234,7 +1238,8 @@ Subcommands:
   dry-run [--script <path>]       Preview the ordered cue plan (no hardware)
   prepare [--script <path>]       Generate/import/reuse cue audio + manifest
   verify                          Confirm every cue has playable audio
-  run [--auto|--no-auto]          Live interactive stage runner (requires Misty)
+  run [--auto|--no-auto] [--audio-output misty|laptop]
+                                  Live interactive stage runner (requires Misty)
 
 Options are passed directly to conference_mode.py.
 `);
@@ -1295,6 +1300,144 @@ Options are passed directly to conference_mode.py.
   }
 }
 
+async function wifi(options) {
+  const rawArgs = process.argv.slice(3);
+  if (rawArgs.length === 0 || rawArgs[0] === "--help" || rawArgs[0] === "-h") {
+    console.log(`Usage: npx . wifi <setup|verify> [options]
+
+  setup                  Guided laptop-hotspot or direct shared-password setup
+  verify                 Verify an already connected robot without switching
+
+Options:
+  --mode hotspot|direct  Setup mode (default: hotspot)
+  --new-profile          Setup with the entered password instead of a saved profile
+  --ip <private-ip>       Currently reachable robot; no broad bootstrap scan
+  --interface <index>     Override discovered private interface; prompt if ambiguous
+  --subnet <CIDR>         Override derived private /24 or smaller; /24 shorthand accepted
+  --target-ip <ip>        Probe only this destination, without scanning
+  --serial <serial>       Expected robot serial; verify defaults to saved identity
+  --robot-id <id>         Expected robot ID; verify defaults to saved identity
+  --controller-port <n>   Controller safety-check port (default: 5001)
+  --python <command>      Python executable (default: python)
+
+Hotspot setup discovers its SSID/private adapter and derives the subnet.
+Review detected values, enter the hidden password, then confirm the switch.
+Ambiguous discovery falls back to manual selection; passwords are never CLI arguments.
+Windows networking stays manual. Initial setup requires an existing robot link.
+No Foundry/audio services are started. See docs\\travel-wifi.md.
+`);
+    return;
+  }
+  if (!["setup", "verify"].includes(rawArgs[0])) {
+    throw new Error("Wi-Fi subcommand must be setup or verify.");
+  }
+  const args = [];
+  for (let index = 0; index < rawArgs.length; index += 1) {
+    const arg = rawArgs[index];
+    if (arg === "--report" || arg.startsWith("--report=")) {
+      throw new Error("--report is reserved for internal Wi-Fi verification.");
+    }
+    if (arg === "--python") {
+      const python = rawArgs[++index];
+      if (!python) {
+        throw new Error("--python requires an executable.");
+      }
+      options.python = python;
+      options.pythonExplicit = true;
+    } else {
+      args.push(arg);
+    }
+  }
+  const hasOption = (...names) => args.some((arg) => names.some((name) => arg === name || arg.startsWith(`${name}=`)));
+  const readWifiState = () => {
+    if (!fs.existsSync(STATE_PATH)) {
+      return {};
+    }
+    const value = parseJsonObject(fs.readFileSync(STATE_PATH, "utf8"));
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error("Service state is invalid; repair it before Wi-Fi setup. Existing state was not overwritten.");
+    }
+    return value;
+  };
+  const state = readWifiState();
+  const env = serviceEnv(options, state);
+  if (args[0] === "setup" && !hasOption("--help", "-h") && isPidRunning(state.controller?.pid)) {
+    throw new Error("Robot controller is active. Stop the stage runner and run npx . stop before Wi-Fi setup.");
+  }
+  if (!hasOption("--ip", "--misty-ip") && env.MISTY_IP) {
+    args.push("--ip", env.MISTY_IP);
+  }
+  if (!hasOption("--serial") && state.misty?.serialNumber) {
+    args.push("--serial", state.misty.serialNumber);
+  }
+  if (!hasOption("--robot-id") && state.misty?.robotId) {
+    args.push("--robot-id", state.misty.robotId);
+  }
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "misty-wifi-"));
+  const reportPath = path.join(directory, "verified.json");
+  try {
+    const result = runInherited(options.python, [
+      path.join(ORCH_DIR, "misty_wifi.py"), ...args, "--report", reportPath,
+    ], { env, timeout: 1800000 });
+    if (result.error) {
+      throw new Error("Unable to run the Wi-Fi helper. Check --python and the existing project requirements.");
+    }
+    if (result.status !== 0) {
+      process.exitCode = result.status ?? 1;
+      return;
+    }
+    // argparse help is successful but deliberately produces no verification report.
+    if (hasOption("--help", "-h")) {
+      return;
+    }
+    if (!fs.existsSync(reportPath)) {
+      throw new Error("Wi-Fi helper produced no verified result; saved addresses were not changed.");
+    }
+    const report = parseJsonObject(fs.readFileSync(reportPath, "utf8"));
+    if (report?.status !== "verified" || !isMistyDevice({ status: "Success", result: report })
+        || !["serialNumber", "robotId", "robotVersion"].every((key) => report[key].length > 0)
+        || !/^(10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(report.ipAddress || "")
+        || !/^\d{1,3}(\.\d{1,3}){3}$/.test(report.ipAddress)
+        || report.ipAddress.split(".").some((octet) => Number(octet) > 255)) {
+      throw new Error("Wi-Fi verification metadata is invalid; saved addresses were not changed.");
+    }
+    const expectedOption = (name) => {
+      const inline = args.find((arg) => arg.startsWith(`${name}=`));
+      return inline ? inline.slice(name.length + 1) : args[args.indexOf(name) + 1];
+    };
+    if ((hasOption("--serial") && report.serialNumber !== expectedOption("--serial"))
+        || (hasOption("--robot-id") && report.robotId !== expectedOption("--robot-id"))) {
+      throw new Error("Wi-Fi helper returned a different robot; saved addresses were not changed.");
+    }
+    const identity = {
+      ipAddress: report.ipAddress,
+      serialNumber: report.serialNumber,
+      robotId: report.robotId,
+      robotVersion: report.robotVersion,
+      macAddress: report.macAddress ?? null,
+      networkProfileName: report.networkProfileName ?? null,
+      discoveredAt: report.discoveredAt,
+    };
+    // Re-read state to preserve changes made by another CLI while the wizard was open.
+    const current = readWifiState();
+    current.misty = identity;
+    try {
+      writeState(current);
+      fs.writeFileSync(path.join(ORCH_DIR, "misty_ip.json"), `${JSON.stringify({
+        ip: identity.ipAddress, timestamp: Date.now() / 1000, discovered_at: identity.discoveredAt,
+      }, null, 2)}\n`);
+    } catch {
+      throw new Error("Robot connection verified, but saving addresses failed; caches may be partially updated. Use the printed explicit IP.");
+    }
+    console.log(`Saved verified robot address. Start with: npx . start --misty-ip ${identity.ipAddress}`);
+  } finally {
+    if (fs.existsSync(reportPath)) {
+      fs.rmSync(reportPath);
+    }
+    fs.rmdirSync(directory);
+  }
+}
+
 async function main() {
   const options = parseArgs(process.argv);
   switch (options.command) {
@@ -1319,6 +1462,9 @@ async function main() {
       break;
     case "conference":
       await conference(options);
+      break;
+    case "wifi":
+      await wifi(options);
       break;
     case "help":
       usage();
