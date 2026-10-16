@@ -954,6 +954,40 @@ def test_active_face_is_reasserted_during_long_playback(tmp_path):
     assert set(face_calls) == {"face_talking_happy.gif"}
 
 
+@pytest.mark.parametrize("action", ["pause", "stop"])
+def test_cancellation_during_slow_face_refresh_does_not_advance(tmp_path, monkeypatch, action):
+    _, _, manifest = build_ready_controller(tmp_path)
+    clock = [0.0]
+    face_calls = []
+    monkeypatch.setattr(cm.time, "monotonic", lambda: clock[0])
+
+    def refresh_face(filename):
+        face_calls.append(filename)
+        if len(face_calls) == 3:
+            getattr(controller, action)()
+            clock[0] += 2.0
+
+    controller = ConferenceController(
+        manifest, lambda asset: 1.0, enabled=True,
+        face_fn=refresh_face, sleep_fn=cm.time.sleep,
+        face_refresh_interval_s=0.1,
+    )
+
+    def wait(seconds):
+        clock[0] += seconds
+        return controller._interrupt.is_set()
+
+    monkeypatch.setattr(controller._interrupt, "wait", wait)
+    controller.start()
+    assert controller.play_next() is None
+    assert len(face_calls) == 3
+    assert controller.play_count == 0
+    assert controller.peek_next() == manifest.cues[0]
+    if action == "pause":
+        controller.resume()
+        assert controller.play_next() == manifest.cues[0]
+
+
 def test_glance_fn_called_during_auto_advance(tmp_path):
     """Glance function is called while waiting for presenter to finish."""
     glance_calls = []
@@ -1022,6 +1056,22 @@ def test_chained_parameterized_annotations():
         {"arms": [-20, -20], "head": [0.0, 10.0, 0.0]},
         {"arms": [20.0, 20.0], "face": "face_talking_excited.gif"},
     ]
+
+
+@pytest.mark.parametrize("annotation,head,arms", [
+    ("head:0,+10,0", [0.0, 10.0, 0.0], None),
+    ("head:0,1e+1,0", [0.0, 10.0, 0.0], None),
+    ("nod+arms:+45,+45", None, [45.0, 45.0]),
+    ("head:0,+10,0+arms:+4e+1,+45", [0.0, 10.0, 0.0], [40.0, 45.0]),
+])
+def test_annotation_chaining_preserves_numeric_signs_and_exponents(annotation, head, arms):
+    text, movements = cm.parse_annotations(f"Hello [{annotation}]")
+    assert text == "Hello"
+    assert len(movements) == 1
+    if head is not None:
+        assert movements[0]["head"] == head
+    if arms is not None:
+        assert movements[0]["arms"] == arms
 
 
 def test_talking_gesture_resolves_sentinel_at_runtime(tmp_path):

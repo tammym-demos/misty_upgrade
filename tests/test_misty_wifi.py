@@ -14,6 +14,7 @@ import misty_wifi as wifi
 import misty_discovery as discovery
 
 DISCOVER_HOTSPOT = wifi._discover_hotspot
+SOURCE_IDENTITY = wifi._source_identity
 
 
 IDENTITY = {
@@ -29,6 +30,7 @@ def args(tmp_path):
         command="setup", mode="hotspot", misty_ip="10.0.0.2",
         interface="12", subnet="192.168.137.0/24", target_ip="192.168.137.2",
         serial=None, robot_id=None, report=str(tmp_path / "report.json"), controller_port=5001,
+        new_profile=False,
     )
 
 
@@ -140,6 +142,19 @@ def test_failed_verification_is_bounded_and_does_not_write(monkeypatch, args):
     with pytest.raises(wifi.WifiSetupError, match="No rollback is guaranteed"):
         wifi.cmd_guided(args)
     assert scan.call_count == 6
+    assert not Path(args.report).exists()
+
+
+def test_handoff_failure_displays_full_identity_for_recovery(monkeypatch, args, capsys):
+    stub_guided(monkeypatch, iter(["Travel", "yes"]))
+    monkeypatch.setattr(wifi, "_source_identity", SOURCE_IDENTITY)
+    monkeypatch.setattr(discovery, "probe_misty_identity", lambda ip: {**IDENTITY, "ipAddress": ip})
+    monkeypatch.setattr(discovery, "discover_misty_scoped", lambda *args: None)
+    with pytest.raises(wifi.WifiSetupError, match="No rollback is guaranteed"):
+        wifi.cmd_guided(args)
+    output = capsys.readouterr().out
+    assert f"serial={IDENTITY['serialNumber']}" in output
+    assert f"robot ID={IDENTITY['robotId']}" in output
     assert not Path(args.report).exists()
 
 
@@ -412,6 +427,18 @@ def test_unique_saved_profile_is_reused_without_id_prompt(monkeypatch):
     wifi._switch_network("10.0.0.2", "Travel", "secret", auto_profile=True)
     assert len(prompts) == 1
     assert api.call_args.args[-1] == {"NetworkId": 7}
+
+
+def test_hotspot_new_profile_uses_entered_password(monkeypatch, args):
+    api = stub_guided(monkeypatch, iter(["Travel", "yes"]))
+    args.new_profile = True
+    api.side_effect = [[{"ssid": "Travel"}], [{"ssid": "Travel", "networkId": 7}], True]
+    wifi.cmd_guided(args)
+    assert api.call_args.args == (
+        "POST", "/api/networks/create", "10.0.0.2",
+        {"networkname": "Travel", "password": "never-print-this"},
+    )
+    assert Path(args.report).exists()
 
 
 @pytest.mark.parametrize("indexes,expected", [([16], "16"), ([], None), ([16, 22], None)])

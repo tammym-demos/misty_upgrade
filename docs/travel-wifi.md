@@ -44,7 +44,7 @@ Misty as a separate direct guest-network client.
    npx . wifi setup --mode hotspot --ip <current-Misty-IP>
    ```
 
-5. Review the displayed robot serial/firmware and discovered **laptop hotspot
+5. Review the displayed robot serial/ID/firmware and discovered **laptop hotspot
    SSID**, not the upstream home/venue Wi-Fi name. The wizard checks visibility
    from Misty. If discovery is unavailable, enter the hotspot SSID from Windows
    Mobile hotspot Settings.
@@ -58,8 +58,10 @@ Misty as a separate direct guest-network client.
 7. Confirm the review summary, sharing/probing permission, and switch in one
    prompt. It may immediately drop the old connection. A single matching saved
    profile is reused without asking for an ID; the entered password does not
-   replace that profile's credentials. Multiple matches require a specific ID,
-   or `new` to submit the entered password. Existing profiles are not deleted.
+   replace that profile's credentials. If the password changed, rerun setup with
+   `--new-profile` to submit the entered password instead of reusing a saved
+   profile. Multiple matches require a specific ID, or `new` to submit the
+   entered password. Existing profiles are not deleted.
 8. Wait for verified robot identity, target SSID, REST, and battery WebSocket
    telemetry. An accepted API request or a ping alone is not success.
 9. Start with the explicit verified address printed by the tool:

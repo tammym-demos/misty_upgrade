@@ -201,7 +201,8 @@ function writeState(state) {
 
 function removeStateIfEmpty(state) {
   const hasProcess = state.orchestration?.pid || state.controller?.pid || state.foundry?.managed;
-  if (!hasProcess && fs.existsSync(STATE_PATH)) {
+  const hasRobotIdentity = state.misty?.serialNumber && state.misty?.robotId;
+  if (!hasProcess && !hasRobotIdentity && fs.existsSync(STATE_PATH)) {
     fs.rmSync(STATE_PATH);
   } else {
     writeState(state);
@@ -1309,6 +1310,7 @@ async function wifi(options) {
 
 Options:
   --mode hotspot|direct  Setup mode (default: hotspot)
+  --new-profile          Setup with the entered password instead of a saved profile
   --ip <private-ip>       Currently reachable robot; no broad bootstrap scan
   --interface <index>     Override discovered private interface; prompt if ambiguous
   --subnet <CIDR>         Override derived private /24 or smaller; /24 shorthand accepted

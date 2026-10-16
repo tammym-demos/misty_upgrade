@@ -468,7 +468,10 @@ def parse_annotations(text: str) -> tuple[str, list[dict]]:
         full_tag = match.group("tag").strip().lower()
         value = (match.group("value") or "").strip()
         annotation = full_tag + (f":{value}" if value else "")
-        parts = [part.strip() for part in annotation.split("+") if part.strip()]
+        parts = [
+            part.strip() for part in re.split(r"\+(?=\s*[A-Za-z])", annotation)
+            if part.strip()
+        ]
 
         if len(parts) > 1:
             merged: dict = {}
@@ -1141,10 +1144,10 @@ class ConferenceController:
         if self._face_fn:
             self._face_fn(cue_talking_face)
 
+        interrupted = False
         if duration > 0:
             if self._sleep_fn is time.sleep:
                 deadline = time.monotonic() + max(0.0, duration)
-                interrupted = False
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -1159,12 +1162,12 @@ class ConferenceController:
             else:
                 self._sleep_fn(max(0.0, duration))
                 interrupted = self._interrupt.is_set()
-            if interrupted:
-                if self._cancel_playback_fn is not None:
-                    self._cancel_playback_fn()
-                if self._neutral_fn is not None:
-                    self._neutral_fn()
-                return None
+        if interrupted or self._interrupt.is_set():
+            if self._cancel_playback_fn is not None:
+                self._cancel_playback_fn()
+            if self._neutral_fn is not None:
+                self._neutral_fn()
+            return None
         self.play_count += 1
         self._last = index
         self._cursor = index + 1

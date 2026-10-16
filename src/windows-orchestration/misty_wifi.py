@@ -576,14 +576,15 @@ def _source_identity(args, confirm=True):
         raise WifiSetupError("The current address belongs to a different robot.")
     if args.robot_id and identity["robotId"] != args.robot_id:
         raise WifiSetupError("The current address belongs to a different robot.")
-    print(f"Current robot: serial={identity['serialNumber']}, firmware={identity['robotVersion']}, IP={ip}")
+    print(f"Current robot: serial={identity['serialNumber']}, robot ID={identity['robotId']}, "
+          f"firmware={identity['robotVersion']}, IP={ip}")
     if confirm:
         _confirm("Is this your Misty?")
     return identity
 
 
 def _switch_network(ip, ssid, password, controller_port=5001,
-                    auto_profile=False, confirmation_message=None):
+                    auto_profile=False, confirmation_message=None, new_profile=False):
     profiles = _checked_api("GET", "/api/networks", ip)
     if not isinstance(profiles, list):
         raise WifiSetupError("Misty returned an invalid saved-network list.")
@@ -592,10 +593,11 @@ def _switch_network(ip, ssid, password, controller_port=5001,
     matches = [profile for profile in profiles if _network_name(profile, saved=True) == ssid]
     body = {"networkname": ssid, "password": password}
     endpoint = "/api/networks/create"
-    if matches:
+    if matches and not new_profile:
         if auto_profile and len(matches) == 1 and _network_id(matches[0]) is not None:
             choice = str(_network_id(matches[0]))
-            print(f"Using saved target profile ID: {choice}; the entered password will not replace its saved credentials.")
+            print(f"Using saved target profile ID: {choice}; the entered password will not replace its saved credentials. "
+                  "Rerun setup with --new-profile to use a changed password.")
         else:
             for profile in matches:
                 print(f"Saved target profile ID: {_network_id(profile)}")
@@ -674,9 +676,10 @@ def cmd_guided(args):
             _switch_network(
                 expected["ipAddress"], ssid, password, args.controller_port,
                 auto_profile=mode == "hotspot", confirmation_message=message,
+                new_profile=args.new_profile,
             )
         finally:
-            password = None
+            del password
         if mode == "direct":
             input("Join the destination network in Windows Settings. Press Enter when ready to verify: ")
             subnet, interface = _choose_scope(args)
@@ -734,6 +737,9 @@ def main():
         guided.add_argument("--robot-id", help="Expected robot ID")
         guided.add_argument("--controller-port", type=int, default=5001)
         guided.add_argument("--report", help=argparse.SUPPRESS)
+        if command == "setup":
+            guided.add_argument("--new-profile", action="store_true",
+                                help="Use the entered password instead of a saved target profile")
 
     args = parser.parse_args()
 

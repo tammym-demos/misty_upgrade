@@ -5,6 +5,8 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -83,6 +85,50 @@ def test_verify_defaults_to_saved_identity(repo):
     forwarded = json.loads((repo / "forwarded.json").read_text())
     assert forwarded[forwarded.index("--serial") + 1] == "test-serial"
     assert forwarded[forwarded.index("--robot-id") + 1] == "test-robot"
+
+
+def test_setup_stop_verify_preserves_robot_identity(repo):
+    result = run_cli(repo, "wifi", "setup", "--new-profile", "--python", sys.executable)
+    assert result.returncode == 0, result.stderr
+    forwarded = json.loads((repo / "forwarded.json").read_text())
+    assert "--new-profile" in forwarded
+    cleanup_calls = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            cleanup_calls.append(self.path)
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b'{"status":"Success"}')
+
+        def log_message(self, *args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            result = run_cli(
+                repo, "stop", "--skip-foundry",
+                "--misty-ip", f"127.0.0.1:{server.server_port}",
+            )
+        finally:
+            server.shutdown()
+            worker.join(timeout=5)
+    assert result.returncode == 0, result.stderr
+    assert cleanup_calls == [
+        "/api/audio/keyphrase/stop", "/api/audio/record/stop",
+        "/api/skills/cancel", "/api/halt", "/api/images/display", "/api/led",
+    ]
+    saved = json.loads((repo / ".misty-services.json").read_text())
+    assert saved["misty"]["serialNumber"] == REPORT["serialNumber"]
+    assert saved["misty"]["robotId"] == REPORT["robotId"]
+    result = run_cli(repo, "wifi", "verify", "--python", sys.executable)
+    assert result.returncode == 0, result.stderr
+    forwarded = json.loads((repo / "forwarded.json").read_text())
+    assert forwarded[forwarded.index("--serial") + 1] == REPORT["serialNumber"]
+    assert forwarded[forwarded.index("--robot-id") + 1] == REPORT["robotId"]
 
 
 @pytest.mark.parametrize("env", [{"HELPER_FAIL": "1"}, {"NO_REPORT": "1"}, {"FAKE_REPORT": "{}"},
