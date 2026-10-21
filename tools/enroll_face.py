@@ -136,7 +136,10 @@ def run_enroll(args) -> int:
         return 0 if valid >= recognizer.min_samples else 1
 
     try:
-        profile = recognizer.enroll(args.name, frames)
+        profile = recognizer.enroll(
+            args.name, frames, save_reference_photo=args.save_reference_photo,
+            replace=not args.save_reference_photo,
+        )
     except frs.FaceRecognitionError as exc:
         print(f"  ERROR: enrollment failed: {exc}")
         return 1
@@ -147,6 +150,8 @@ def run_enroll(args) -> int:
         f"({profile.sample_count} samples, dim={profile.embedding_dim})."
     )
     print(f"  Saved profile: {path}")
+    if profile.reference_jpeg is not None:
+        print("  An actual reference JPEG is included in the local profile archive.")
     print("  Reminder: this file contains biometric embeddings — keep it out of git.")
     return 0
 
@@ -166,6 +171,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--name", help="Profile name to enroll (e.g. Tammy).")
     parser.add_argument("--list", action="store_true", help="List enrolled profiles and exit.")
     parser.add_argument("--delete", metavar="NAME", help="Delete an enrolled profile and exit.")
+    parser.add_argument(
+        "--save-reference-photo", action="store_true",
+        help="With the person's permission, save a reference JPEG as well as features; never overwrite.",
+    )
     parser.add_argument(
         "--source",
         choices=("misty", "webcam", "image"),

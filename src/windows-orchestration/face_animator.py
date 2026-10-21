@@ -37,6 +37,7 @@ class AnimationState(Enum):
     RECORDING = "RECORDING"
     PROCESSING = "PROCESSING"
     PLAYING = "PLAYING"
+    REACTING = "REACTING"
     LISTENING = "LISTENING"
     MOVING = "MOVING"
     REARMING = "REARMING"
@@ -92,6 +93,10 @@ DEFAULT_ANIMATION_MAP: dict[str, AnimationSpec] = {
         # Talking — default neutral, controller can override with emotion variant
         frames=("face_talking_neutral.gif",),
         static_fallback="face_talking_neutral.gif",
+    ),
+    "REACTING": AnimationSpec(
+        frames=("e_Love.jpg",),
+        static_fallback="e_Love.jpg",
     ),
     "LISTENING": AnimationSpec(
         # Follow-up listening — same attentive face
@@ -169,6 +174,7 @@ BUILTIN_FALLBACK_MAP: dict[str, str] = {
     "RECORDING": "e_Surprise.jpg",
     "PROCESSING": "e_Contempt.jpg",
     "PLAYING": "e_Joy.jpg",
+    "REACTING": "e_Love.jpg",
     "LISTENING": "e_Surprise.jpg",
     "MOVING": "e_Joy2.jpg",
     "REARMING": "e_DefaultContent.jpg",
@@ -244,6 +250,8 @@ class FaceAnimator:
         max_fps: Upper bound on animation FPS (from hardware validation).
         min_interval_s: Minimum seconds between REST frame pushes (rate limit).
         animation_map: State-to-AnimationSpec mapping. Defaults to single-frame.
+        use_custom_faces: Allow generated artwork. The controller defaults to
+            stock firmware faces; True preserves the standalone animator API.
     """
 
     STOP_TIMEOUT_S = 3.0  # max seconds to wait for thread join on stop()
@@ -255,12 +263,14 @@ class FaceAnimator:
         max_fps: float = 4.0,
         min_interval_s: float = 0.25,
         animation_map: Optional[dict[str, AnimationSpec]] = None,
+        use_custom_faces: bool = True,
     ):
         self._base_url = misty_base_url.rstrip("/")
         self._enabled = enabled
         self._max_fps = max_fps
         self._min_interval_s = min_interval_s
         self._animation_map = animation_map or DEFAULT_ANIMATION_MAP
+        self._use_custom_faces = use_custom_faces
 
         self._lock = threading.Lock()
         self._state_changed = threading.Event()
@@ -331,7 +341,7 @@ class FaceAnimator:
         """
         with self._lock:
             custom_available = self._custom_faces_available
-        if custom_available:
+        if self._use_custom_faces and custom_available:
             return filename
         return builtin_fallback_for_asset(filename)
 
@@ -424,7 +434,7 @@ class FaceAnimator:
             emotion = self._emotion
             custom_available = self._custom_faces_available
 
-        if not custom_available:
+        if not self._use_custom_faces or not custom_available:
             if state_key in EMOTION_TALKING_STATES:
                 return BUILTIN_EMOTION_FALLBACK.get(
                     emotion, BUILTIN_EMOTION_FALLBACK[DEFAULT_EMOTION]
@@ -534,7 +544,7 @@ class FaceAnimator:
                     self._state_changed.clear()
                     continue
 
-            frame = spec.frames[frame_idx]
+            frame = self.resolve_asset(spec.frames[frame_idx])
             self._push_frame(frame)
             frame_idx += 1
 

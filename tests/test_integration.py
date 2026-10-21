@@ -1366,6 +1366,13 @@ class TestTTSCache(unittest.TestCase):
                 calls_by_text[phrase].kwargs.get("pinned", False),
                 f"Controller phrase '{phrase}' was not pinned",
             )
+        for phrase in [
+            svc.GREETER_STORY_TEXT,
+            svc.GREETER_DECLINE_TEXT,
+            *svc._complete_sentences(svc.GREETER_STORY_TEXT, final=True)[0],
+        ]:
+            self.assertIn(phrase, calls_by_text)
+            self.assertTrue(calls_by_text[phrase].kwargs["pinned"])
     def test_controller_phrases_are_pinned_on_cache_put(self):
         """_CONTROLLER_PHRASES entries stored with pinned=True survive eviction (#67)."""
         import tempfile
@@ -3124,6 +3131,102 @@ class TestFaceRecognition(unittest.TestCase):
         self.assertIsNone(ctrl._recognized_face)
 
 
+@pytest.mark.parametrize("statuses, expected", [
+    ([200], 200), ([404, 200], 200), ([404, 503], 503), ([500], 503),
+])
+def test_foundry_health_supports_legacy_and_current_models_endpoints(monkeypatch, statuses, expected):
+    import orchestration_service as svc
+
+    get = unittest.mock.Mock(
+        side_effect=[SimpleNamespace(status_code=status) for status in statuses],
+    )
+    monkeypatch.setattr(svc.requests, "get", get)
+    response = svc.app.test_client().get("/api/health")
+    assert response.status_code == expected
+    assert get.call_args_list[0].args[0].endswith("/openai/models")
+    if len(statuses) > 1:
+        assert get.call_args_list[1].args[0].endswith("/v1/models")
+    assert get.call_count == len(statuses)
+
+
+@pytest.mark.parametrize(
+    ("query", "expected"),
+    [
+        ("What is GitHub Copilot?", "AI coding assistant"),
+        ("Can GitHub Copilot review code?", "code review"),
+        ("What is Copilot CLI?", "terminal"),
+        ("What are Copilot agents?", "pull requests"),
+        ("How much does Copilot cost?", "current prices"),
+        ("Is Copilot always correct?", "can make mistakes"),
+    ],
+)
+def test_copilot_reference_is_prioritized_and_bounded(monkeypatch, query, expected):
+    import config_defaults
+    import orchestration_service as svc
+
+    monkeypatch.setattr(svc, "GROUNDING_SOURCES", config_defaults.GROUNDING_SOURCES)
+    excerpts = svc.retrieve_local_context(query)
+
+    assert len(excerpts) == 4
+    assert all(line.startswith("[github-copilot-reference.md:") for line in excerpts)
+    assert expected in " ".join(excerpts)
+    reference = os.path.join(
+        _ORCHESTRATION_PATH, "..", "..", "docs", "github-copilot-reference.md"
+    )
+    with open(reference, encoding="utf-8") as source:
+        core_facts = [line.strip() for line in source if line.startswith("GitHub Copilot ")]
+    assert len(core_facts) == 4
+    assert all(len(line) <= 240 for line in core_facts)
+    assert all(line in " ".join(excerpts) for line in core_facts)
+
+
+def test_copilot_reference_reaches_existing_chat_prompt(monkeypatch):
+    import config_defaults
+    import orchestration_service as svc
+
+    monkeypatch.setattr(svc, "GROUNDING_SOURCES", config_defaults.GROUNDING_SOURCES)
+    messages, _ = svc._prepare_chat_messages(
+        svc.ConversationState(),
+        "What is GitHub Copilot?",
+        None,
+        svc.RESPONSE_MODE_CONFIG["short"],
+    )
+
+    prompt = messages[0]["content"]
+    assert "Approved local context:" in prompt
+    assert "[github-copilot-reference.md:" in prompt
+    assert "AI coding assistant" in prompt
+    assert "GitHub Copilot also helped update Misty's functionality." in prompt
+    assert "When answering any question about GitHub Copilot" in prompt
+    assert "Review and test generated code." in prompt
+    assert sum(len(message["content"]) for message in messages) <= svc.MAX_CONTEXT_CHARS
+    assert svc._estimate_tokens(messages) <= svc.MAX_CONTEXT_TOKENS
+
+
+def test_copilot_reference_preserves_source_override(monkeypatch):
+    import orchestration_service as svc
+
+    monkeypatch.setattr(svc, "GROUNDING_SOURCES", "")
+    assert svc.retrieve_local_context("What is GitHub Copilot?") == []
+
+
+def test_copilot_reference_example_configuration_matches_default():
+    import config_defaults
+
+    with open(
+        os.path.join(_ORCHESTRATION_PATH, ".env.example"), encoding="utf-8"
+    ) as source:
+        configured = next(
+            line.strip().split("=", 1)[1]
+            for line in source
+            if line.startswith("GROUNDING_SOURCES=")
+        )
+    assert configured == config_defaults.GROUNDING_SOURCES
+    assert configured.split(",")[0] == "../../docs/github-copilot-reference.md"
+    assert "../../README.md" in configured.split(",")
+    assert "../../docs/conference-mode.md" in configured.split(",")
+
+
 class TestCanonicalDefaults(unittest.TestCase):
     """Verify that config_defaults.py is the authoritative source of truth (#70).
 
@@ -3134,6 +3237,40 @@ class TestCanonicalDefaults(unittest.TestCase):
     _svc = None
     _ctrl_mod = None
     _cfg = None
+
+    def test_system_prompt_prioritizes_farm_life_with_secondary_copilot_interest(self):
+        import config_defaults
+
+        prompt = config_defaults.SYSTEM_PROMPT
+        self.assertIn("farm with Burke and Tammy", prompt)
+        self.assertIn("two dogs, Percy and Granny", prompt)
+        self.assertLess(prompt.index("farm"), prompt.index("GitHub Copilot"))
+        self.assertIn("Prioritize farm life", prompt)
+        self.assertIn("ask whether they have tried GitHub Copilot", prompt)
+        self.assertIn("ask how they like it", prompt)
+        self.assertIn("do not repeat the question", prompt)
+        self.assertIn("Keep Copilot as a secondary interest", prompt)
+        self.assertIn("GitHub Copilot helped update your functionality.", prompt)
+        self.assertIn("When answering any question about GitHub Copilot", prompt)
+        self.assertIn("Then answer the person's question.", prompt)
+        self.assertIn("not a claim that Copilot powers your live conversations", prompt)
+
+    def test_system_prompt_uses_canonical_default(self):
+        if self._svc is None:
+            self.skipTest("orchestration_service could not be imported")
+        self.assertEqual(
+            self._svc.SYSTEM_PROMPT,
+            os.getenv("SYSTEM_PROMPT", self._cfg.SYSTEM_PROMPT),
+        )
+
+    def test_greeter_defaults_use_opt_in_story(self):
+        self.assertIn("eight-year-old hardware?", self._cfg.FACE_GREETING_TEXT)
+        self.assertIn("GitHub Copilot", self._cfg.FACE_NAMED_GREETING_TEXT)
+        self.assertIn("{name}", self._cfg.FACE_NAMED_GREETING_TEXT)
+        self.assertIn("nearby laptop runs my services", self._cfg.GREETER_STORY_TEXT)
+        self.assertIn("local AI model", self._cfg.GREETER_STORY_TEXT)
+        self.assertTrue(self._cfg.GREETER_STORY_TEXT.endswith("I was given a new brain."))
+        self.assertNotIn("?", self._cfg.GREETER_STORY_TEXT)
 
     @classmethod
     def setUpClass(cls):
@@ -3355,6 +3492,9 @@ class TestCustomFaceAssetUpload(unittest.TestCase):
     def setUp(self):
         if self._ctrl_mod is None:
             self.skipTest("misty_controller could not be imported")
+        custom_faces = unittest.mock.patch.object(self._ctrl_mod, "USE_CUSTOM_FACES", True)
+        custom_faces.start()
+        self.addCleanup(custom_faces.stop)
         self.ctrl = self._ctrl_mod.MistyController.__new__(self._ctrl_mod.MistyController)
         self.ctrl._face_animator = unittest.mock.MagicMock()
 

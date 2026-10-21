@@ -259,16 +259,15 @@ def test_recognize_consistent_requires_min_frames(tmp_path):
     assert result is not None and result.name == "Tammy"
 
 
-def test_recognize_consistent_prefers_strongest_evidence(tmp_path):
+def test_recognize_consistent_rejects_conflicting_identities(tmp_path):
     rec = make_recognizer(tmp_path, min_samples=3, min_consistent_frames=2)
     rec.enroll("Tammy", [make_frame(TAMMY)] * 3)
     rec.enroll("Alex", [make_frame(ALEX)] * 3)
-    # Both clear min_consistent_frames=2; Tammy has more agreeing frames and
-    # must win regardless of frame order.
+    # Two known identities in one sampling window are ambiguous, not a speaker vote.
     frames = [make_frame(ALEX), make_frame(TAMMY), make_frame(ALEX),
               make_frame(TAMMY), make_frame(TAMMY)]
     result = rec.recognize_consistent(frames)
-    assert result is not None and result.name == "Tammy"
+    assert result is None
 
 
 # ---------------------------------------------------------------------------

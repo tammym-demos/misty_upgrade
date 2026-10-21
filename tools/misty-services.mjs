@@ -742,18 +742,12 @@ function configuredChatModel(env = {}) {
 
 function chatModelIsLoaded(model) {
   const result = run("foundry", ["service", "ps"], { timeout: 30000 });
-  return result.ok && (
-    result.stdout.includes(model.modelId)
-    || result.stdout.includes(model.alias)
-  );
+  return result.ok && result.stdout.split(/\s+/).includes(model.modelId);
 }
 
 function chatModelIsCached(model) {
   const result = run("foundry", ["cache", "list"], { timeout: 30000 });
-  return result.ok && (
-    result.stdout.includes(model.modelId)
-    || result.stdout.includes(model.alias)
-  );
+  return result.ok && result.stdout.split(/\s+/).includes(model.modelId);
 }
 
 function ensureChatModelCached(model) {
@@ -975,37 +969,48 @@ async function scanForMisty() {
 }
 
 async function pingMisty(env, state, options) {
-  const mistyIp = env.MISTY_IP || state.misty?.ipAddress || DEFAULTS.mistyIp;
-  const deviceUrl = `http://${mistyIp}/api/device`;
+  const cachedIp = state.misty?.ipAddress;
+  const candidates = [...new Set(
+    [env.MISTY_IP, cachedIp, DEFAULTS.mistyIp].filter(Boolean),
+  )];
+  let lastError = new Error("No configured or cached robot address is available");
 
-  try {
-    const discovered = await probeMisty(mistyIp, 5000);
+  for (const ipAddress of candidates) {
+    try {
+      const discovered = await probeMisty(ipAddress, 5000);
+      if (!discovered) {
+        lastError = new Error(`No Misty device responded at ${ipAddress}`);
+        continue;
+      }
+      const source = ipAddress === env.MISTY_IP
+        ? "configured"
+        : ipAddress === cachedIp
+          ? "cached"
+          : "default";
+      env.MISTY_IP = discovered.ipAddress;
+      state.misty = discovered;
+      console.log(`Misty robot: reachable at ${source} address ${discovered.ipAddress}`);
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  if (options.scan) {
+    const discovered = await scanForMisty();
     if (discovered) {
       env.MISTY_IP = discovered.ipAddress;
       state.misty = discovered;
-      console.log("Misty robot: reachable");
+      console.log(`Misty robot: discovered at ${discovered.ipAddress} (${discovered.broadcastName})`);
       return;
     }
-
-    const response = await httpRequest(deviceUrl, { timeoutMs: 5000 });
-    throw new Error(`HTTP ${response.statusCode}`);
-  } catch (error) {
-    if (options.scan) {
-      const discovered = await scanForMisty();
-      if (discovered) {
-        env.MISTY_IP = discovered.ipAddress;
-        state.misty = discovered;
-        console.log(`Misty robot: discovered at ${discovered.ipAddress} (${discovered.broadcastName})`);
-        return;
-      }
-    }
-
-    throw new Error(
-      "Misty robot is not reachable; not starting the controller.\n" +
-      `Check power, Wi-Fi, pass the correct address with --misty-ip <ip>, or allow network scanning.\n` +
-      `Details: ${redactSensitive(error.message)}`,
-    );
   }
+
+  throw new Error(
+    "Misty robot is not reachable; not starting the controller.\n" +
+    `Check power, Wi-Fi, pass the correct address with --misty-ip <ip>, or allow network scanning.\n` +
+    `Details: ${redactSensitive(lastError.message)}`,
+  );
 }
 
 function spawnService(name, command, args, cwd, env) {
@@ -1164,12 +1169,15 @@ async function cleanupMisty(env) {
   }
 
   const baseUrl = `http://${mistyIp}`;
+  const restFace = /^(1|true|yes)$/i.test(env.USE_CUSTOM_FACES || "")
+    ? "face_idle.gif"
+    : "e_DefaultContent.jpg";
   const calls = [
     ["POST", "/api/audio/keyphrase/stop", undefined],
     ["POST", "/api/audio/record/stop", undefined],
     ["POST", "/api/skills/cancel", undefined],
     ["POST", "/api/halt", undefined],
-    ["POST", "/api/images/display", JSON.stringify({ FileName: "face_idle.gif", Alpha: 1 })],
+    ["POST", "/api/images/display", JSON.stringify({ FileName: restFace, Alpha: 1 })],
     ["POST", "/api/led", JSON.stringify({ red: 0, green: 0, blue: 0 })],
   ];
 

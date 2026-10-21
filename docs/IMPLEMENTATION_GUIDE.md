@@ -131,7 +131,10 @@ In both modes, a full Core+Sensory reboot is triggered proactively after `PROACT
 | `FOUNDRY_API_TIMEOUT` | `10.0` | Per-request timeout (seconds) for Foundry API calls |
 | `SERVICE_TIMEOUT` | `15.0` | Overall orchestration pipeline timeout (seconds) |
 | `KOKORO_VOICE` | `af_sky` | Kokoro TTS voice ID |
-| `SYSTEM_PROMPT` | *(built-in Misty persona)* | Full system prompt for the LLM. Override to change persona without code changes. The default includes summarization and brevity instructions. |
+| `SYSTEM_PROMPT` | *(built-in Misty persona)* | Full system prompt for the LLM, defined in `config_defaults.py`. Farm life with Burke, Tammy, Percy and Granny comes first; GitHub Copilot is a secondary enthusiasm with friendly tried-it/how-do-you-like-it questions. Answers about Copilot briefly credit its help updating her functionality. Override to change persona without code changes. The default includes brevity instructions. |
+| `GROUNDING_SOURCES` | `../../docs/github-copilot-reference.md,../../README.md,../../docs/conference-mode.md` | Ordered approved local text sources. The dated product reference comes first; up to four matching lines (240 characters each) enter the prompt. Explicit environment configuration replaces this default list. |
+| `FACE_GREETING_TEXT` / `FACE_NAMED_GREETING_TEXT` | *(hardware-revival invitation)* | Greeter Mode's yes/no offer, with `{name}` in the named template. |
+| `GREETER_STORY_TEXT` / `GREETER_DECLINE_TEXT` | *(fixed story / polite decline)* | Cached replies to the first visitor answer. Affirmative replies bypass the LLM and finish with "I was given a new brain." Both replies end the exchange. |
 | `MAX_USER_CHARS` | `400` | Hard character limit on the transcribed user utterance. Inputs longer than this are silently truncated **before** being sent to Foundry, reducing input token count and LLM latency. Tune down for faster responses, up for richer context. |
 | `MAX_CONTEXT_CHARS` | `5000` | Maximum total characters across all messages (system prompt + conversation history) included in each LLM request. When exceeded, oldest turns are removed first while the system prompt and the latest user message are always kept. Set to `0` to disable trimming. |
 

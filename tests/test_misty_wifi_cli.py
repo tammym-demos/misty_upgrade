@@ -87,17 +87,24 @@ def test_verify_defaults_to_saved_identity(repo):
     assert forwarded[forwarded.index("--robot-id") + 1] == "test-robot"
 
 
-def test_setup_stop_verify_preserves_robot_identity(repo):
+@pytest.mark.parametrize("custom_faces,expected_rest_face", [
+    ("false", "e_DefaultContent.jpg"),
+    ("true", "face_idle.gif"),
+])
+def test_setup_stop_verify_preserves_robot_identity(repo, custom_faces, expected_rest_face):
     result = run_cli(repo, "wifi", "setup", "--new-profile", "--python", sys.executable)
     assert result.returncode == 0, result.stderr
     forwarded = json.loads((repo / "forwarded.json").read_text())
     assert "--new-profile" in forwarded
     cleanup_calls = []
+    displayed = []
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             cleanup_calls.append(self.path)
-            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if self.path == "/api/images/display":
+                displayed.append(json.loads(body)["FileName"])
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b'{"status":"Success"}')
@@ -111,16 +118,20 @@ def test_setup_stop_verify_preserves_robot_identity(repo):
         try:
             result = run_cli(
                 repo, "stop", "--skip-foundry",
+                "--controller-port", str(server.server_port),
                 "--misty-ip", f"127.0.0.1:{server.server_port}",
+                USE_CUSTOM_FACES=custom_faces,
             )
         finally:
             server.shutdown()
             worker.join(timeout=5)
     assert result.returncode == 0, result.stderr
     assert cleanup_calls == [
+        "/api/shutdown",
         "/api/audio/keyphrase/stop", "/api/audio/record/stop",
         "/api/skills/cancel", "/api/halt", "/api/images/display", "/api/led",
     ]
+    assert displayed == [expected_rest_face]
     saved = json.loads((repo / ".misty-services.json").read_text())
     assert saved["misty"]["serialNumber"] == REPORT["serialNumber"]
     assert saved["misty"]["robotId"] == REPORT["robotId"]
@@ -185,3 +196,41 @@ def test_internal_report_path_cannot_be_overridden(repo, flag):
     result = run_cli(repo, "wifi", "verify", flag)
     assert result.returncode != 0
     assert "reserved" in result.stderr
+
+
+@pytest.mark.parametrize("output,ok,expected", [
+    ("phi-3.5-mini Phi-3.5-mini-instruct-generic-cpu:2", True, False),
+    ("phi-3.5-mini Phi-3.5-mini-instruct-openvino-gpu:2", True, True),
+    ("phi-3.5-mini Phi-3.5-mini-instruct-openvino-gpu:20", True, False),
+    ("phi-3.5-mini Phi-3.5-mini-instruct-openvino-gpu:2-extra", True, False),
+    ("phi-3.5-mini", True, False),
+    ("", True, False),
+    ("phi-3.5-mini Phi-3.5-mini-instruct-openvino-gpu:2", False, False),
+])
+def test_model_checks_require_exact_backend_and_version(repo, output, ok, expected):
+    script = """
+const fs = require("node:fs");
+const vm = require("node:vm");
+const source = fs.readFileSync(process.argv[1], "utf8");
+const context = vm.createContext({
+  run: () => JSON.parse(process.argv[2]),
+  model: {
+    modelId: "Phi-3.5-mini-instruct-openvino-gpu:2",
+    alias: "phi-3.5-mini",
+  },
+});
+vm.runInContext(source.slice(
+  source.indexOf("function chatModelIsLoaded("),
+  source.indexOf("function ensureChatModelCached("),
+), context);
+console.log(JSON.stringify(vm.runInContext(
+  "[chatModelIsLoaded(model), chatModelIsCached(model)]", context,
+)));
+"""
+    result = subprocess.run(
+        ["node", "-e", script, str(repo / "tools" / "misty-services.mjs"),
+         json.dumps({"ok": ok, "stdout": output})],
+        cwd=repo, capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [expected, expected]

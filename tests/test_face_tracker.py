@@ -160,3 +160,76 @@ def test_recenters_after_face_loss_delay():
     tracker.process_detections([], now=3.0)
     assert recorder.calls[-1]["yaw"] == 0
     assert recorder.calls[-1]["pitch"] == pytest.approx(-10.0)
+
+
+def test_detection_continues_while_head_movement_is_blocked():
+    recorder = Recorder()
+    greetings = []
+    tracker = make_tracker(
+        recorder, appeared=lambda: greetings.append("queued"), confirm_frames=1,
+        movement_gate=lambda: False,
+    )
+    tracker.process_detections([detection(800, 250, 100, 100)], now=0)
+    assert tracker.status()["face_present"] is True
+    assert greetings == ["queued"]
+    assert recorder.calls == []
+
+
+def test_empty_scene_sweep_is_gradual_bounded_and_reverses():
+    recorder = Recorder()
+    tracker = make_tracker(
+        recorder, missing_frames=1, scan_when_empty=True,
+        scan_yaw_deg=10, scan_interval_s=2,
+    )
+    for now in range(0, 13, 2):
+        tracker.process_detections([], now=now)
+    assert [call["yaw"] for call in recorder.calls] == [5, 10, 5, 0, -5, -10, -5]
+    assert all(call["roll"] == 0 for call in recorder.calls)
+    assert tracker._source is None
+
+
+def test_sweep_pauses_while_busy_and_stops_to_track_a_face():
+    recorder = Recorder()
+    allowed = [False]
+    tracker = make_tracker(
+        recorder, missing_frames=2, confirm_frames=1, scan_when_empty=True,
+        movement_gate=lambda: allowed[0],
+    )
+    tracker.process_detections([], now=0)
+    assert recorder.calls == []
+    allowed[0] = True
+    tracker.process_detections([], now=2)
+    assert recorder.calls[-1]["yaw"] == 5
+    tracker.process_detections([detection(400, 250, 200, 100)], now=4)
+    assert len(recorder.calls) == 1
+    tracker.process_detections([], now=6)
+    assert len(recorder.calls) == 1
+
+
+def test_new_mode_session_resets_presence_greeting_latch():
+    recorder = Recorder()
+    greetings = []
+    tracker = make_tracker(
+        recorder, appeared=lambda: greetings.append("hi"), confirm_frames=1,
+    )
+    face = detection(400, 250, 200, 100)
+    tracker.process_detections([face], now=0)
+    tracker.reset_presence()
+    tracker.process_detections([face], now=1)
+    assert greetings == ["hi", "hi"]
+
+
+def test_disabled_capture_gate_prevents_background_camera_requests():
+    from unittest import mock
+    source = mock.Mock()
+    tracker = FaceTracker(
+        source, mock.Mock(), mock.Mock(), lambda: False,
+        enabled=True, poll_interval_s=0.1,
+    )
+    tracker.start()
+    try:
+        assert tracker.status()["camera_active"] is False
+        source.capture.assert_not_called()
+    finally:
+        tracker.stop(center=False)
+    source.capture.assert_not_called()

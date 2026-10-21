@@ -1,4 +1,4 @@
-"""Idle-only companion-side face tracking for Misty's RGB camera."""
+"""Companion-side face detection with separately gated head tracking."""
 
 from __future__ import annotations
 
@@ -29,6 +29,7 @@ class FaceTracker:
         safety_gate: Callable[[], bool],
         on_face_appeared: Optional[Callable[[], None]] = None,
         *,
+        movement_gate: Optional[Callable[[], bool]] = None,
         enabled: bool = False,
         poll_interval_s: float = 0.5,
         min_face_area_ratio: float = 0.01,
@@ -46,11 +47,15 @@ class FaceTracker:
         missing_frames: int = 3,
         greeting_reset_missing_frames: int = 30,
         recenter_delay_s: float = 2.0,
+        scan_when_empty: bool = False,
+        scan_yaw_deg: float = 35.0,
+        scan_interval_s: float = 2.0,
     ):
         self._source = source
         self._detector = detector
         self._move_head = move_head
         self._safety_gate = safety_gate
+        self._movement_gate = movement_gate or safety_gate
         self._on_face_appeared = on_face_appeared
         self._enabled = bool(enabled)
         self._poll_interval_s = max(0.1, poll_interval_s)
@@ -75,9 +80,15 @@ class FaceTracker:
             self._missing_frames, greeting_reset_missing_frames
         )
         self._recenter_delay_s = max(0.0, recenter_delay_s)
+        self._scan_when_empty = scan_when_empty
+        self._scan_yaw_deg = min(self._yaw_limit_deg, abs(scan_yaw_deg), 55.0)
+        self._scan_interval_s = max(1.5, scan_interval_s)
+        self._scan_direction = 1
+        self._last_scan_at = float("-inf")
 
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._reset_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._present_count = 0
         self._missing_count = 0
@@ -86,6 +97,7 @@ class FaceTracker:
         self._greeting_latched = False
         self._lost_at: Optional[float] = None
         self._centered_after_loss = True
+        self._last_scan_at = float("-inf")
         self._yaw = 0.0
         self._pitch = self._pitch_center_deg
         self._last_error: Optional[str] = None
@@ -103,6 +115,7 @@ class FaceTracker:
             return {
                 "enabled": self._enabled,
                 "active": self.is_active,
+                "camera_active": self.is_active and self._safety_gate(),
                 "face_present": self._face_present,
                 "yaw": round(self._yaw, 2),
                 "pitch": round(self._pitch, 2),
@@ -124,16 +137,26 @@ class FaceTracker:
         self._stop_event.set()
         if thread is not None and thread.is_alive():
             thread.join(timeout=self.STOP_TIMEOUT_S)
-        if center and self._enabled and self._safety_gate():
+        if center and self._enabled and self._movement_gate():
             self._center()
         close = getattr(self._source, "close", None)
         if callable(close):
             close()
 
+    def reset_presence(self) -> None:
+        """Forget a previous mode session before processing another frame."""
+        self._reset_event.set()
+
     def process_detections(self, detections, now: float) -> None:
         """Process one detection result; public for deterministic unit tests."""
         if self._stop_event.is_set() or not self._safety_gate():
             return
+        if self._reset_event.is_set():
+            self._reset_event.clear()
+            self._present_count = self._missing_count = self._greeting_missing_count = 0
+            self._face_present = self._greeting_latched = False
+            self._lost_at = None
+            self._centered_after_loss = True
         nearby_faces = [
             detection
             for detection in detections
@@ -154,7 +177,7 @@ class FaceTracker:
             if not self._greeting_latched and self._on_face_appeared is not None:
                 self._greeting_latched = True
                 self._on_face_appeared()
-        if self._face_present and self._safety_gate():
+        if self._face_present and self._movement_gate():
             self._track(target)
 
     def _handle_missing(self, now: float) -> None:
@@ -171,10 +194,31 @@ class FaceTracker:
             and self._lost_at is not None
             and not self._centered_after_loss
             and now - self._lost_at >= self._recenter_delay_s
-            and self._safety_gate()
+            and self._movement_gate()
         ):
             self._center()
             self._centered_after_loss = True
+            return
+        if (
+            self._scan_when_empty and not self._face_present
+            and self._missing_count >= self._missing_frames
+            and now - self._last_scan_at >= self._scan_interval_s
+            and self._movement_gate()
+        ):
+            if self._yaw >= self._scan_yaw_deg:
+                self._scan_direction = -1
+            elif self._yaw <= -self._scan_yaw_deg:
+                self._scan_direction = 1
+            self._yaw = _clamp(
+                self._yaw + self._scan_direction * self._max_step_deg,
+                -self._scan_yaw_deg, self._scan_yaw_deg,
+            )
+            self._last_scan_at = now
+            self._pitch = self._pitch_center_deg
+            self._move_head(
+                pitch=self._pitch_center_deg, roll=0,
+                yaw=self._yaw, velocity=self._velocity,
+            )
 
     def _track(self, target: FaceDetection) -> None:
         x_error = target.center_x_normalized
@@ -197,7 +241,7 @@ class FaceTracker:
         self._pitch = _clamp(
             self._pitch + pitch_step, self._pitch_min_deg, self._pitch_max_deg
         )
-        if self._safety_gate():
+        if self._movement_gate():
             self._move_head(
                 pitch=self._pitch, roll=0, yaw=self._yaw, velocity=self._velocity
             )

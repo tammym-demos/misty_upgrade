@@ -7,6 +7,7 @@
 # Local face profiles — biometric embeddings, never commit (#125)
 data/face_profiles/*.npz
 data/face_profiles/*.npy
+data/personal_memories.json
 
 # Logs
 *.log
