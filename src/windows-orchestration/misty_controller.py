@@ -33,7 +33,7 @@ load_dotenv()  # Load .env before any os.getenv() calls
 from enum import Enum
 from dataclasses import dataclass
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 
 import config_defaults  # canonical source for all shared default values (see config_defaults.py)
 
@@ -88,6 +88,10 @@ FACE_RECOGNITION_MIN_SAMPLES = int(os.getenv("FACE_RECOGNITION_MIN_SAMPLES", str
 FACE_DETECTOR_MODEL_PATH = os.getenv("FACE_DETECTOR_MODEL_PATH", config_defaults.FACE_DETECTOR_MODEL_PATH)
 FACE_EMBEDDER_MODEL_PATH = os.getenv("FACE_EMBEDDER_MODEL_PATH", config_defaults.FACE_EMBEDDER_MODEL_PATH)
 
+USE_OBJECT_DETECTION = os.getenv(
+    "USE_OBJECT_DETECTION", str(config_defaults.USE_OBJECT_DETECTION)
+).lower() in ("1", "true", "yes")
+
 # Generic face presence tracking. This uses only the detector model and does
 # not require enrolled profiles or the embedding model.
 USE_FACE_TRACKING = os.getenv(
@@ -112,6 +116,9 @@ FACE_TRACKING_MISSING_FRAMES = int(os.getenv("FACE_TRACKING_MISSING_FRAMES", str
 FACE_GREETING_RESET_MISSING_FRAMES = int(os.getenv("FACE_GREETING_RESET_MISSING_FRAMES", str(config_defaults.FACE_GREETING_RESET_MISSING_FRAMES)))
 FACE_TRACKING_RECENTER_DELAY_S = float(os.getenv("FACE_TRACKING_RECENTER_DELAY_S", str(config_defaults.FACE_TRACKING_RECENTER_DELAY_S)))
 FACE_GREETING_TEXT = os.getenv("FACE_GREETING_TEXT", config_defaults.FACE_GREETING_TEXT)
+FACE_NAMED_GREETING_TEXT = os.getenv(
+    "FACE_NAMED_GREETING_TEXT", config_defaults.FACE_NAMED_GREETING_TEXT
+)
 FACE_GREETING_AUDIO_FILENAME = os.getenv(
     "FACE_GREETING_AUDIO_FILENAME", config_defaults.FACE_GREETING_AUDIO_FILENAME
 )
@@ -120,6 +127,15 @@ FACE_GREETING_AUDIO_FILENAME = os.getenv(
 USE_FACE_ANIMATION = os.getenv("USE_FACE_ANIMATION", "").lower() in ("1", "true", "yes")
 FACE_ANIMATION_MAX_FPS = float(os.getenv("FACE_ANIMATION_MAX_FPS", str(config_defaults.FACE_ANIMATION_MAX_FPS)))
 FACE_ANIMATION_MIN_INTERVAL_S = float(os.getenv("FACE_ANIMATION_MIN_INTERVAL_S", str(config_defaults.FACE_ANIMATION_MIN_INTERVAL_S)))
+USE_CUSTOM_FACES = os.getenv(
+    "USE_CUSTOM_FACES", str(config_defaults.USE_CUSTOM_FACES)
+).lower() in ("1", "true", "yes")
+USE_CHIN_TOUCH_REACTION = os.getenv(
+    "USE_CHIN_TOUCH_REACTION", str(config_defaults.USE_CHIN_TOUCH_REACTION)
+).lower() in ("1", "true", "yes")
+CHIN_TOUCH_REACTION_S = float(os.getenv(
+    "CHIN_TOUCH_REACTION_S", str(config_defaults.CHIN_TOUCH_REACTION_S)
+))
 
 # Custom face assets uploaded to Misty at startup (#110). These are the
 # Pillow-generated faces referenced by FaceAnimator / display flows. They are
@@ -304,6 +320,7 @@ class State(Enum):
     RECORDING = "RECORDING"
     PROCESSING = "PROCESSING"
     PLAYING = "PLAYING"
+    REACTING = "REACTING"    # bounded, idle-only chin-touch affection response
     LISTENING = "LISTENING"  # follow-up listening after response
     MOVING = "MOVING"        # robot is in motion (#50)
     REARMING = "REARMING"
@@ -343,6 +360,10 @@ class MistyController:
         )
         self._mute_lock = threading.Lock()
         self._audio_action_lock = threading.Lock()
+        self._chin_contacted = False
+        self._chin_reaction_stop = threading.Event()
+        self._chin_reaction_thread = None
+        self._chin_audio_playing = False
 
         # Battery monitoring
         self.battery = BatteryState()
@@ -385,6 +406,15 @@ class MistyController:
         # replaces Misty's unreliable on-chip pipeline. None until first use;
         # set to False if construction fails so we don't retry every turn.
         self._laptop_face_recognizer = None
+        self._object_detector = None
+        self._object_detector_lock = threading.Lock()
+        self._vision_scanning = False
+        self._greeter_enabled = False
+        self._greeter_pending = threading.Event()
+        self._greeter_stop = threading.Event()
+        self._greeter_thread = None
+        self._greeter_playing = False
+        self._greeter_reply_pending = False
 
         self._preloaded_audio_durations: dict[str, float] = {}
         self._face_tracker = None
@@ -393,17 +423,16 @@ class MistyController:
             from face_tracker import FaceTracker
 
             self._face_tracker = FaceTracker(
-                source=MistyCameraFrameSource(
-                    MISTY_IP, timeout_s=max(2.0, FACE_TRACKING_POLL_INTERVAL_S * 2)
-                ),
+                source=MistyCameraFrameSource(MISTY_IP),
                 detector=OnnxFaceDetector(
                     FACE_DETECTOR_MODEL_PATH,
                     score_threshold=FACE_TRACKING_DETECTOR_CONFIDENCE,
                     max_input_dimension=FACE_TRACKING_MAX_INPUT_DIMENSION,
                 ),
                 move_head=self.move_head,
-                safety_gate=self._face_tracking_safe,
-                on_face_appeared=self._greet_detected_face,
+                safety_gate=self._greeter_camera_allowed,
+                movement_gate=self._face_tracking_safe,
+                on_face_appeared=self._queue_face_greeting,
                 enabled=True,
                 poll_interval_s=FACE_TRACKING_POLL_INTERVAL_S,
                 min_face_area_ratio=FACE_TRACKING_MIN_FACE_AREA_RATIO,
@@ -421,6 +450,13 @@ class MistyController:
                 missing_frames=FACE_TRACKING_MISSING_FRAMES,
                 greeting_reset_missing_frames=FACE_GREETING_RESET_MISSING_FRAMES,
                 recenter_delay_s=FACE_TRACKING_RECENTER_DELAY_S,
+                scan_when_empty=True,
+                scan_yaw_deg=float(os.getenv(
+                    "GREETER_SCAN_YAW_DEG", str(config_defaults.GREETER_SCAN_YAW_DEG),
+                )),
+                scan_interval_s=float(os.getenv(
+                    "GREETER_SCAN_INTERVAL_S", str(config_defaults.GREETER_SCAN_INTERVAL_S),
+                )),
             )
 
         # Face animation (#73) — state-driven animated expressions.
@@ -435,6 +471,7 @@ class MistyController:
             enabled=USE_FACE_ANIMATION,
             max_fps=FACE_ANIMATION_MAX_FPS,
             min_interval_s=FACE_ANIMATION_MIN_INTERVAL_S,
+            use_custom_faces=USE_CUSTOM_FACES,
         )
         # Only run the frame-loop thread when animation is enabled; identity,
         # emotion and fallback resolution work without the thread when disabled.
@@ -489,16 +526,95 @@ class MistyController:
         return (
             bool(getattr(self, "running", False))
             and not self.is_muted
+            and not getattr(self, "_vision_scanning", False)
             and self.state in self.SAFE_EXPRESSION_STATES
         )
 
     def _face_tracking_safe(self) -> bool:
-        """Face tracking is allowed only while the controller is safely idle."""
+        """Head tracking never competes with conversation or gesture ownership."""
+        coordinator = getattr(self, "_expression_coordinator", None)
         return (
-            bool(getattr(self, "running", False))
-            and not self.is_muted
+            self._greeter_camera_allowed()
             and self.get_state() == State.IDLE
+            and self._camera_motion_telemetry_safe()
+            and (coordinator is None or not coordinator.is_active)
         )
+
+    def _greeter_camera_allowed(self) -> bool:
+        return (
+            bool(getattr(self, "_greeter_enabled", False))
+            and bool(getattr(self, "running", False))
+            and not self.is_muted
+            and not getattr(self, "_vision_scanning", False)
+            and self.get_state() in (
+                State.IDLE, State.PROCESSING, State.PLAYING,
+                State.RECORDING, State.LISTENING,
+            )
+        )
+
+    def _vision_scan_safe(self) -> bool:
+        if not self.running or self.is_muted or self.get_state() != State.PROCESSING:
+            return False
+        return self._camera_motion_telemetry_safe()
+
+    def _camera_motion_telemetry_safe(self) -> bool:
+        with self.battery_lock:
+            if (
+                not 0 <= time.time() - self.battery.last_updated <= 60
+                or not BATTERY_MOVEMENT_CUTOFF <= self.battery.charge_percent <= 1
+                or not self.battery.voltage >= BATTERY_MOVEMENT_VOLTAGE_MIN
+                or not self.battery.temperature < BATTERY_TEMP_THROTTLE_C
+            ):
+                return False
+        with self.hazard_lock:
+            return not self.hazard.active_hazards and not self.hazard.any_bump_active
+
+    def set_greeter_mode(self, enabled: bool) -> dict:
+        if type(enabled) is not bool:
+            raise ValueError("enabled must be a boolean")
+        if enabled and not getattr(self, "_face_tracker", None):
+            raise ValueError("Greeter Mode requires USE_FACE_TRACKING and a local face detector")
+        if enabled != self._greeter_enabled:
+            self._greeter_enabled = enabled
+            self._greeter_pending.clear()
+            self._recognized_face = None
+            if self._face_tracker:
+                self._face_tracker.reset_presence()
+            if not enabled and (
+                self._greeter_playing or getattr(self, "_greeter_reply_pending", False)
+            ):
+                self.misty_post("/api/audio/stop")
+            logger.info("Greeter Mode %s", "on" if enabled else "off")
+        return {"status": "ok", "greeter_mode": self._greeter_enabled}
+
+    def _queue_face_greeting(self) -> None:
+        if self._greeter_camera_allowed():
+            self._greeter_pending.set()
+
+    def _run_greeter(self) -> None:
+        while not self._greeter_stop.wait(0.1):
+            if not self._greeter_pending.is_set():
+                continue
+            tracking = self._face_tracker.status()
+            if not self._greeter_enabled or not tracking["face_present"]:
+                self._greeter_pending.clear()
+                continue
+            if tracking["error"] is None and self._face_tracking_safe():
+                self._greeter_pending.clear()
+                self._greet_detected_face()
+
+    def _greeter_wave_allowed(self) -> bool:
+        return (
+            self._greeter_camera_allowed()
+            and self.get_state() == State.PLAYING
+            and self._camera_motion_telemetry_safe()
+        )
+
+    def _wave_to_visitor(self) -> None:
+        if self._greeter_wave_allowed():
+            result = self.move_arms(left=-25, right=-25, velocity=45)
+            if not isinstance(result, dict) or result.get("status") != "Success":
+                logger.warning("Greeter wave was not acknowledged: %s", result)
 
     # Representative state -> expression intent mapping (#74). Only a small,
     # unambiguous subset drives expressions from state transitions; richer
@@ -541,6 +657,8 @@ class MistyController:
     def set_state(self, new_state: State):
         with self.state_lock:
             old = self.state
+            if old == State.REACTING and new_state != old:
+                self._cancel_chin_reaction()
             self.state = new_state
         if old != new_state:
             logger.info(f"State: {old.value} -> {new_state.value}")
@@ -559,6 +677,8 @@ class MistyController:
         with self.state_lock:
             if self.state == expected:
                 old = self.state
+                if old == State.REACTING and new_state != old:
+                    self._cancel_chin_reaction()
                 self.state = new_state
                 logger.info(f"State: {old.value} -> {new_state.value}")
                 if self._face_animator:
@@ -603,6 +723,8 @@ class MistyController:
         self.misty_post("/api/led", {"red": r, "green": g, "blue": b})
 
     def display_image(self, filename: str):
+        if self._face_animator is not None:
+            filename = self._face_animator.resolve_asset(filename)
         self.misty_post("/api/images/display", {"FileName": filename, "Alpha": 1})
 
     def show_face(self, filename: str):
@@ -623,7 +745,7 @@ class MistyController:
 
     def move_head(self, pitch: float = 0, roll: float = 0, yaw: float = 0, velocity: float = 50):
         """Move Misty's head. Pitch: -40(up) to 26(down). Roll: -40 to 40. Yaw: -81(right) to 81(left)."""
-        self.misty_post("/api/head", {
+        return self.misty_post("/api/head", {
             "Pitch": pitch, "Roll": roll, "Yaw": yaw, "Velocity": velocity
         })
 
@@ -632,8 +754,9 @@ class MistyController:
         if left is None and right is None:
             return
         if left is not None and right is not None and left == right:
-            self.misty_post("/api/arms", {"Arm": "both", "Position": left, "Velocity": velocity})
-            return
+            return self.misty_post(
+                "/api/arms", {"Arm": "both", "Position": left, "Velocity": velocity}
+            )
         if left is not None:
             self.misty_post("/api/arms", {"Arm": "left", "Position": left, "Velocity": velocity})
         if right is not None:
@@ -1180,6 +1303,28 @@ class MistyController:
         result = self.misty_get("/api/device", timeout=3.0)
         return result is not None and result.get("status") == "Success"
 
+    def _check_connection_health(self) -> None:
+        state = self.get_state()
+        if not self.running or state not in (State.IDLE, State.DISCONNECTED):
+            return
+        if not self.check_misty_health():
+            if self.try_set_state(State.IDLE, State.DISCONNECTED):
+                logger.warning("Misty health check failed; waiting for connection recovery")
+                if self._wake_word_listener:
+                    self._wake_word_listener.pause()
+            return
+        if state != State.DISCONNECTED or not self._ws_is_connected():
+            return
+        self.ready_time = time.time() + 3.0
+        if not self.try_set_state(State.DISCONNECTED, State.IDLE):
+            return
+        self.last_activity_time = time.time()
+        self._is_dimmed = False
+        self.set_led(0, 0 if self.is_muted else 255, 0)
+        self.show_face("face_idle.gif")
+        self._resume_wake_word_if_allowed("Wake word resumed after connection recovery")
+        logger.info("Misty REST and WebSocket connection recovered")
+
     def _upload_greeting(self):
         """Generate TTS phrases and upload to Misty as named audio files."""
         phrases = {
@@ -1218,24 +1363,83 @@ class MistyController:
 
     def _greet_detected_face(self):
         """Greet once for a newly established face-presence session."""
-        if self.is_muted or not getattr(self, "running", False) or not self.try_set_state(
+        if not self._face_tracking_safe() or not self.try_set_state(
             State.IDLE, State.PLAYING
         ):
             return
         wake_listener = self._wake_word_listener
+        self._greeter_playing = True
+        wave_started = False
+        greeting_completed = False
         if wake_listener:
             wake_listener.pause()
         try:
+            name = None
+            if USE_LAPTOP_FACE_RECOGNITION:
+                from face_recognition_service import FaceRecognitionError, MistyCameraFrameSource
+
+                try:
+                    with MistyCameraFrameSource(MISTY_IP) as source:
+                        name = self._recognize_camera_person(
+                            None, source, capture_allowed=self._greeter_camera_allowed,
+                        )
+                except (FaceRecognitionError, OSError, ValueError) as exc:
+                    logger.warning("Face greeting remains anonymous: %s", exc)
+            if not self._greeter_camera_allowed() or self.get_state() != State.PLAYING:
+                return
+            if self._greeter_wave_allowed():
+                self._wave_to_visitor()
+                wave_started = True
             self.set_led(128, 0, 255)
             self.show_face("face_talking_happy.gif")
-            self.play_preloaded_audio(FACE_GREETING_AUDIO_FILENAME)
-            duration = self._preloaded_audio_durations.get(
-                FACE_GREETING_AUDIO_FILENAME, 3.0
+            duration = None
+            if name:
+                try:
+                    response = requests.post(
+                        f"{ORCHESTRATION_URL}/api/tts",
+                        json={"text": FACE_NAMED_GREETING_TEXT.format(name=name)}, timeout=15,
+                    )
+                    response.raise_for_status()
+                    if len(response.content) < 100:
+                        raise ValueError("Personal greeting audio is empty")
+                    if not self._greeter_camera_allowed():
+                        return
+                    duration = self.upload_and_play_audio(
+                        response.content, "face_person_greeting.wav"
+                    )
+                except (requests.RequestException, RuntimeError, ValueError) as exc:
+                    logger.warning("Personal greeting unavailable; using generic greeting: %s", exc)
+            if duration is None:
+                if not self._greeter_camera_allowed():
+                    return
+                if not self.play_preloaded_audio(FACE_GREETING_AUDIO_FILENAME):
+                    raise RuntimeError("Face greeting playback was not acknowledged")
+                duration = self._preloaded_audio_durations.get(
+                    FACE_GREETING_AUDIO_FILENAME, 3.0
+                )
+            deadline = time.monotonic() + duration + 0.3
+            while time.monotonic() < deadline and self._greeter_camera_allowed():
+                if self._greeter_stop.wait(min(0.1, max(0, deadline - time.monotonic()))):
+                    break
+            greeting_completed = (
+                not self._greeter_stop.is_set() and self._greeter_camera_allowed()
+                and self.get_state() == State.PLAYING
             )
-            time.sleep(duration + 0.3)
         except Exception as exc:
             logger.warning("Face greeting failed: %s", exc)
         finally:
+            if (
+                wave_started and self.running and not self.is_muted
+                and self.get_state() == State.PLAYING
+                and self._camera_motion_telemetry_safe()
+            ):
+                result = self.move_arms(left=70, right=70, velocity=45)
+                if not isinstance(result, dict) or result.get("status") != "Success":
+                    logger.warning("Greeter arm return was not acknowledged: %s", result)
+            self._greeter_playing = False
+            if greeting_completed and self._greeter_camera_allowed() and self.get_state() == State.PLAYING:
+                self.turn_id += 1
+                self._handle_conversation_turn(listen_after_greeting=True)
             if self.running and self.get_state() == State.PLAYING:
                 self.set_state(State.IDLE)
                 self.set_led(0, 0 if self.is_muted else 255, 0)
@@ -1312,6 +1516,10 @@ class MistyController:
         Returns True if every required custom face is available on the device
         (already present or successfully uploaded); False otherwise.
         """
+        if not USE_CUSTOM_FACES:
+            logger.info("Using stock Misty faces; custom face upload skipped")
+            return True
+
         overwrite = (
             FACE_ASSETS_SYNC_MODE == "overwrite"
             if overwrite is None
@@ -1535,10 +1743,241 @@ class MistyController:
                     "Falling back to Misty's camera.",
                     FACE_RECOGNITION_SOURCE,
                 )
-            return frs.MistyCameraFrameSource(MISTY_IP, timeout_s=FACE_RECOGNITION_TIMEOUT_S)
+            return frs.MistyCameraFrameSource(MISTY_IP)
         except Exception as exc:
             logger.warning("[Face #125] Could not build frame source: %s", exc)
             return None
+
+    def _move_vision_scan_head(self, yaw: float) -> None:
+        from object_detection_service import ObjectDetectionError
+
+        if not self._vision_scan_safe():
+            raise ObjectDetectionError("Head scan interrupted by controller safety checks")
+        result = self.move_head(
+            pitch=config_defaults.FACE_TRACKING_PITCH_CENTER_DEG, roll=0,
+            yaw=max(-55.0, min(55.0, yaw)),
+            velocity=config_defaults.FACE_TRACKING_HEAD_VELOCITY,
+        )
+        if not isinstance(result, dict) or result.get("status") != "Success":
+            raise ObjectDetectionError("Misty did not acknowledge the head scan movement")
+        deadline = time.monotonic() + config_defaults.OBJECT_DETECTION_SCAN_SETTLE_S
+        while True:
+            if not self._vision_scan_safe():
+                raise ObjectDetectionError("Head scan interrupted by controller safety checks")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.05, remaining))
+
+    def observe_objects(self, *, scan: bool = False) -> dict:
+        """Return metadata from one still, or two bounded head-only follow-up views."""
+        from face_recognition_service import MistyCameraFrameSource
+        from object_detection_service import ObjectDetectionError, OnnxObjectDetector
+
+        started = time.perf_counter()
+        recognized_people = set()
+        with self._object_detector_lock:
+            if self.is_muted:
+                raise ObjectDetectionError("Camera request cancelled by operator mute")
+            if scan and not self._vision_scan_safe():
+                raise ObjectDetectionError(
+                    "Head scan requires safe PROCESSING state, fresh battery telemetry "
+                    "above movement thresholds, and no active hazards"
+                )
+            if self._object_detector is None:
+                self._object_detector = OnnxObjectDetector(
+                    os.getenv("OBJECT_DETECTOR_MODEL_PATH", config_defaults.OBJECT_DETECTOR_MODEL_PATH),
+                    float(os.getenv(
+                        "OBJECT_DETECTION_CONFIDENCE",
+                        str(config_defaults.OBJECT_DETECTION_CONFIDENCE),
+                    )),
+                )
+            with MistyCameraFrameSource(MISTY_IP) as source:
+                if not scan:
+                    frame = source.capture()
+                    objects = self._object_detector.detect(frame)
+                    recognized_people.update(self._recognize_people_in_view(frame, objects, source))
+                else:
+                    self._vision_scanning = True
+                    head_started = False
+                    try:
+                        coordinator = getattr(self, "_expression_coordinator", None)
+                        if coordinator is not None:
+                            coordinator.cancel()
+                            if coordinator.is_active:
+                                raise ObjectDetectionError("Head is busy with an expression")
+                        merged = {}
+                        try:
+                            yaw = config_defaults.OBJECT_DETECTION_SCAN_YAW_DEG
+                            for target in (yaw, -yaw):
+                                head_started = True
+                                self._move_vision_scan_head(target)
+                                frame = source.capture()
+                                if not self._vision_scan_safe():
+                                    raise ObjectDetectionError("Head scan interrupted during capture")
+                                detections = self._object_detector.detect(frame)
+                                recognized_people.update(
+                                    self._recognize_people_in_view(frame, detections, source)
+                                )
+                                for item in detections:
+                                    previous = merged.get(item["label"])
+                                    if previous is None:
+                                        merged[item["label"]] = dict(item)
+                                    else:
+                                        previous["count"] = max(previous["count"], item["count"])
+                                        previous["confidence"] = max(
+                                            previous["confidence"], item["confidence"]
+                                        )
+                            if not self._vision_scan_safe():
+                                raise ObjectDetectionError("Head scan interrupted during detection")
+                        finally:
+                            if head_started and self._vision_scan_safe():
+                                self._move_vision_scan_head(0)
+                        objects = sorted(
+                            merged.values(), key=lambda item: (-item["confidence"], item["label"])
+                        )[:8]
+                    finally:
+                        self._vision_scanning = False
+        elapsed_ms = round((time.perf_counter() - started) * 1000)
+        logger.info(
+            "[Vision %sms] categories=%s source=misty_camera views=%s head_scan=%s",
+            elapsed_ms, len(objects), 2 if scan else 1, scan,
+        )
+        return {
+            "status": "ok", "objects": objects, "elapsed_ms": elapsed_ms,
+            "views": 2 if scan else 1, "head_scan": scan,
+            "recognized_people": sorted(recognized_people),
+        }
+
+    def _recognize_people_in_view(self, frame, objects, source) -> list[str]:
+        from face_recognition_service import FaceRecognitionError
+
+        if not USE_LAPTOP_FACE_RECOGNITION or not any(item["label"] == "person" for item in objects):
+            return []
+        try:
+            name = self._recognize_camera_person(frame, source)
+            return [name] if name else []
+        except (FaceRecognitionError, OSError, ValueError) as exc:
+            logger.warning("Current-view identity unavailable; objects remain anonymous: %s", exc)
+            return []
+
+    def _check_photo_capture_allowed(self, deadline: float | None = None):
+        from face_recognition_service import FaceRecognitionError
+
+        if not self.running or self.is_muted or self.get_state() != State.PROCESSING:
+            raise FaceRecognitionError("Photo request cancelled: controller is not processing or is muted")
+        if deadline is not None and time.monotonic() >= deadline:
+            raise FaceRecognitionError("Photo enrollment timed out before saving")
+
+    def enroll_reference_photo(self, name: str) -> dict:
+        import face_recognition_service as frs
+
+        name = frs.validate_profile_name(name)
+        deadline = time.monotonic() + 25.0
+        self._check_photo_capture_allowed(deadline)
+        recognizer = self._build_laptop_face_recognizer()
+        if recognizer is None:
+            raise frs.FaceModelUnavailable("Laptop face recognizer is unavailable")
+        if any(existing.casefold() == name.casefold() for existing in recognizer.store.list_names()):
+            raise frs.ProfileExistsError("A profile with that name already exists")
+        count = max(5, recognizer.min_samples)
+        if count > 10:
+            raise frs.FaceRecognitionError("Voice enrollment supports at most ten samples")
+        # Voice enrollment always uses Misty's current view, not an unrelated webcam.
+        frames = []
+        with frs.MistyCameraFrameSource(MISTY_IP) as source:
+            for _ in range(count):
+                self._check_photo_capture_allowed(deadline)
+                frames.append(source.capture())
+        profile = recognizer.prepare_enrollment(name, frames, save_reference_photo=True)
+        self._check_photo_capture_allowed()
+        recognizer.save_profile(profile, replace=False)
+        logger.info("Saved explicit local reference photo for profile %r", name)
+        return {"status": "ok", "name": name, "reference_photo_saved": True}
+
+    def forget_reference_photo(self, name: str) -> dict:
+        import face_recognition_service as frs
+
+        name = frs.validate_profile_name(name)
+        store = frs.FaceProfileStore(FACE_PROFILE_DIR)
+        name = next(
+            (existing for existing in store.list_names() if existing.casefold() == name.casefold()),
+            name,
+        )
+        deleted = store.delete(name)
+        if self._recognized_face and self._recognized_face.casefold() == name.casefold():
+            self._recognized_face = None
+        recognizer = self._laptop_face_recognizer
+        if recognizer:
+            recognizer.load_profiles(force=True)
+        logger.info("Local face profile deletion requested: profile=%r deleted=%s", name, deleted)
+        return {"status": "ok", "name": name, "deleted": deleted}
+
+    def _recognize_camera_person(self, first_frame, source, *, capture_allowed=None) -> str | None:
+        import face_recognition_service as frs
+
+        def check_capture():
+            if (
+                self.is_muted or not self.running
+                or (capture_allowed is not None and not capture_allowed())
+            ):
+                raise frs.FaceRecognitionError("Face capture cancelled")
+
+        check_capture()
+        recognizer = self._build_laptop_face_recognizer()
+        if recognizer is None:
+            raise frs.FaceModelUnavailable("Laptop face recognizer is unavailable")
+        if not recognizer.load_profiles(force=True):
+            return None
+        count = max(2, recognizer.min_consistent_frames)
+        if count > 5:
+            raise frs.FaceRecognitionError("Live identity recognition supports at most five frames")
+        check_capture()
+        frames = [source.capture() if first_frame is None else first_frame]
+        for _ in range(count - 1):
+            check_capture()
+            frames.append(source.capture())
+        result = recognizer.recognize_consistent(frames, source="misty_camera")
+        check_capture()
+        return result.name if result else None
+
+    def recognize_reference_photo(self) -> dict:
+        import face_recognition_service as frs
+
+        self._recognized_face = None
+        self._check_photo_capture_allowed()
+        with frs.MistyCameraFrameSource(MISTY_IP) as source:
+            name = self._recognize_camera_person(None, source)
+        self._check_photo_capture_allowed()
+        self._recognized_face = name
+        return {"status": "ok", "name": name}
+
+    def _start_face_check(self):
+        if not getattr(self, "_greeter_enabled", False):
+            return [self._recognized_face], None
+        self._recognized_face = None
+        result = [None]
+        check = None
+        if USE_LAPTOP_FACE_RECOGNITION:
+            check = self.recognize_face_laptop
+        elif USE_FACE_RECOGNITION and self._trained_faces:
+            check = self.recognize_face_quick
+        thread = None
+        if check is not None:
+            def recognize():
+                result[0] = check()
+            thread = threading.Thread(target=recognize, daemon=True)
+            thread.start()
+        return result, thread
+
+    def _finish_face_check(self, result, thread) -> str | None:
+        if thread is not None:
+            thread.join(timeout=1.0)
+            if not getattr(self, "_greeter_enabled", False):
+                self._recognized_face = None
+                return None
+        self._recognized_face = result[0]
+        return self._recognized_face
 
     def recognize_face_laptop(self) -> str | None:
         """Return a recognized speaker name using laptop-side recognition.
@@ -1555,7 +1994,7 @@ class MistyController:
 
             # Refresh profiles each turn so a profile enrolled while the
             # controller is running is picked up without a restart.
-            if not recognizer.load_profiles(force=True):
+            if self.is_muted or not recognizer.load_profiles(force=True):
                 logger.debug(
                     "[Face #125] No enrolled profiles in %s — skipping (enroll with "
                     "tools/enroll_face.py).",
@@ -1567,11 +2006,13 @@ class MistyController:
                 return None
             with source:
                 name = frs.recognize_speaker(recognizer, source)
+            if self.is_muted:
+                return None
             if name:
                 logger.info("[Face #125] Laptop recognition identified: %s", name)
             return name
         except Exception as exc:
-            logger.debug("[Face #125] Laptop recognition failed (continuing): %s", exc)
+            logger.warning("[Face #125] Laptop recognition failed (continuing): %s", exc)
             return None
 
     def _handle_face_recognition_event(self, data: dict):
@@ -2049,12 +2490,85 @@ class MistyController:
 
     # --- Shutdown ---
 
+    def _cancel_chin_reaction(self) -> None:
+        self._chin_reaction_stop.set()
+        with self._audio_action_lock:
+            if self._chin_audio_playing:
+                result = self.misty_post("/api/audio/stop", timeout=1.0)
+                if not result or result.get("status") != "Success":
+                    logger.warning("Could not stop chin-touch audio: %s", result)
+                self._chin_audio_playing = False
+
+    def _handle_touch_event(self, data: dict) -> None:
+        position = data.get("sensorPosition", data.get("SensorPosition"))
+        sensor = data.get("sensorName", data.get("SensorName"))
+        if position != "Chin" and sensor != "CapTouch_Chin":
+            return
+        contacted = data.get("isContacted", data.get("IsContacted"))
+        if type(contacted) is not bool:
+            return
+        was_contacted = self._chin_contacted
+        self._chin_contacted = contacted
+        if (
+            not contacted or was_contacted or not USE_CHIN_TOUCH_REACTION
+            or not self.running or self.is_muted or self.get_state() != State.IDLE
+            or (
+                self._chin_reaction_thread is not None
+                and self._chin_reaction_thread.is_alive()
+            )
+        ):
+            return
+        self._chin_reaction_stop.clear()
+        self._chin_reaction_thread = threading.Thread(
+            target=self._run_chin_reaction, name="ChinTouchReaction", daemon=True,
+        )
+        self._chin_reaction_thread.start()
+
+    def _run_chin_reaction(self) -> None:
+        if (
+            self._chin_reaction_stop.is_set() or not self.running or self.is_muted
+            or not self.try_set_state(State.IDLE, State.REACTING)
+        ):
+            return
+        listener = self._wake_word_listener
+        try:
+            if listener:
+                listener.pause()
+            with self._audio_action_lock:
+                if (
+                    self._chin_reaction_stop.is_set() or not self.running
+                    or self.is_muted or self.state != State.REACTING
+                ):
+                    return
+                result = self.misty_post(
+                    "/api/audio/play", {"FileName": "s_Love.wav", "Volume": 60},
+                    timeout=2.0,
+                )
+                if not result or result.get("status") != "Success":
+                    logger.warning("Chin-touch Love sound failed: %s", result)
+                    return
+                self._chin_audio_playing = True
+            self.last_activity_time = time.time()
+            self._chin_reaction_stop.wait(max(0.0, CHIN_TOUCH_REACTION_S))
+        except (RuntimeError, requests.RequestException) as exc:
+            logger.warning("Chin-touch reaction failed: %s", exc)
+        finally:
+            self._cancel_chin_reaction()
+            if self.running and self.try_set_state(State.REACTING, State.IDLE):
+                if listener:
+                    self._resume_wake_word_if_allowed(
+                        "Wake word resumed after chin-touch reaction"
+                    )
+
     def _shutdown(self):
         """Centralized cleanup on exit. Stops keyphrase to release mic lock."""
         if not self.running:
             return  # Already shut down
         logger.info("Shutting down...")
         self.running = False
+        self._cancel_chin_reaction()
+        if getattr(self, "_greeter_stop", None):
+            self._greeter_stop.set()
         if self._face_tracker:
             self._face_tracker.stop(center=False)
         # Stop face animator first (§6.3 — before existing cleanup sequence)
@@ -2212,12 +2726,31 @@ class MistyController:
         self._ws_subscribe_tof()
         self._ws_subscribe_bump()
 
+    def _ws_subscribe_touch(self):
+        if not self.ws or not USE_CHIN_TOUCH_REACTION:
+            return
+        previous = getattr(self, "_touch_event_name", None)
+        if previous:
+            self.ws.send(json.dumps({"Operation": "unsubscribe", "EventName": previous}))
+        self._chin_contacted = False
+        self._touch_event_name = f"ChinTouch_{time.time_ns()}"
+        self.ws.send(json.dumps({
+            "Operation": "subscribe",
+            "Type": "TouchSensor",
+            "DebounceMs": 0,
+            "EventName": self._touch_event_name,
+            "ReturnProperty": None,
+            "EventConditions": [],
+        }))
+        logger.info("Subscribed to chin-touch events (name=%s)", self._touch_event_name)
+
     def _on_ws_open(self, ws):
         logger.info("WebSocket connected")
         self.reconnect_attempts = 0
         # Always subscribe to battery and safety telemetry events
         self._ws_subscribe_battery()
         self._ws_subscribe_safety_telemetry()
+        self._ws_subscribe_touch()
 
         # Subscribe to face recognition events if enabled (#16)
         if USE_FACE_RECOGNITION:
@@ -2314,6 +2847,11 @@ class MistyController:
         if event_name == getattr(self, '_face_event_name', ''):
             if isinstance(msg_content, dict):
                 self._handle_face_recognition_event(msg_content)
+            return
+
+        if event_name == getattr(self, "_touch_event_name", None):
+            if isinstance(msg_content, dict):
+                self._handle_touch_event(msg_content)
             return
 
         # Log non-telemetry WebSocket messages for debugging (#22)
@@ -2445,6 +2983,7 @@ class MistyController:
         with self._mute_lock:
             changed = not self._muted
             self._muted = True
+        self._cancel_chin_reaction()
 
         if self._wake_word_listener:
             self._wake_word_listener.pause()
@@ -2613,7 +3152,7 @@ class MistyController:
 
     # --- Conversation turn (runs in worker thread) ---
 
-    def _handle_conversation_turn(self):
+    def _handle_conversation_turn(self, *, listen_after_greeting: bool = False):
         turn = self.turn_id
         turn_start = time.time()
         if self.is_muted:
@@ -2636,7 +3175,15 @@ class MistyController:
             time.sleep(2.0)
 
         try:
-            exchange_result = self._do_conversation_exchange(turn, turn_start)
+            if listen_after_greeting:
+                logger.info(f"[Turn {turn}] Listening for the visitor's reply after face greeting")
+                self._greeter_reply_pending = True
+                try:
+                    exchange_result = self._listen_for_followup(turn)
+                finally:
+                    self._greeter_reply_pending = False
+            else:
+                exchange_result = self._do_conversation_exchange(turn, turn_start)
             if self.is_muted:
                 logger.info(f"[Turn {turn}] Ending after operator mute")
                 return
@@ -2646,9 +3193,11 @@ class MistyController:
                 # Movement response (#56) — speech was detected, movement command returned
                 had_speech = exchange_result.get("had_speech", True)
                 movement = exchange_result.get("movement")
+                end_conversation = exchange_result.get("end_conversation", False)
             else:
                 had_speech = exchange_result
                 movement = None
+                end_conversation = False
 
             # Only count cycles with actual speech for proactive reboot tracking.
             # Empty STT (user too far from Misty's mic) shouldn't trigger a reboot.
@@ -2664,6 +3213,10 @@ class MistyController:
                 logger.info(f"[Turn {turn}] Executing voice movement: {movement.get('command')}")
                 self._execute_voice_movement(turn, movement)
                 # After movement, skip follow-up listening — re-arm and wait for next wake word
+                return
+
+            if end_conversation:
+                logger.info(f"[Turn {turn}] Greeter introduction complete — returning to idle")
                 return
 
             if not FOLLOWUP_ENABLED:
@@ -2724,22 +3277,7 @@ class MistyController:
         self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # look up slightly — eye contact
 
         # Start face recognition concurrently with recording.
-        face_result = [None]  # mutable container for thread result
-        if USE_LAPTOP_FACE_RECOGNITION:
-            # Laptop-side recognition (#125) — preferred; replaces Misty's
-            # unreliable on-chip pipeline. Fail-open inside recognize_face_laptop.
-            def _face_check():
-                face_result[0] = self.recognize_face_laptop()
-            face_thread = threading.Thread(target=_face_check, daemon=True)
-            face_thread.start()
-        elif USE_FACE_RECOGNITION and self._trained_faces:
-            # Deprecated Misty-native path (#16).
-            def _face_check():
-                face_result[0] = self.recognize_face_quick()
-            face_thread = threading.Thread(target=_face_check, daemon=True)
-            face_thread.start()
-        else:
-            face_thread = None
+        face_result, face_thread = self._start_face_check()
 
         # Stop keyphrase before recording — shared mic on Snapdragon 410.
         # In Misty-keyphrase mode, keyphrase auto-stops on detection.
@@ -2754,12 +3292,15 @@ class MistyController:
         # Note: misty_post returns None on failure (doesn't raise), so check return value.
         greeting_result = self.play_preloaded_audio("greeting_whatsup.wav", volume=40)
         if greeting_result:
-            time.sleep(0.2)
+            greeting_duration = self._preloaded_audio_durations.get(
+                "greeting_whatsup.wav", 3.0
+            )
+            time.sleep(greeting_duration + 0.3)
         else:
             logger.debug(f"[Turn {turn}] Greeting playback failed, trying chime")
             chime_result = self.play_preloaded_audio("s_Awe3.wav", volume=30)
             if chime_result:
-                time.sleep(0.2)
+                time.sleep(self._preloaded_audio_durations.get("s_Awe3.wav", 3.0) + 0.3)
             else:
                 logger.debug(f"[Turn {turn}] Chime fallback also failed; continuing without audio cue")
 
@@ -2862,16 +3403,12 @@ class MistyController:
             raise RuntimeError(f"Recording too small ({len(audio_bytes)} bytes) — likely empty")
 
         # Collect face recognition result (#16) — was running concurrently with recording
-        speaker_name = None
-        if face_thread is not None:
-            face_thread.join(timeout=1.0)  # don't block long — recording is done
-            speaker_name = face_result[0]
-            if speaker_name:
-                logger.info(f"[Turn {turn}] Recognized face: {speaker_name}")
-                self._recognized_face = speaker_name  # persist for follow-up turns
+        speaker_name = self._finish_face_check(face_result, face_thread)
+        if speaker_name:
+            logger.info(f"[Turn {turn}] Recognized face: {speaker_name}")
 
         # 4-6. Orchestrate and play response
-        return self._do_orchestrate_and_respond(turn, audio_bytes, turn_start, speaker_name=self._recognized_face)
+        return self._do_orchestrate_and_respond(turn, audio_bytes, turn_start, speaker_name=speaker_name)
 
     def _do_orchestrate_and_respond(self, turn: int, audio_bytes: bytes, turn_start: float, speaker_name: str | None = None):
         """Send audio to orchestration service and play response on Misty.
@@ -2903,6 +3440,8 @@ class MistyController:
             form_data["conversation_id"] = self._conversation_id
         if speaker_name:
             form_data["speaker_name"] = speaker_name
+        if getattr(self, "_greeter_reply_pending", False):
+            form_data["greeter_reply"] = "true"
         response = requests.post(
             f"{ORCHESTRATION_URL}/api/orchestrate",
             files={"file": (RECORDING_FILENAME, audio_bytes, "audio/wav")},
@@ -2923,6 +3462,12 @@ class MistyController:
 
         if result.get("status") != "ok":
             raise RuntimeError(f"Orchestration error: {result.get('error', 'unknown')}")
+
+        if self.is_muted or (
+            getattr(self, "_greeter_reply_pending", False) and not self._greeter_camera_allowed()
+        ):
+            logger.info(f"[Turn {turn}] Reply playback cancelled")
+            return {"had_speech": False, "end_conversation": True}
 
         if result.get("type") == "control":
             control = result.get("control", {})
@@ -3039,6 +3584,8 @@ class MistyController:
 
         elapsed = time.time() - turn_start
         logger.info(f"[Turn {turn}] Exchange complete in {elapsed:.1f}s")
+        if result.get("endConversation"):
+            return {"had_speech": True, "end_conversation": True}
         return True
 
     def _do_streaming_orchestrate_and_respond(
@@ -3058,6 +3605,8 @@ class MistyController:
             form_data["conversation_id"] = self._conversation_id
         if speaker_name:
             form_data["speaker_name"] = speaker_name
+        if getattr(self, "_greeter_reply_pending", False):
+            form_data["greeter_reply"] = "true"
         response = requests.post(
             f"{ORCHESTRATION_URL}/api/orchestrate/stream",
             files={"file": (RECORDING_FILENAME, audio_bytes, "audio/wav")},
@@ -3066,6 +3615,7 @@ class MistyController:
             stream=True,
         )
         if response.status_code != 200:
+            response.close()
             logger.warning(
                 "[Turn %s] Streaming unavailable (HTTP %s); using buffered pipeline",
                 turn,
@@ -3076,7 +3626,18 @@ class MistyController:
         expected_sequence = 0
         played = 0
         movement = None
+        complete_received = False
+        end_conversation = False
         for raw_line in response.iter_lines(decode_unicode=True):
+            if self.is_muted or (
+                getattr(self, "_greeter_reply_pending", False) and not self._greeter_camera_allowed()
+            ):
+                response.close()
+                self._talking_head.stop()
+                if played:
+                    self._rollback_orchestration_turn()
+                logger.info(f"[Turn {turn}] Streaming reply cancelled")
+                return {"had_speech": bool(played), "end_conversation": True}
             if not self.running:
                 response.close()
                 if played:
@@ -3127,28 +3688,40 @@ class MistyController:
                 if played:
                     self._rollback_orchestration_turn()
                     raise RuntimeError("Streaming failed after playback began")
+                response.close()
                 return None
             elif event_type == "complete":
+                complete_received = True
+                end_conversation = bool(event.get("endConversation", False))
                 logger.info(
-                    "[Turn %s] Stream complete: chunks=%s first_audio=%sms target=%sms total=%.1fs",
+                    "[Turn %s] Stream complete: chunks=%s first_token=%sms "
+                    "first_audio=%sms target=%sms total=%.1fs",
                     turn,
                     event.get("chunks", played),
+                    event.get("firstTokenMs", "n/a"),
                     event.get("firstAudioMs", 0),
                     event.get("firstAudioTargetMs", 0),
                     time.time() - turn_start,
                 )
 
+        response.close()
         self._talking_head.stop()
+        if played and not complete_received:
+            self._rollback_orchestration_turn()
+            raise RuntimeError("Streaming ended before the response completed")
         if movement:
             return {"movement": movement, "had_speech": True}
+        if played and end_conversation:
+            return {"had_speech": True, "end_conversation": True}
         return True if played else None
 
-    def _listen_for_followup(self, turn: int) -> bool:
+    def _listen_for_followup(self, turn: int) -> bool | dict:
         """Listen briefly for follow-up speech. Returns True if speech was detected and responded to."""
         self.set_state(State.LISTENING)
         self.set_led(0, 200, 200)  # cyan = listening for follow-up
         self.show_face("face_listening.png")  # warm, expectant — "go on..."
         self.move_head(pitch=-10, roll=-3, yaw=-10, velocity=40)  # slight head tilt — attentive
+        face_result, face_thread = self._start_face_check()
 
         # Record a short clip — use VAD if available
         use_laptop_mic = self._wake_word_listener and self._wake_word_listener.is_running
@@ -3170,21 +3743,15 @@ class MistyController:
             self.start_recording(RECORDING_FILENAME)
             misty_fallback_available = True
 
-        record_start = time.time()
         if use_laptop_mic:
             speech_ended = threading.Event()
             self._wake_word_listener.start_speech_monitor(
                 on_speech_end=lambda: speech_ended.set(),
-                min_duration=2.0,   # shorter min for follow-ups
+                min_duration=min(RECORDING_DURATION_S, FOLLOWUP_LISTEN_S),
                 max_duration=10.0,  # shorter max for follow-ups
             )
             speech_ended.wait(timeout=10.0)
             self._wake_word_listener.stop_speech_monitor()
-            # Ensure Misty records at least FOLLOWUP_LISTEN_S when it is acting
-            # as fallback audio. Tally-only mode may stop earlier via timer.
-            elapsed = time.time() - record_start
-            if self._laptop_misty_fallback_enabled() and elapsed < FOLLOWUP_LISTEN_S:
-                time.sleep(FOLLOWUP_LISTEN_S - elapsed)
         else:
             time.sleep(FOLLOWUP_LISTEN_S)
 
@@ -3214,13 +3781,15 @@ class MistyController:
         if audio_bytes is None:
             audio_b64 = self.get_audio_base64(RECORDING_FILENAME)
             if not audio_b64:
-                logger.warning(f"[Turn {turn}] Follow-up: failed to retrieve audio")
-                return False
+                raise RuntimeError(f"[Turn {turn}] Follow-up audio retrieval failed")
             audio_bytes = base64.b64decode(audio_b64)
             logger.info(f"[Turn {turn}] Follow-up using MISTY mic: {len(audio_bytes)} bytes")
 
         # Very small recordings are certainly silence
         if len(audio_bytes) < FOLLOWUP_SILENCE_THRESHOLD:
+            return False
+        if getattr(self, "_greeter_reply_pending", False) and not self._greeter_camera_allowed():
+            logger.info(f"[Turn {turn}] Greeter reply cancelled during recording")
             return False
 
         # Show thinking face while processing follow-up
@@ -3228,121 +3797,13 @@ class MistyController:
         self.set_led(0, 0, 255)  # blue = processing
         self.show_face("face_processing.gif")  # wondering face
         self.move_head(pitch=-5, roll=5, yaw=20, velocity=40)
-
-        # Send through the full pipeline — orchestration returns empty_stt error
-        # if no speech was detected, which we treat as silence
-        try:
-            form_data = {"return_audio_bytes": "true"}
-            if getattr(self, "_conversation_id", None):
-                form_data["conversation_id"] = self._conversation_id
-            if self._recognized_face:
-                form_data["speaker_name"] = self._recognized_face
-            response = requests.post(
-                f"{ORCHESTRATION_URL}/api/orchestrate",
-                files={"file": (RECORDING_FILENAME, audio_bytes, "audio/wav")},
-                data=form_data,
-                timeout=60.0,
-            )
-            result = response.json()
-
-            # empty_stt = silence, not an error
-            if result.get("error") == "empty_stt":
-                logger.info(f"[Turn {turn}] Follow-up: silence (empty STT)")
-                return False
-
-            if response.status_code != 200 or result.get("status") != "ok":
-                logger.warning(f"[Turn {turn}] Follow-up: orchestration error: {result.get('error', 'unknown')}")
-                return False
-
-            if result.get("type") == "control":
-                response_wav = None
-                if result.get("audioBytes"):
-                    response_wav = base64.b64decode(
-                        result["audioBytes"], validate=True
-                    )
-                self._apply_voice_control(
-                    turn,
-                    result.get("control", {}),
-                    audio_bytes=response_wav,
-                    audio_file=result.get("audio_file"),
-                )
-                return {"control": result.get("control", {}), "had_speech": True}
-
-            # Movement response in follow-up (#56)
-            if result.get("type") == "movement":
-                movement = result.get("movement", {})
-                ack_text = result.get("response_text", "")
-                logger.info(f"[Turn {turn}] Follow-up movement: {movement.get('command')} ack='{ack_text}'")
-
-                audio_file = result.get("audio_file")
-                if audio_file:
-                    try:
-                        response_wav = None
-                        if result.get("audioBytes"):
-                            response_wav = base64.b64decode(
-                                result["audioBytes"], validate=True
-                            )
-                        if response_wav is None:
-                            audio_url = f"{ORCHESTRATION_URL}/api/audio/{audio_file}"
-                            audio_resp = requests.get(audio_url, timeout=10.0)
-                            audio_resp.raise_for_status()
-                            response_wav = audio_resp.content
-                        self.set_state(State.PLAYING)
-                        self.set_led(148, 0, 211)
-                        self.show_face("face_talking_happy.gif")  # consistent ack face (#116)
-                        self._talking_head.start("happy")  # talking motion (#116)
-                        play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
-                        time.sleep(play_duration + 1.0)
-                        self._talking_head.stop()  # halt + re-center head (#116)
-                    except Exception as e:
-                        logger.warning(f"[Turn {turn}] Follow-up movement ack audio failed: {e}")
-
-                return {"movement": movement, "had_speech": True}
-
-            # Speech detected — download and play the response
-            transcribed = result.get("transcribedText", "")
-            llm_response = result.get("inferenceResponse", "")
-            audio_uri = result.get("responseAudio", "")
-            latency = result.get("latencyMs", 0)
-            logger.info(f"[Turn {turn}] Follow-up: '{transcribed}' -> '{llm_response}' ({latency:.0f}ms)")
-
-            if result.get("ttsFallback"):
-                logger.warning(f"[Turn {turn}] WARNING: TTS FALLBACK was used")
-
-            if not audio_uri and not result.get("audioBytes"):
-                logger.error(f"[Turn {turn}] Follow-up: no response audio URI")
-                return False
-
-            response_wav = None
-            if result.get("audioBytes"):
-                response_wav = base64.b64decode(result["audioBytes"], validate=True)
-            if response_wav is None:
-                audio_url = f"{ORCHESTRATION_URL}{audio_uri}"
-                audio_resp = requests.get(audio_url, timeout=10.0)
-                audio_resp.raise_for_status()
-                response_wav = audio_resp.content
-            logger.info(f"[Turn {turn}] Follow-up audio: {len(response_wav)} bytes")
-
-            # Play the response
-            emotion = result.get("emotion", "neutral")
-            self._face_animator.set_emotion(emotion)
-            self.set_state(State.PLAYING)
-            self.set_led(148, 0, 211)  # purple = speaking
-            self.move_head(pitch=-10, roll=0, yaw=0, velocity=60)  # face forward
-            self._talking_head.start(emotion)  # emotion-aware talking motion (#116)
-
-            try:
-                play_duration = self.upload_and_play_audio(response_wav, RESPONSE_FILENAME)
-            except Exception:
-                self._rollback_orchestration_turn()
-                raise
-            time.sleep(play_duration + 0.5)
-            self._talking_head.stop()  # halt + re-center head when playback ends (#116)
-            return True
-
-        except Exception as e:
-            logger.error(f"[Turn {turn}] Follow-up error: {e}")
-            return False
+        speaker_name = self._finish_face_check(face_result, face_thread)
+        return self._do_orchestrate_and_respond(
+            turn,
+            audio_bytes,
+            time.time(),
+            speaker_name=speaker_name,
+        )
 
     def _rearm(self):
         self.set_state(State.REARMING)
@@ -3637,6 +4098,10 @@ class MistyController:
 
         if self._face_tracker:
             self._face_tracker.start()
+            self._greeter_thread = threading.Thread(
+                target=self._run_greeter, name="GreeterMode", daemon=True,
+            )
+            self._greeter_thread.start()
 
         # Health check loop
         try:
@@ -3657,14 +4122,10 @@ class MistyController:
                         self.set_led(0, 50, 0)  # dim green
                         logger.info(f"Idle for {idle_duration/60:.0f}min — dimming LED")
 
-                # Health check (only when idle)
-                if state == State.IDLE:
-                    if not self.check_misty_health():
-                        logger.warning("Misty health check failed")
-                        self.set_state(State.DISCONNECTED)
+                self._check_connection_health()
 
                 # Keyphrase watchdog (only when idle)
-                if state == State.IDLE:
+                if self.get_state() == State.IDLE:
                     self._watchdog_check()
         except KeyboardInterrupt:
             self._shutdown()
@@ -3674,7 +4135,7 @@ class MistyController:
 # TEST API — HTTP endpoint for programmatic test triggers
 # ============================================================================
 
-CONTROLLER_API_PORT = int(os.getenv("CONTROLLER_API_PORT", "5001"))
+CONTROLLER_API_PORT = int(os.getenv("CONTROLLER_API_PORT", str(config_defaults.CONTROLLER_API_PORT)))
 
 
 class ControllerAPIHandler(BaseHTTPRequestHandler):
@@ -3690,6 +4151,15 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
+
+    def _read_small_json(self) -> dict:
+        length = int(self.headers.get("Content-Length", 0))
+        if not 0 <= length <= 1024:
+            raise ValueError("Request must be at most 1024 bytes")
+        body = json.loads(self.rfile.read(length)) if length else {}
+        if not isinstance(body, dict):
+            raise ValueError("Request must be a JSON object")
+        return body
 
     def do_GET(self):
         if self.path == "/api/status":
@@ -3724,6 +4194,7 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
                 "laptop_misty_recording_mode": LAPTOP_MISTY_RECORDING_MODE,
                 "laptop_misty_tally_recording_s": max(0.0, LAPTOP_MISTY_TALLY_RECORDING_S),
                 "face_tracking": face_tracking,
+                "greeter_mode": getattr(ctrl, "_greeter_enabled", False),
                 "battery_percent": round(battery.charge_percent * 100),
                 "battery_charging": battery.is_charging,
                 "uptime_s": round(time.time() - ctrl._start_time) if hasattr(ctrl, "_start_time") else None,
@@ -3739,7 +4210,98 @@ class ControllerAPIHandler(BaseHTTPRequestHandler):
             self._send_json(404, {"error": "not_found"})
 
     def do_POST(self):
-        if self.path == "/api/test/trigger":
+        if self.path == "/api/greeter":
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                self._send_json(403, {"status": "error", "error": "local_only"})
+                return
+            try:
+                body = self._read_small_json()
+                if set(body) != {"enabled"} or type(body["enabled"]) is not bool:
+                    raise ValueError("A single boolean enabled field is required")
+                result = self.controller.set_greeter_mode(body["enabled"])
+            except ValueError as exc:
+                self._send_json(400, {"status": "error", "message": str(exc)})
+                return
+            self._send_json(200, result)
+        elif self.path in ("/api/faces/enroll", "/api/faces/recognize", "/api/faces/forget"):
+            import face_recognition_service as frs
+
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                self._send_json(403, {"status": "error", "error": "local_only"})
+                return
+            if self.path != "/api/faces/forget" and not USE_LAPTOP_FACE_RECOGNITION:
+                self._send_json(503, {"status": "error", "error": "face_recognition_disabled"})
+                return
+            if self.path != "/api/faces/forget" and self.controller.is_muted:
+                self._send_json(409, {"status": "error", "error": "muted"})
+                return
+            try:
+                body = self._read_small_json()
+                if self.path == "/api/faces/recognize":
+                    if body:
+                        raise ValueError("Recognition takes an empty JSON object")
+                    name = None
+                else:
+                    if set(body) != {"name"}:
+                        raise ValueError("A single name field is required")
+                    name = frs.validate_profile_name(body["name"])
+            except (ValueError, frs.ProfileNameError) as exc:
+                self._send_json(400, {"status": "error", "error": "invalid_request", "message": str(exc)})
+                return
+            try:
+                if self.path == "/api/faces/enroll":
+                    result = self.controller.enroll_reference_photo(name)
+                elif self.path == "/api/faces/forget":
+                    result = self.controller.forget_reference_photo(name)
+                else:
+                    result = self.controller.recognize_reference_photo()
+            except frs.ProfileExistsError:
+                self._send_json(409, {"status": "error", "error": "profile_exists"})
+                return
+            except (frs.NoFaceDetected, frs.MultipleFacesDetected, frs.LowConfidence) as exc:
+                logger.warning("Photo enrollment framing rejected: %s", exc)
+                self._send_json(422, {"status": "error", "error": "face_framing"})
+                return
+            except (frs.FaceRecognitionError, OSError, ValueError) as exc:
+                logger.warning("Local face request unavailable: %s", exc)
+                self._send_json(503, {"status": "error", "error": "face_unavailable", "message": str(exc)})
+                return
+            self._send_json(200, result)
+        elif self.path == "/api/vision/detect":
+            if self.client_address[0] not in ("127.0.0.1", "::1"):
+                self._send_json(403, {"status": "error", "error": "local_only"})
+                return
+            if not USE_OBJECT_DETECTION:
+                self._send_json(503, {
+                    "status": "error", "error": "object_detection_disabled",
+                    "message": "Set USE_OBJECT_DETECTION=true in both services and restart.",
+                })
+                return
+            if self.controller.is_muted:
+                self._send_json(409, {"status": "error", "error": "muted"})
+                return
+            from face_recognition_service import FaceRecognitionError
+            from object_detection_service import ObjectDetectionError
+
+            try:
+                body = self._read_small_json()
+                if type(body.get("scan", False)) is not bool:
+                    raise ValueError("scan must be a JSON boolean")
+            except (json.JSONDecodeError, ValueError) as exc:
+                self._send_json(400, {
+                    "status": "error", "error": "invalid_request", "message": str(exc),
+                })
+                return
+            try:
+                result = self.controller.observe_objects(scan=body.get("scan", False))
+            except (FaceRecognitionError, ObjectDetectionError, ValueError) as exc:
+                logger.warning("Object detection unavailable: %s", exc)
+                self._send_json(503, {
+                    "status": "error", "error": "vision_unavailable", "message": str(exc),
+                })
+                return
+            self._send_json(200, result)
+        elif self.path == "/api/test/trigger":
             ctrl = self.controller
             state = ctrl.get_state()
 
@@ -3956,7 +4518,7 @@ if __name__ == "__main__":
 
     # Start test API server in background thread
     ControllerAPIHandler.controller = controller
-    api_server = HTTPServer(("0.0.0.0", CONTROLLER_API_PORT), ControllerAPIHandler)
+    api_server = ThreadingHTTPServer(("0.0.0.0", CONTROLLER_API_PORT), ControllerAPIHandler)
     api_thread = threading.Thread(target=api_server.serve_forever, name="api-server", daemon=True)
     api_thread.start()
     logger.info(f"Test API server on port {CONTROLLER_API_PORT}")

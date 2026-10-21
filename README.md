@@ -254,6 +254,7 @@ Common environment variables:
 | `KOKORO_SPEED` | `1.2` | Kokoro speech speed; synthesis latency scales mostly with response length. |
 | `MAX_USER_CHARS` | `400` | Per-utterance prompt character cap. |
 | `MAX_CONTEXT_CHARS` | `5000` | Total LLM context character budget. |
+| `MAX_CONTEXT_TOKENS` | `1200` | Total estimated LLM context token budget. |
 | `FOLLOWUP_ENABLED` | `false` | Enables automatic follow-up listening after an answer. Disabled by default to avoid echo/noise-triggered hallucinated responses. |
 | `FOLLOWUP_LISTEN_S` | `5.0` | Per follow-up listen duration before silence/no-speech handling. |
 | `FOLLOWUP_TIMEOUT_S` | `90` | Follow-up conversation window. |
@@ -262,7 +263,10 @@ Common environment variables:
 | `PROACTIVE_REBOOT_AFTER_RECORDINGS` | `15` | Full reboot after this many recording cycles. |
 | `LAPTOP_MISTY_RECORDING_MODE` | `fallback` | Misty recorder behavior during conversations: `fallback` keeps full Misty audio as a safe fallback, `tally` records only a short tally-light pulse, and `off` disables Misty-side recording. |
 | `LAPTOP_MISTY_TALLY_RECORDING_S` | `1.0` | Length of the tally-light-only Misty recording pulse when `LAPTOP_MISTY_RECORDING_MODE=tally`. |
-| `USE_FACE_ANIMATION` | `false` | Enables the continuous face animation frame loop. Custom face identity, emotion selection, and fallback resolution still work when this is `false`. |
+| `USE_CUSTOM_FACES` | `false` | Uses Misty's original built-in eyes by default. Set `true` to opt in to generated custom faces and asset uploads. |
+| `USE_CHIN_TOUCH_REACTION` | `true` | An idle chin touch shows the stock heart eyes (`e_Love.jpg`) and plays `s_Love.wav`; ignores held/repeated contact and never interrupts busy, charging, or muted states. |
+| `CHIN_TOUCH_REACTION_S` | `3.0` | Heart-eye hold duration before returning to idle; safety transitions and mute cancel the reaction. |
+| `USE_FACE_ANIMATION` | `false` | Enables the continuous face animation frame loop. Stock/custom face selection and emotion selection still work when this is `false`. |
 | `FACE_ASSETS_DIR` | `assets` | Directory containing required custom face files such as `face_idle.gif` and `face_talking_happy.gif`. |
 | `FACE_ASSETS_SYNC_MODE` | `missing` | Custom face sync mode: `missing` uploads only absent assets; `overwrite` force re-uploads all required face assets for intentional replacement. |
 | `FACE_ASSETS_FORCE_UPLOAD` | `false` | Convenience flag equivalent to one startup with `FACE_ASSETS_SYNC_MODE=overwrite`. Return to normal idempotent startup afterward. |
@@ -276,7 +280,13 @@ Copy `src\windows-orchestration\.env.example` to `.env` if you want persistent l
 
 If `LAPTOP_MISTY_RECORDING_MODE` is `tally` or `off` and laptop mic capture returns no usable audio, the controller raises a clear retryable error instead of silently falling back to Misty. Check the laptop microphone or switch back to `fallback` when robot-side backup audio is needed.
 
-For live visual/body testing, enable only the modes you want to validate. `USE_TALKING_HEAD_MOTION=true` adds small head movements during spoken responses. `USE_EMBODIED_EXPRESSIONS=true` allows safe expression choreography such as joy/happy arm raises; motor gestures are suppressed during unsafe states like recording, moving, charging, rebooting, and shutdown. To replace Misty's custom face assets, put the required files in `FACE_ASSETS_DIR`, start once with `FACE_ASSETS_SYNC_MODE=overwrite`, then return to `missing` for normal startup.
+Misty uses her original built-in eyes without uploading custom artwork. While she
+is idle, touching her chin briefly displays the stock heart eyes and plays the
+built-in Love sound, then restores the idle face. This requires the companion
+controller to be running; it does not start an on-robot skill or move any motors.
+Release and touch again to repeat. Set `USE_CHIN_TOUCH_REACTION=false` to disable.
+
+For live visual/body testing, enable only the modes you want to validate. `USE_TALKING_HEAD_MOTION=true` adds small head movements during spoken responses. `USE_EMBODIED_EXPRESSIONS=true` allows safe expression choreography such as joy/happy arm raises; motor gestures are suppressed during unsafe states like recording, moving, charging, rebooting, and shutdown. To use generated artwork instead of stock eyes, set `USE_CUSTOM_FACES=true`. To replace those custom face assets, put the required files in `FACE_ASSETS_DIR`, start once with `FACE_ASSETS_SYNC_MODE=overwrite`, then return to `missing` for normal startup.
 
 ### Face recognition training (`tools/train_face.py`)
 
@@ -322,7 +332,7 @@ or the laptop webcam, computes face embeddings on the companion laptop (OpenCV +
 ONNX Runtime), and feeds the existing `speaker_name` orchestration path. The
 deprecated Misty-native `USE_FACE_RECOGNITION` (#16) path should stay disabled.
 
-**Enroll a person** (embeddings + metadata are stored locally, never photos):
+**Enroll a person** (embeddings + metadata are stored locally by default):
 
 ```powershell
 # From Misty's camera
@@ -330,6 +340,9 @@ python tools\enroll_face.py --name Tammy --source misty --misty-ip 10.0.0.15 --s
 
 # Or from the laptop webcam
 python tools\enroll_face.py --name Tammy --source webcam --samples 10
+
+# Explicitly retain a reference photo too, with the person's permission.
+python tools\enroll_face.py --name Morgan --source misty --misty-ip 10.0.0.15 --samples 5 --save-reference-photo
 
 # Manage profiles
 python tools\enroll_face.py --list
@@ -345,20 +358,79 @@ python tools\recognize_face.py --source webcam
 
 **Enable it in conversations** by setting `USE_LAPTOP_FACE_RECOGNITION=true` in
 `src/windows-orchestration/.env` and configuring the detector/embedder model
-paths. When enabled, the controller runs recognition concurrently with recording
-at the start of a turn; a confident match sets `speaker_name` (persisted through
-follow-up turns). If recognition fails, times out, or no profile exists, the
+paths. In **Greeter Mode**, the controller runs recognition concurrently with
+recording at the start of each turn, including follow-ups; a fresh confident
+match sets `speaker_name`. Outside Greeter Mode, recognition requires an explicit
+request such as **"Do you recognize me?"**; ordinary conversation does not start
+background camera polling or automatic turn recognition. Missing, ambiguous or
+conflicting matches clear the old name.
+When identity changes or becomes unknown, identity-bound history is cleared so
+the new speaker does not inherit a prior person's context. If recognition fails,
+times out, or no profile exists, the
 controller logs the reason and continues without a name (**fail-open**).
 
 **Models:** the OpenCV/ONNX detector and embedding models are **not bundled**
 (`*.onnx` is gitignored). Point `FACE_DETECTOR_MODEL_PATH` (e.g. YuNet) and
-`FACE_EMBEDDER_MODEL_PATH` (e.g. SFace/ArcFace) at locally downloaded model files.
+`FACE_EMBEDDER_MODEL_PATH` (OpenCV SFace) at locally downloaded model files.
 Until these are set, laptop recognition reports a clear "model unavailable" error
-and stays idle rather than crashing.
+and continues without a name rather than crashing. The supported SFace model is
+[`face_recognition_sface_2021dec.onnx`](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface)
+(Apache-2.0), SHA-256
+`0ba9fbfa01b5270c96627c4ef784da859931e02f04419c829e83484087c34e79`.
 
-**Privacy:** enrolled profiles live in `data/face_profiles/` and contain only
-numeric embeddings and metadata (name, timestamp, model name/version, sample
-count, embedding dimensions). Face embeddings are **biometric data**, kept local
+**Spoken photo enrollment:** with just the consenting person facing Misty's
+camera, say **"Take a picture of this person and remember them. Their name is
+Morgan."** Self-enrollment also accepts "Take a picture of me and remember me.
+My name is Morgan." This captures several consistent, single-person samples and
+saves an actual reference JPEG inside the local `.npz` archive, alongside the
+features derived from the capture. Recognition compares local SFace features,
+not pixel equality. Existing names cannot be silently replaced. Say **"Forget
+the face named Morgan"** to delete that archive, including its photo.
+
+**Fresh identity:** "Do you recognize me?" requests a fresh comparison. A camera
+report can name confident local matches, but a generic `person` detection alone
+never supplies a name. New face-presence greetings use a fresh match for a named
+greeting, otherwise the generic greeting remains. These operations run locally
+on the laptop; no cloud vision or Misty-native face training is used.
+Outside Greeter Mode, normal conversation does not take camera snapshots:
+an explicitly confirmed identity lasts only for that conversation, not as
+continuous verification. A new explicit unknown match clears it, and ending
+the conversation clears it. Enrolling another person does not identify the
+speaker, nor does merely seeing a person in an object report.
+
+**Private named memories:** `PERSONAL_MEMORY_PATH` defaults to the gitignored
+`data/personal_memories.json`, an object mapping profile names to lists of short
+approved facts. Only a current recognized speaker's facts enter the chat prompt.
+Misty's explicitly approved shared backstory prioritizes farm life with Burke,
+Tammy, and their two dogs, Percy and Granny. GitHub Copilot is a secondary
+enthusiasm: when meeting someone new, she asks whether they have tried it and,
+if so, how they like it, without repeating answered questions or making every
+conversation a pitch. Her farm household and occasional hackathon visits remain
+part of her backstory. When answering questions about GitHub Copilot, she briefly
+credits it with helping update her functionality, then answers the question.
+That credit is project history, not a claim that it powers her live conversations.
+These shared facts remain
+in the always-on `SYSTEM_PROMPT`, independent of recognition; its canonical
+default lives in `config_defaults.py` and can be overridden with `SYSTEM_PROMPT`.
+That backstory does not establish the current visitor's identity. Keep additional
+private personal facts out of tracked source and the shared `SYSTEM_PROMPT`.
+Unknown speakers receive no named personal context. Deleting a face profile does
+not delete this separate memory source.
+
+**GitHub Copilot reference:** `docs\github-copilot-reference.md` contains short,
+dated facts and official sources for coding help, chat, tests, code review,
+agents, terminal use and limitations. It is first in the default
+`GROUNDING_SOURCES` list so product facts take priority over general repository
+mentions. The existing local reader supplies matching excerpts to the same
+chat model; no model change or online lookup is involved. If you override
+`GROUNDING_SOURCES`, include this file first. Source-list changes take effect
+when orchestration starts; later edits to the reference are read on the next
+matching question. Recheck its official sources and update its verification
+date when refreshing facts. It does not change speech recognition.
+
+**Privacy:** enrolled profiles live in `data/face_profiles/` and contain
+embeddings, metadata, and an optional explicitly saved reference JPEG. Photo
+enrollment is never automatic. Photos and embeddings are **biometric data**, kept local
 only and **gitignored**. User-supplied names are validated so they cannot escape
 the profile directory. See [`data/face_profiles/README.md`](data/face_profiles/README.md).
 
@@ -368,6 +440,7 @@ Key settings (`config_defaults.py` is the single source of truth):
 |---|---|---|
 | `USE_LAPTOP_FACE_RECOGNITION` | `false` | Enable laptop-side recognition (replaces #16). |
 | `FACE_PROFILE_DIR` | `data/face_profiles` | Local, gitignored profile storage. |
+| `PERSONAL_MEMORY_PATH` | `data/personal_memories.json` | Private approved facts keyed by recognized name; no context for unknown speakers. |
 | `FACE_RECOGNITION_SOURCE` | `misty_camera` | Conversation-time frame source: `misty_camera` \| `webcam`. (The CLIs also support an `image` source for offline testing.) |
 | `FACE_RECOGNITION_THRESHOLD` | `0.4` | Cosine-distance match threshold (lower = stricter). |
 | `FACE_RECOGNITION_MIN_CONSISTENT_FRAMES` | `2` | Frames that must agree before a name is used. |
@@ -378,25 +451,143 @@ Key settings (`config_defaults.py` is the single source of truth):
 
 1. `python tools\enroll_face.py --name Tammy --source misty --misty-ip <MISTY_IP> --samples 10`
 2. `python tools\recognize_face.py --source misty --misty-ip <MISTY_IP>` → prints `RECOGNIZED: Tammy` with distance below threshold.
-3. Set `USE_LAPTOP_FACE_RECOGNITION=true`, start the services, and confirm Misty naturally uses Tammy's name in conversation.
+3. Set `USE_LAPTOP_FACE_RECOGNITION=true`, start the services, say "Do you recognize me?", then confirm Misty uses the confirmed name in that conversation.
 4. Confirm an unknown face falls back gracefully (no name injected, conversation continues).
 
-### Untrained face detection and head tracking
+### Greeter Mode: visitor detection, head scanning, and waving
 
-Misty can also detect any human face without enrollment and follow the
-largest/closest face with head pan/tilt while the controller is `IDLE`. Enable
-`USE_FACE_TRACKING=true` and set `FACE_DETECTOR_MODEL_PATH` to the same
-YuNet-compatible detector used by laptop-side recognition; no embedding model
-or face profile is required. On a confirmed new appearance, Misty plays the
-fixed local-TTS `FACE_GREETING_TEXT` once, then returns to idle and still
-requires `Hey Misty` to begin a conversation.
+**Greeter Mode is independent of the existing scripted Conference Mode**, which
+is unchanged. It starts **off** every time the controller starts. Enable the
+capability with `USE_FACE_TRACKING=true` and a YuNet-compatible
+`FACE_DETECTOR_MODEL_PATH`, then say **"Hey Misty, turn greeter mode on"**.
+Say **"Hey Misty, turn greeter mode off"** to stop background camera use.
+Outside Greeter Mode, the camera is used only for explicit visual questions,
+photo enrollment, or recognition requests.
 
-Tracking pauses during recording, processing, playback, follow-up listening,
-movement, charging, reboot, errors, and shutdown. It never drives the treads.
-Frames are processed transiently and are not stored. Detection/miss hysteresis,
-dead zones, gains, head limits, polling rate, re-center delay, velocity, and the
-greeting phrase are configurable through the `FACE_TRACKING_*` and
-`FACE_GREETING_*` settings documented in `.env.example`.
+While Greeter Mode is on, transient snapshots continuously check for face
+presence, including while Misty is speaking or listening. A confirmed arrival
+queues a greeting; she waits until the conversation finishes and she is safely
+idle, then says hello and raises both arms in a small wave. A confident fresh
+local identity match permits a named hello; otherwise she uses
+`FACE_GREETING_TEXT`. An embedding model and enrolled profile are optional for
+the generic hello.
+
+After the hello finishes, she listens for a reply without requiring a wake
+word. The default invitation is "Hello! Want to hear how GitHub Copilot helped
+revitalize my eight-year-old hardware?" A recognized visitor hears the same
+invitation with "Hi {name}!" instead of "Hello!".
+
+A clear affirmative such as "yes", "yes please" or "sure" plays a fixed, cached
+story about upgraded software, the original physical hardware, and services
+and a local AI model running on the nearby laptop. It ends exactly with
+"I was given a new brain." There is no generated add-on or extra question.
+A decline gets "No problem - nice to meet you!"; silence gets no response.
+Both the completed story and a decline end the exchange and return to waiting.
+Unrelated questions retain the normal conversational path; a "yes" outside the
+invitation does not trigger the story. Control and movement commands still take
+precedence. New arrivals never interrupt speaking, listening, or an active
+expression/reaction. Mute or disabling Greeter Mode cancels remaining story audio.
+
+Customize `FACE_GREETING_TEXT`, `FACE_NAMED_GREETING_TEXT` (with `{name}`),
+`GREETER_STORY_TEXT` and `GREETER_DECLINE_TEXT` in `.env`. The invitation should
+remain a yes/no offer. Fixed story audio and its streaming sentence chunks are
+pre-warmed locally; the chat model does not compose or extend this introduction.
+
+When no nearby face is present, her head searches gradually from side to side
+for a wider view (default yaw bounds **-35 to +35 degrees**, steps at most
+`FACE_TRACKING_MAX_STEP_DEG`, at least `GREETER_SCAN_INTERVAL_S` apart).
+She settles on the largest/closest face when found. Head scanning/tracking and
+arm gestures pause during speaking, recording, listening, or other owned
+motions; a wave accompanies only the greeter's own hello. Movement also requires
+fresh safe battery telemetry and no active hazard/bump. She never drives the
+treads for this mode. Camera use stops on mute, movement, charging, reboot,
+errors, or shutdown; an already-started HTTP snapshot may finish.
+
+Greetings are latched for a face-presence session, not individual crowd tracking:
+short detection gaps do not repeat the hello. A sustained empty view re-arms
+the next greeting. Frames are processed locally, discarded, and never enrolled
+or saved automatically. Detection hysteresis, head limits, polling, greetings,
+and sweep bounds are configured in `.env.example` (`FACE_TRACKING_*`,
+`FACE_GREETING_*`, `GREETER_SCAN_*`).
+
+Local API control (default controller port 5001):
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:5001/api/greeter -Method Post -ContentType application/json -Body '{"enabled":true}'
+Invoke-RestMethod http://127.0.0.1:5001/api/greeter -Method Post -ContentType application/json -Body '{"enabled":false}'
+Invoke-RestMethod http://127.0.0.1:5001/api/status
+```
+
+Status exposes `greeter_mode` and `face_tracking.camera_active`. The tracker
+worker may remain `active` while Greeter Mode is off, but it captures no frames.
+
+### On-demand object detection
+
+Ask **"What do you see?"**, **"What objects can you see?"**, **"Describe your
+surroundings"**, or **"Look around"**. The Windows controller requests **one
+small JPEG** from Misty's RGB camera and runs **YOLOX-s on the laptop CPU**.
+Misty speaks a short, uncertain description directly from validated COCO
+categories and estimated counts, without waiting for Phi. Streaming replies
+use at most two categories per audio chunk so playback can start sooner.
+Neither Phi nor any cloud model receives or interprets the image.
+This supports 80 common categories such as person, cup, bottle, chair and dog,
+not arbitrary scene understanding, text reading, color recognition or identifying
+people by name. Small, occluded or unsupported objects may be missed.
+
+From the repository root:
+
+```powershell
+python tools\setup_object_detection.py
+```
+
+This explicitly downloads the approximately 36 MB
+[Apache-2.0 OpenCV Zoo YOLOX-s model](https://github.com/opencv/opencv_zoo/tree/0b263e423d012606b83d1f81238d11c177da2b9c/models/object_detection_yolox),
+pinned to a known revision and verified by SHA-256. Inference uses the existing
+OpenCV/NumPy dependencies; the runtime never downloads models automatically.
+Set `USE_OBJECT_DETECTION=true` in `src\windows-orchestration\.env` and restart
+**both** services. `OBJECT_DETECTOR_MODEL_PATH` optionally overrides the
+repo-relative default under `models`.
+
+Object detection is off by default and runs only for explicit visual questions,
+including follow-ups such as **"What else can you see?"** or
+**"You don't see anything else?"**, in either buffered or streaming conversation
+mode. Initial visual questions take one stationary snapshot. Explicit
+**"what else"/"anything else"** follow-ups take two fresh views with a bounded
+**head-only** look left and right (yaw +/-35 degrees), then face forward.
+The head settles for 1.5 seconds at each pose; this adds travel time to follow-up
+replies. Repeated initial questions and the manual probe below remain stationary.
+The scan runs only during safe processing, with recent battery telemetry above
+the movement thresholds and no active hazards. It pauses other head gestures
+and aborts on mute, shutdown or an unsafe state; it does not re-center after
+safety cancellation. Repeated objects are merged by category using the maximum
+count in either view, not summed across views.
+It does not start continuous scanning, move the base, or enable face tracking
+or identity recognition. Neither the robot nor the laptop saves these photos,
+and no images are uploaded to a cloud service. Camera facts apply to the
+current turn only. Capture/model failures are logged and Misty will
+say she cannot inspect the camera, rather than invent a view.
+
+All Misty-camera consumers now explicitly request `MISTY_CAMERA_WIDTH=320`,
+`MISTY_CAMERA_HEIGHT=240` with `MISTY_CAMERA_TIMEOUT_S=8.0`. Request both
+dimensions together; the firmware may return a portrait-oriented 240x320 JPEG.
+Captures from face tracking, recognition and object detection share a per-robot
+lock in the controller so their camera requests cannot overlap.
+Use 640x480 if more detail is needed, at the cost of transfer/processing time.
+The legacy `FACE_RECOGNITION_TIMEOUT_S` does not override this camera timeout.
+`OBJECT_DETECTION_CONFIDENCE=0.45` controls the minimum combined detection score.
+
+For a stationary, metadata-only probe with the controller running:
+
+```powershell
+Invoke-RestMethod -Method Post http://127.0.0.1:5001/api/vision/detect
+```
+
+This new endpoint accepts loopback clients only and refuses capture while the
+controller is muted. A successful empty list means no supported objects passed
+the confidence threshold, not that the room is empty. Missing models, capture
+failures, or a disabled feature return an explicit error. Keep
+`CONTROLLER_API_PORT` consistent between both services; the orchestration
+callback allows `OBJECT_DETECTION_TIMEOUT_S=30.0` for capture and CPU inference.
 
 ---
 
@@ -515,6 +706,11 @@ including audio routing, variable substitution, gesture annotations, live
 controls, and configuration.
 
 ---
+
+Prompt budgets trim older conversation messages first, then persona text if needed.
+Grounding, speaker-identity instructions, and the latest user turn are preserved.
+If those cannot fit, the request fails explicitly; increase `MAX_CONTEXT_CHARS` or
+`MAX_CONTEXT_TOKENS`. Set either limit to `0` to disable that individual budget.
 
 ## Testing
 

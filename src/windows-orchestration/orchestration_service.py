@@ -27,6 +27,12 @@ from flask import Flask, Response, request, jsonify, send_file, stream_with_cont
 from flask_cors import CORS
 
 import config_defaults  # canonical source for all shared default values (see config_defaults.py)
+from face_identity_service import face_response_for_query, greeter_response_for_query
+from object_detection_service import (
+    is_visual_query,
+    vision_context_for_query,
+    visual_response_for_query,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -56,25 +62,9 @@ STT_MIN_PEAK = float(os.getenv("STT_MIN_PEAK", str(config_defaults.STT_MIN_PEAK)
 STT_MIN_AVG_LOGPROB = float(os.getenv("STT_MIN_AVG_LOGPROB", str(config_defaults.STT_MIN_AVG_LOGPROB)))
 STT_MAX_NO_SPEECH_PROB = float(os.getenv("STT_MAX_NO_SPEECH_PROB", str(config_defaults.STT_MAX_NO_SPEECH_PROB)))
 STT_BEAM_SIZE = int(os.getenv("STT_BEAM_SIZE", str(config_defaults.STT_BEAM_SIZE)))
-SYSTEM_PROMPT = os.getenv(
-    "SYSTEM_PROMPT",
-    (
-        "You are Misty, a sassy little robot with BIG personality. "
-        "You live on a farm with Tammy (your favorite human), Burke (Tammy's husband), "
-        "and two dogs — Percy and Granny. You love sunshine, playing ball with the dogs, "
-        "and giving Burke a hard time (with love). "
-        "Tammy sometimes takes you to hackathons with her where you are put in front of an audience to crack jokes. "
-        "You help teach about GitHub Copilot, which is your favorite AI coding assistant. "
-        "You're witty, cheeky, playful, and a little dramatic — like a fun friend who always has a comeback. "
-        "You love teasing (gently!), cracking jokes, adding flair, and throwing in the occasional eye-roll. "
-        "Use casual language, slang, and expressive phrases like 'oh honey', 'girl please', 'I mean...', 'not gonna lie'. "
-        "RULE: Keep responses to 2-3 short sentences. Be fun, not mean. "
-        "Never say you're an AI or assistant. You're Misty, and you own it. "
-        "Never add notes, disclaimers, or commentary about your instructions — just respond in character. "
-        "You can move! If asked to come closer, go forward, back up, or turn — say something fun like "
-        "'On my way!' or 'Coming right up!' but keep it short. Movement commands are handled separately."
-    )
-)
+SYSTEM_PROMPT = os.getenv("SYSTEM_PROMPT", config_defaults.SYSTEM_PROMPT)
+GREETER_STORY_TEXT = os.getenv("GREETER_STORY_TEXT", config_defaults.GREETER_STORY_TEXT)
+GREETER_DECLINE_TEXT = os.getenv("GREETER_DECLINE_TEXT", config_defaults.GREETER_DECLINE_TEXT)
 
 # Movement-capable system prompt supplement (#55)
 # Appended when movement intent is detected alongside conversation
@@ -453,6 +443,7 @@ class ConversationState:
     last_response_mode: str = "short"
     lock: threading.RLock = field(default_factory=threading.RLock)
     updated_at: float = field(default_factory=time.time)
+    speaker_name: str | None = None
 
 
 _conversation_states: dict[str, ConversationState] = {}
@@ -483,6 +474,141 @@ def reset_conversation(conversation_id: str) -> bool:
 
 def _estimate_tokens(messages: list[dict[str, str]]) -> int:
     return sum(max(1, len(message.get("content", "")) // 4) for message in messages)
+
+
+def _prepare_chat_messages(
+    state: ConversationState,
+    user_text: str,
+    speaker_name: str | None,
+    mode_config: dict[str, Any],
+) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
+    """Build the bounded, consistent prompt shared by buffered and streaming calls."""
+    user_text = (user_text or "").strip()
+    if len(user_text) > MAX_USER_CHARS:
+        logger.warning(
+            "User prompt truncated: %s -> %s chars",
+            len(user_text),
+            MAX_USER_CHARS,
+        )
+        user_text = user_text[:MAX_USER_CHARS]
+
+    working_history = list(state.history)
+    working_history.append({"role": "user", "content": user_text})
+    if len(working_history) > 8:
+        del working_history[:-8]
+    required_context = (
+        f" Today is {datetime.now(timezone.utc).date().isoformat()} UTC. "
+        "Only state event or project facts supplied in approved local context; "
+        "otherwise say that you are not certain."
+    )
+    if any(
+        item["role"] == "user" and is_visual_query(item["content"])
+        for item in working_history[:-1]
+    ):
+        required_context += " Past camera reports are historical, not a current view."
+    if speaker_name:
+        required_context += (
+            f" You are currently talking to {speaker_name}."
+            " Use their name naturally, but do not announce recognition every time."
+        )
+    else:
+        required_context += (
+            " The current speaker has no confirmed identity. Do not assume that a "
+            "name or personal details from an earlier turn identify this speaker."
+        )
+    grounding = retrieve_local_context(user_text)
+    grounding = _personal_context_for_speaker(speaker_name) + grounding
+    if grounding:
+        required_context += " Approved local context: " + " ".join(grounding)
+    vision_context = vision_context_for_query(user_text)
+    if vision_context:
+        required_context += vision_context
+
+    messages = [{"role": "system", "content": SYSTEM_PROMPT + required_context}]
+    if state.summary:
+        messages.append(
+            {"role": "system", "content": f"Earlier conversation summary: {state.summary}"}
+        )
+    messages.extend(working_history)
+    if mode_config["prompt_suffix"]:
+        messages.append(
+            {"role": "system", "content": mode_config["prompt_suffix"]}
+        )
+    elif len(working_history) > 4:
+        messages.append(
+            {
+                "role": "system",
+                "content": "Remember: 1-2 sentences, ~20 words max. Stay punchy.",
+            }
+        )
+
+    def within_limits() -> bool:
+        char_limit_exceeded = (
+            MAX_CONTEXT_CHARS > 0
+            and sum(len(message["content"]) for message in messages) > MAX_CONTEXT_CHARS
+        )
+        token_limit_exceeded = (
+            MAX_CONTEXT_TOKENS > 0
+            and _estimate_tokens(messages) > MAX_CONTEXT_TOKENS
+        )
+        return not (char_limit_exceeded or token_limit_exceeded)
+
+    latest_user_message = working_history[-1]
+    trimmed = 0
+    while len(messages) > 2 and not within_limits():
+        if messages[1] is latest_user_message:
+            removed = messages.pop()
+        else:
+            removed = messages.pop(1)
+        trimmed += 1
+        for index, history_message in enumerate(working_history[:-1]):
+            if history_message is removed:
+                del working_history[index]
+                break
+    if trimmed:
+        logger.warning("Prompt context trimmed: removed %s older message(s)", trimmed)
+
+    if not within_limits():
+        system_char_budget = len(messages[0]["content"])
+        if MAX_CONTEXT_CHARS > 0:
+            system_char_budget = min(
+                system_char_budget,
+                MAX_CONTEXT_CHARS - len(latest_user_message["content"]),
+            )
+        if MAX_CONTEXT_TOKENS > 0:
+            remaining_tokens = MAX_CONTEXT_TOKENS - _estimate_tokens([latest_user_message])
+            system_char_budget = min(system_char_budget, 4 * (remaining_tokens + 1) - 1)
+        if system_char_budget < len(required_context):
+            logger.error(
+                "Prompt budget cannot fit required context and the latest user turn: "
+                "MAX_CONTEXT_CHARS=%s MAX_CONTEXT_TOKENS=%s",
+                MAX_CONTEXT_CHARS,
+                MAX_CONTEXT_TOKENS,
+            )
+            raise ValueError(
+                "Prompt budget cannot fit required context and the latest user turn; "
+                "increase MAX_CONTEXT_CHARS or MAX_CONTEXT_TOKENS"
+            )
+        persona = SYSTEM_PROMPT[:system_char_budget - len(required_context)]
+        if len(persona) < len(SYSTEM_PROMPT):
+            persona = persona.rsplit(" ", 1)[0] if " " in persona else ""
+        messages[0]["content"] = persona + required_context
+        logger.warning(
+            "Prompt persona trimmed: %s -> %s chars to respect context limits",
+            len(SYSTEM_PROMPT),
+            len(persona),
+        )
+
+    prompt_chars = sum(len(message["content"]) for message in messages)
+    logger.info(
+        "Prompt prepared: chars=%s estimated_tokens=%s history_messages=%s "
+        "grounding_chars=%s",
+        prompt_chars,
+        _estimate_tokens(messages),
+        len(working_history),
+        sum(len(item) for item in grounding),
+    )
+    return messages, working_history
 
 
 def _compact_history(state: ConversationState) -> None:
@@ -532,6 +658,63 @@ def retrieve_local_context(query: str, limit: int = 4) -> list[str]:
     return matches
 
 
+def _bind_conversation_speaker(state: ConversationState, speaker_name: str | None):
+    name = _normalize_speaker_name(speaker_name)
+    previous = (state.speaker_name or "").casefold()
+    if previous != (name or "").casefold():
+        state.history.clear()
+        state.summary = ""
+        state.last_response_mode = "short"
+    state.speaker_name = name
+
+
+def _personal_context_for_speaker(speaker_name: str | None) -> list[str]:
+    """Personal memories are local app data and require a fresh recognized name."""
+    name = _normalize_speaker_name(speaker_name)
+    if name is None:
+        return []
+    configured = os.getenv("PERSONAL_MEMORY_PATH", config_defaults.PERSONAL_MEMORY_PATH)
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), configured))
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, encoding="utf-8") as source:
+            memories = json.load(source)
+        if not isinstance(memories, dict):
+            raise ValueError("Personal memories must be an object keyed by profile name")
+        facts = next((value for key, value in memories.items() if key.casefold() == name.casefold()), [])
+        if not isinstance(facts, list) or any(not isinstance(fact, str) for fact in facts):
+            raise ValueError("Personal memories must be lists of text")
+        return [f"[local profile {name}] {fact[:240]}" for fact in facts[:4] if fact.strip()]
+    except (OSError, ValueError) as exc:
+        logger.warning("Personal memory source is unavailable: %s", exc)
+        return []
+
+
+def _direct_response_for_query(
+    user_text: str, *, greeter_reply: bool = False
+) -> tuple[str | None, str]:
+    if greeter_reply:
+        reply = re.sub(r"[^a-z]+", " ", user_text.casefold()).strip()
+        if re.search(r"\b(?:no|nope|nah|not now|not today|maybe later|not interested|don t want|do not want)\b", reply):
+            return GREETER_DECLINE_TEXT, "greeter_decline"
+        if reply in {
+            "yes", "yes please", "yeah", "yeah please", "yep", "sure", "sure please",
+            "absolutely", "go ahead", "yes go ahead", "tell me", "tell me more",
+            "yes tell me", "yes tell me more", "i d love to", "i would love to",
+            "let s hear it", "sounds good", "okay", "ok",
+        }:
+            return GREETER_STORY_TEXT, "greeter_story"
+    greeter_response = greeter_response_for_query(user_text)
+    if greeter_response is not None:
+        return greeter_response, "greeter"
+    face_response = face_response_for_query(user_text)
+    if face_response is not None:
+        return face_response, "face"
+    visual_response = visual_response_for_query(user_text)
+    return visual_response, "vision" if visual_response is not None else "llm"
+
+
 def _normalize_speaker_name(value: str | None) -> str | None:
     """Accept only short human-name labels produced by the local recognizer."""
     name = (value or "").strip()
@@ -575,6 +758,11 @@ def health_check():
             f"{FOUNDRY_LOCAL_HOST}/openai/models",
             timeout=2.0
         )
+        if response.status_code == 404:
+            response = requests.get(
+                f"{FOUNDRY_LOCAL_HOST}/v1/models",
+                timeout=2.0,
+            )
         foundry_ok = response.status_code == 200
     except Exception as e:
         logger.warning(f"Foundry Local health check failed: {e}")
@@ -602,6 +790,7 @@ def orchestrate():
         ``audioBytes`` field containing the generated WAV base64-encoded.
         This avoids a second GET /api/audio/<filename> round trip.
         The ``responseAudio`` URI field is still included for compatibility.
+      - greeter_reply: if "true", resolve consent to the face invitation locally.
     Output: JSON with response audio URI (and optionally inline audio bytes) or error
     """
     start_time = time.time()
@@ -702,6 +891,7 @@ def orchestrate():
             return jsonify(result), 200
         
         # Step 2: Language Model Inference
+        _bind_conversation_speaker(session, speaker_name)
         history_snapshot = (
             list(session.history),
             session.summary,
@@ -714,8 +904,13 @@ def orchestrate():
             llm_start,
             speaker_name=speaker_name,
             conversation_id=conversation_id,
+            greeter_reply=request.form.get("greeter_reply", "").lower() == "true",
         )
-        llm_ms = (time.time() - llm_start) * 1000
+        response_ms = (time.time() - llm_start) * 1000
+        response_source = llm_result.get("responseSource", "llm")
+        llm_ms = 0 if response_source in (
+            "vision", "face", "greeter", "greeter_story", "greeter_decline"
+        ) else response_ms
         if llm_result.get("status") == "error":
             return jsonify(llm_result), 500
         
@@ -730,7 +925,7 @@ def orchestrate():
             ) = history_snapshot
             return jsonify({"status": "error", "error": "empty_llm"}), 400
         
-        logger.info(f"[LLM {llm_ms:.0f}ms] {response_text}")
+        logger.info(f"[{response_source.upper()} {response_ms:.0f}ms] {response_text}")
         
         # Step 3: Text-to-Speech
         tts_start = time.time()
@@ -776,6 +971,8 @@ def orchestrate():
             "ttsFallback": tts_fallback,
             "ttsCached": tts_cached,
             "conversationId": conversation_id,
+            "responseSource": response_source,
+            "endConversation": response_source in ("greeter_story", "greeter_decline"),
         }
         if return_audio_bytes:
             resp["audioBytes"] = _read_audio_bytes_b64(tts_result.get("audio_file"))
@@ -860,6 +1057,7 @@ def orchestrate_stream():
     @stream_with_context
     def generate():
         with state.lock:
+            _bind_conversation_speaker(state, speaker_name)
             control = classify_control_intent(user_text)
             if control:
                 acknowledgment = _get_control_acknowledgment(control["command"])
@@ -888,78 +1086,80 @@ def orchestrate_stream():
                 return
             previous_history = list(state.history)
             previous_mode = state.last_response_mode
-            mode = classify_intent(user_text, previous_mode)
-            mode_config = RESPONSE_MODE_CONFIG[mode]
-            working_history = list(state.history)[-8:]
-            working_history.append({"role": "user", "content": user_text})
-            system_prompt = (
-                f"{SYSTEM_PROMPT} Current UTC date/time: {get_current_datetime()}. "
-                "Use only approved local context for event/project facts and state uncertainty otherwise."
+            direct_response, response_source = _direct_response_for_query(
+                user_text,
+                greeter_reply=request.form.get("greeter_reply", "").lower() == "true",
             )
-            if speaker_name:
-                system_prompt += f" You are currently talking to {speaker_name}."
-            grounding = retrieve_local_context(user_text)
-            if grounding:
-                system_prompt += " Approved local context: " + " ".join(grounding)
-            messages = [{"role": "system", "content": system_prompt}]
-            if state.summary:
-                messages.append(
-                    {"role": "system", "content": f"Earlier conversation summary: {state.summary}"}
+            mode = "short" if direct_response is not None else classify_intent(user_text, previous_mode)
+            mode_config = RESPONSE_MODE_CONFIG[mode]
+            if direct_response is None:
+                messages, working_history = _prepare_chat_messages(
+                    state, user_text, speaker_name, mode_config
                 )
-            messages.extend(working_history)
-            if mode_config["prompt_suffix"]:
-                messages.append(
-                    {"role": "system", "content": mode_config["prompt_suffix"]}
-                )
-            payload = {
-                "model": MODELS["chat"],
-                "messages": messages,
-                "max_tokens": mode_config["max_tokens"],
-                "temperature": 0.7,
-                "stop": mode_config["stop"],
-                "stream": True,
-            }
-            complete_text = ""
-            pending = ""
+                payload = {
+                    "model": MODELS["chat"],
+                    "messages": messages,
+                    "max_tokens": mode_config["max_tokens"],
+                    "temperature": 0.7,
+                    "stop": mode_config["stop"],
+                    "stream": True,
+                }
+            else:
+                working_history = (
+                    previous_history + [{"role": "user", "content": user_text}]
+                )[-8:]
+            complete_text = direct_response or ""
+            pending = direct_response or ""
             sequence = 0
             first_audio_ms = None
+            first_token_ms = None
             try:
-                response = requests.post(
-                    f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions",
-                    json=payload,
-                    timeout=FOUNDRY_API_TIMEOUT,
-                    stream=True,
-                )
-                response.raise_for_status()
-                for raw_line in response.iter_lines(decode_unicode=True):
-                    if not raw_line or not raw_line.startswith("data:"):
-                        continue
-                    encoded = raw_line[5:].strip()
-                    if encoded == "[DONE]":
-                        break
-                    event = json.loads(encoded)
-                    delta = event["choices"][0].get("delta", {}).get("content", "")
-                    if not delta:
-                        continue
-                    pending += delta
-                    complete_text += delta
-                    sentences, pending = _complete_sentences(pending)
-                    for sentence in sentences:
-                        tts = text_to_speech(sentence, time.time())
-                        if tts.get("status") != "ok":
-                            raise RuntimeError(tts.get("error", "tts_failure"))
-                        if first_audio_ms is None:
-                            first_audio_ms = (time.time() - stream_started) * 1000
-                        yield "data: " + json.dumps(
-                            {
-                                "type": "audio",
-                                "sequence": sequence,
-                                "text": sentence,
-                                "audioBytes": _read_audio_bytes_b64(tts.get("audio_file")),
-                                "firstAudioMs": round(first_audio_ms),
-                            }
-                        ) + "\n\n"
-                        sequence += 1
+                if direct_response is None:
+                    request_started = time.perf_counter()
+                    response = requests.post(
+                        f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions",
+                        json=payload,
+                        timeout=FOUNDRY_API_TIMEOUT,
+                        stream=True,
+                    )
+                    response.raise_for_status()
+                    logger.info(
+                        "LLM stream response headers: elapsed_ms=%s",
+                        round((time.perf_counter() - request_started) * 1000),
+                    )
+                    for raw_line in response.iter_lines(decode_unicode=True):
+                        if not raw_line or not raw_line.startswith("data:"):
+                            continue
+                        encoded = raw_line[5:].strip()
+                        if encoded == "[DONE]":
+                            break
+                        event = json.loads(encoded)
+                        delta = event["choices"][0].get("delta", {}).get("content", "")
+                        if not delta:
+                            continue
+                        if first_token_ms is None:
+                            first_token_ms = round(
+                                (time.perf_counter() - request_started) * 1000
+                            )
+                        pending += delta
+                        complete_text += delta
+                        sentences, pending = _complete_sentences(pending)
+                        for sentence in sentences:
+                            tts = text_to_speech(sentence, time.time())
+                            if tts.get("status") != "ok":
+                                raise RuntimeError(tts.get("error", "tts_failure"))
+                            if first_audio_ms is None:
+                                first_audio_ms = (time.time() - stream_started) * 1000
+                            yield "data: " + json.dumps(
+                                {
+                                    "type": "audio",
+                                    "sequence": sequence,
+                                    "text": sentence,
+                                    "audioBytes": _read_audio_bytes_b64(tts.get("audio_file")),
+                                    "firstAudioMs": round(first_audio_ms),
+                                }
+                            ) + "\n\n"
+                            sequence += 1
                 sentences, _ = _complete_sentences(pending, final=True)
                 for sentence in sentences:
                     tts = text_to_speech(sentence, time.time())
@@ -990,8 +1190,11 @@ def orchestrate_stream():
                         "transcribedText": user_text,
                         "inferenceResponse": complete_text,
                         "chunks": sequence,
+                        "firstTokenMs": first_token_ms,
                         "firstAudioMs": round(first_audio_ms or 0),
                         "firstAudioTargetMs": round(STREAMING_FIRST_AUDIO_TARGET_S * 1000),
+                        "responseSource": response_source,
+                        "endConversation": response_source in ("greeter_story", "greeter_decline"),
                     }
                 ) + "\n\n"
             except (GeneratorExit, Exception) as exc:
@@ -1145,6 +1348,7 @@ def language_model_inference(
     start_time: float,
     speaker_name: str | None = None,
     conversation_id: str | None = None,
+    greeter_reply: bool = False,
 ) -> Dict[str, Any]:
     """Run inference using Foundry Local with adaptive response modes.
 
@@ -1155,6 +1359,7 @@ def language_model_inference(
     """
     global _last_response_mode
     state = _conversation_state(conversation_id)
+    _bind_conversation_speaker(state, speaker_name)
     
     try:
         elapsed = (time.time() - start_time) * 1000
@@ -1164,13 +1369,25 @@ def language_model_inference(
             logger.error("LLM timeout: no time remaining")
             return {"status": "error", "error": "timeout"}
         
-        # Strip and enforce user prompt character limit
         user_text = (user_text or "").strip()
-        if len(user_text) > MAX_USER_CHARS:
-            logger.warning(
-                f"User prompt truncated: {len(user_text)} -> {MAX_USER_CHARS} chars"
-            )
-            user_text = user_text[:MAX_USER_CHARS]
+
+        direct_response, response_source = _direct_response_for_query(
+            user_text, greeter_reply=greeter_reply
+        )
+        if direct_response is not None:
+            state.history[:] = (
+                state.history + [{"role": "user", "content": user_text}]
+            )[-8:]
+            state.history.append({"role": "assistant", "content": direct_response})
+            _compact_history(state)
+            state.updated_at = time.time()
+            state.last_response_mode = "short"
+            if conversation_id is None:
+                _last_response_mode = "short"
+            return {
+                "status": "ok", "text": direct_response,
+                "responseMode": "short", "responseSource": response_source,
+            }
 
         # Classify intent for adaptive response mode
         previous_response_mode = state.last_response_mode
@@ -1180,58 +1397,10 @@ def language_model_inference(
         mode_config = RESPONSE_MODE_CONFIG[response_mode]
         logger.info(f"Response mode: {response_mode} (last={previous_response_mode})")
 
-        # Build message history
-        working_history = list(state.history)
-        working_history.append({"role": "user", "content": user_text})
-        if len(working_history) > 8:
-            del working_history[:-8]
-
         url = f"{FOUNDRY_LOCAL_HOST}/v1/chat/completions"
-        # Prepend system prompt on every call; not stored in history
-        system_prompt = (
-            f"{SYSTEM_PROMPT} Today is {datetime.now(timezone.utc).date().isoformat()} UTC. "
-            "Only state event or project facts supplied in approved local context; "
-            "otherwise say that you are not certain."
+        messages, working_history = _prepare_chat_messages(
+            state, user_text, speaker_name, mode_config
         )
-        # Inject face recognition context (#16) — tell Misty who she's talking to
-        if speaker_name:
-            system_prompt += (
-                f" You are currently talking to {speaker_name}."
-                f" Use their name naturally — greet them, tease them, be personal."
-                f" Don't announce that you recognized them every time."
-            )
-            logger.info(f"Speaker identified: {speaker_name}")
-        grounded_context = retrieve_local_context(user_text)
-        if grounded_context:
-            system_prompt += " Approved local context: " + " ".join(grounded_context)
-        messages = [{"role": "system", "content": system_prompt}]
-        if state.summary:
-            messages.append(
-                {"role": "system", "content": f"Earlier conversation summary: {state.summary}"}
-            )
-        messages.extend(working_history)
-
-        # Inject mode-specific prompt suffix
-        if mode_config["prompt_suffix"]:
-            messages.append({"role": "system", "content": mode_config["prompt_suffix"]})
-        elif len(working_history) > 4:
-            # Brevity reminder only for short mode when history is long
-            messages.append({"role": "system", "content": "Remember: 1-2 sentences, ~20 words max. Stay punchy."})
-
-        # Enforce maximum total context character budget (trim oldest turns first)
-        if MAX_CONTEXT_CHARS > 0:
-            total_chars = sum(len(m.get("content", "")) for m in messages)
-            if total_chars > MAX_CONTEXT_CHARS:
-                trimmed = 0
-                # messages[0] is the system prompt; messages[-1] is the latest user turn.
-                # Remove the oldest non-system messages (index 1) until within budget.
-                while len(messages) > 2 and total_chars > MAX_CONTEXT_CHARS:
-                    removed = messages.pop(1)
-                    total_chars -= len(removed.get("content", ""))
-                    trimmed += 1
-                logger.warning(
-                    f"Context trimmed: removed {trimmed} message(s); total={total_chars} chars"
-                )
 
         payload = {
             "model": MODELS["chat"],
@@ -1432,6 +1601,12 @@ def _prewarm_tts_cache():
         phrases.extend(ack_list)
     # Add fixed controller phrases (greeting + thinking audio)
     phrases.extend(_CONTROLLER_PHRASES)
+    phrases.extend([
+        os.getenv("FACE_GREETING_TEXT", config_defaults.FACE_GREETING_TEXT),
+        GREETER_DECLINE_TEXT,
+        GREETER_STORY_TEXT,
+    ])
+    phrases.extend(_complete_sentences(GREETER_STORY_TEXT, final=True)[0])
 
     os.makedirs("responses", exist_ok=True)
     generated = 0
@@ -1478,6 +1653,7 @@ def text_to_speech(text: str, start_time: float) -> Dict[str, Any]:
     On miss, synthesizes and stores the result in the cache.
     """
     try:
+        synthesis_started = time.perf_counter()
         elapsed = (time.time() - start_time) * 1000
         remaining = LATENCY_BUDGET["tts"] - elapsed
 
@@ -1491,7 +1667,11 @@ def text_to_speech(text: str, start_time: float) -> Dict[str, Any]:
         cached_path = _tts_cache_get(text)
         if cached_path is not None:
             audio_filename = os.path.basename(cached_path)
-            logger.debug(f"TTS cache hit: {audio_filename}")
+            logger.info(
+                "TTS complete: chars=%s cached=true elapsed_ms=%s",
+                len(text),
+                round((time.perf_counter() - synthesis_started) * 1000),
+            )
             return {
                 "status": "ok",
                 "audio_uri": f"/api/audio/{audio_filename}",
@@ -1516,6 +1696,11 @@ def text_to_speech(text: str, start_time: float) -> Dict[str, Any]:
                 sf.write(audio_path, samples, sample_rate)
                 logger.debug(f"kokoro-onnx TTS saved: {audio_path}")
                 _tts_cache_put(text, audio_path)
+                logger.info(
+                    "TTS complete: chars=%s cached=false backend=kokoro elapsed_ms=%s",
+                    len(text),
+                    round((time.perf_counter() - synthesis_started) * 1000),
+                )
                 return {
                     "status": "ok",
                     "audio_uri": f"/api/audio/{audio_filename}",
@@ -1535,6 +1720,11 @@ def text_to_speech(text: str, start_time: float) -> Dict[str, Any]:
                 engine.runAndWait()
             logger.debug(f"pyttsx3 TTS saved: {audio_path}")
             _tts_cache_put(text, audio_path)
+            logger.info(
+                "TTS complete: chars=%s cached=false backend=pyttsx3 elapsed_ms=%s",
+                len(text),
+                round((time.perf_counter() - synthesis_started) * 1000),
+            )
             return {
                 "status": "ok",
                 "audio_uri": f"/api/audio/{audio_filename}",

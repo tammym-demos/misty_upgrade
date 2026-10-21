@@ -13,6 +13,7 @@ import sys
 import os
 from unittest.mock import patch, MagicMock
 
+import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "windows-orchestration"))
 
 from face_animator import (
@@ -132,6 +133,11 @@ class TestDisabledIdentityAndFallback:
 
 class TestEnsureFaceAssetsSyncMode:
     """ensure_face_assets() respects missing vs overwrite sync mode (#116)."""
+
+    @pytest.fixture(autouse=True)
+    def custom_faces_enabled(self):
+        with patch("misty_controller.USE_CUSTOM_FACES", True):
+            yield
 
     def _make_controller(self):
         import misty_controller

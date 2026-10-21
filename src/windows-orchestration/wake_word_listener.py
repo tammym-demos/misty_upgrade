@@ -60,6 +60,9 @@ LAPTOP_MIC_DEVICE = (
     if _LAPTOP_MIC_DEVICE_RAW.isdigit()
     else (_LAPTOP_MIC_DEVICE_RAW or None)
 )
+LAPTOP_MIC_HOST_API = os.getenv(
+    "LAPTOP_MIC_HOST_API", config_defaults.LAPTOP_MIC_HOST_API
+).strip()
 SAMPLE_RATE = 16000       # openWakeWord native rate
 FRAME_SAMPLES = 1280      # 80ms at 16kHz — openWakeWord's expected frame size
 BLOCK_SIZE = 1280          # match frame size for 1:1 callback-to-frame ratio
@@ -95,7 +98,12 @@ if RESUME_COOLDOWN_S < 0:
 SPEECH_RMS_THRESHOLD = int(
     os.getenv("SPEECH_RMS_THRESHOLD", str(config_defaults.SPEECH_RMS_THRESHOLD))
 )
-SPEECH_SILENCE_DURATION_S = float(os.getenv("SPEECH_SILENCE_DURATION_S", "1.5"))
+SPEECH_SILENCE_DURATION_S = float(
+    os.getenv(
+        "SPEECH_SILENCE_DURATION_S",
+        str(config_defaults.SPEECH_SILENCE_DURATION_S),
+    )
+)
 SPEECH_MIN_DURATION_S = float(
     os.getenv("SPEECH_MIN_DURATION_S", str(config_defaults.RECORDING_DURATION_S))
 )
@@ -104,6 +112,85 @@ SPEECH_NO_SPEECH_TIMEOUT_S = float(os.getenv("SPEECH_NO_SPEECH_TIMEOUT_S", "4.0"
 
 # Health monitoring
 MAX_CONSECUTIVE_ERRORS = 10
+
+
+def _resolve_input_device(sd_module) -> tuple[int, str, str]:
+    """Resolve a configured microphone name or index to one input device."""
+    devices = sd_module.query_devices()
+    configured = LAPTOP_MIC_DEVICE
+    if configured is None:
+        default_device = sd_module.query_devices(kind="input")
+        default_name = str(default_device.get("name", ""))
+        matches = [
+            (index, device)
+            for index, device in enumerate(devices)
+            if device.get("name") == default_name
+            and int(device.get("hostapi", -1)) == int(default_device["hostapi"])
+            and int(device.get("max_input_channels", 0)) > 0
+        ]
+    elif isinstance(configured, int):
+        if configured < 0 or configured >= len(devices):
+            raise ValueError(
+                f"LAPTOP_MIC_DEVICE index {configured} is unavailable; "
+                "select an available input device or configure its name."
+            )
+        device = devices[configured]
+        if int(device.get("max_input_channels", 0)) <= 0:
+            raise ValueError(
+                f"LAPTOP_MIC_DEVICE index {configured} is not an input device."
+            )
+        matches = [(configured, device)]
+    else:
+        device_name = configured.casefold()
+        matches = [
+            (index, device)
+            for index, device in enumerate(devices)
+            if device_name in str(device.get("name", "")).casefold()
+            and int(device.get("max_input_channels", 0)) > 0
+        ]
+        if LAPTOP_MIC_HOST_API:
+            matches = [
+                (index, device)
+                for index, device in matches
+                if str(
+                    sd_module.query_hostapis(int(device["hostapi"]))["name"]
+                ).casefold()
+                == LAPTOP_MIC_HOST_API.casefold()
+            ]
+
+    if len(matches) != 1:
+        if not matches:
+            configured_description = (
+                repr(configured) if configured is not None else "the OS default"
+            )
+            host_api_description = (
+                f" on host API {LAPTOP_MIC_HOST_API!r}" if LAPTOP_MIC_HOST_API else ""
+            )
+            raise ValueError(
+                f"Could not resolve microphone {configured_description}"
+                f"{host_api_description}; check LAPTOP_MIC_DEVICE and "
+                "LAPTOP_MIC_HOST_API against the available input devices."
+            )
+        choices = ", ".join(
+            f"{index}: {device.get('name')} "
+            f"({sd_module.query_hostapis(int(device['hostapi']))['name']})"
+            for index, device in matches
+        )
+        raise ValueError(
+            f"Microphone setting is ambiguous; set LAPTOP_MIC_HOST_API. "
+            f"Matches: {choices}"
+        )
+
+    index, device = matches[0]
+    host_api = str(sd_module.query_hostapis(int(device["hostapi"]))["name"])
+    return index, str(device.get("name", "unknown input")), host_api
+
+
+def _input_stream_options(sd_module, host_api: str) -> dict:
+    """Allow WASAPI shared mode to convert device-native audio to 16 kHz."""
+    if host_api.casefold() == "windows wasapi":
+        return {"extra_settings": sd_module.WasapiSettings(auto_convert=True)}
+    return {}
 
 
 class WakeWordListener:
@@ -217,9 +304,6 @@ class WakeWordListener:
             logger.warning("Wake word listener already running")
             return True
 
-        if not self._init_model():
-            return False
-
         # Verify sounddevice is available
         try:
             import sounddevice as sd
@@ -227,6 +311,15 @@ class WakeWordListener:
             logger.error(
                 "sounddevice not installed. Install with: pip install sounddevice"
             )
+            return False
+
+        try:
+            device_index, device_name, host_api = _resolve_input_device(sd)
+        except Exception as e:
+            logger.error("Laptop microphone configuration is invalid: %s", e)
+            return False
+
+        if not self._init_model():
             return False
 
         self._running = True
@@ -250,14 +343,15 @@ class WakeWordListener:
                 blocksize=BLOCK_SIZE,
                 dtype="int16",
                 channels=1,
-                device=LAPTOP_MIC_DEVICE,
+                device=device_index,
                 callback=self._audio_callback,
+                **_input_stream_options(sd, host_api),
             )
             self._stream.start()
-            device_label = f"device={LAPTOP_MIC_DEVICE}" if LAPTOP_MIC_DEVICE is not None else "default device"
             logger.info(
                 f"Wake word listener started on laptop mic "
-                f"({device_label}, rate={SAMPLE_RATE}, block={BLOCK_SIZE})"
+                f"(device={device_index}, name={device_name!r}, host_api={host_api}, "
+                f"rate={SAMPLE_RATE}, block={BLOCK_SIZE})"
             )
             return True
         except Exception as e:

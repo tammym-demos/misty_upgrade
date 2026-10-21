@@ -18,9 +18,9 @@ Design goals
 - **Fail open.** Every public entry point raises a typed, catchable error so the
   controller can log a clear reason and continue the conversation without a
   ``speaker_name`` rather than crashing.
-- **Privacy first.** Only numeric face embeddings and metadata are persisted,
-  never source photos. Profile files live in a gitignored local directory and
-  user-supplied names cannot escape that directory.
+- **Privacy first.** Photos are saved only with explicit photo enrollment.
+  The reference JPEG and its face features share one gitignored local archive.
+  User-supplied names cannot escape that directory.
 
 Public API
 ----------
@@ -40,12 +40,19 @@ from __future__ import annotations
 
 import os
 import re
+import logging
+import tempfile
+import zipfile
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Callable, List, Optional, Sequence
 
 import numpy as np
+import config_defaults
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -80,6 +87,10 @@ class ProfileNameError(FaceRecognitionError, ValueError):
     """A profile name is empty, too long, or contains unsafe characters."""
 
 
+class ProfileExistsError(FaceRecognitionError):
+    """Explicit deletion is required before replacing a photo profile."""
+
+
 # ---------------------------------------------------------------------------
 # Types
 # ---------------------------------------------------------------------------
@@ -87,9 +98,9 @@ class ProfileNameError(FaceRecognitionError, ValueError):
 # A frame is a HxWx3 uint8 BGR image (OpenCV convention) as a numpy array.
 Frame = np.ndarray
 
-# Profile names: letters, digits, spaces, underscores and hyphens only. This
+# Profile names: letters, digits, spaces, apostrophes, underscores and hyphens. This
 # both prevents path traversal and keeps file names portable across OSes.
-_VALID_NAME_RE = re.compile(r"^[A-Za-z0-9 _-]{1,64}$")
+_VALID_NAME_RE = re.compile(r"^[A-Za-z0-9 '_-]{1,64}$")
 MAX_PROFILE_NAME_LEN = 64
 
 MODEL_NAME = "laptop-face-embedder"
@@ -101,7 +112,7 @@ def validate_profile_name(name: str) -> str:
 
     Rejects empty names, names longer than :data:`MAX_PROFILE_NAME_LEN`, path
     separators, ``..`` traversal, and any character outside
-    ``[A-Za-z0-9 _-]``. The returned name is stripped of surrounding
+    ``[A-Za-z0-9 '_-]``. The returned name is stripped of surrounding
     whitespace and is safe to use as a single-path-segment file stem.
     """
     if not isinstance(name, str):
@@ -119,7 +130,7 @@ def validate_profile_name(name: str) -> str:
         raise ProfileNameError("profile name must not contain '..'")
     if not _VALID_NAME_RE.match(stripped):
         raise ProfileNameError(
-            "profile name may only contain letters, digits, spaces, '_' and '-'"
+            "profile name may only contain letters, digits, spaces, apostrophes, '_' and '-'"
         )
     return stripped
 
@@ -128,7 +139,7 @@ def validate_profile_name(name: str) -> str:
 class FaceProfile:
     """An enrolled identity: its embeddings plus provenance metadata.
 
-    Only numeric embeddings and metadata are stored — never source imagery.
+    A reference JPEG is optional and requires explicit photo enrollment.
     """
 
     name: str
@@ -138,10 +149,17 @@ class FaceProfile:
     created_at: str = ""
     sample_count: int = 0
     embedding_dim: int = 0
+    reference_jpeg: Optional[np.ndarray] = None
 
     def __post_init__(self):
         self.embeddings = np.asarray(self.embeddings, dtype=np.float32)
-        if self.embeddings.ndim != 2 or self.embeddings.shape[0] == 0:
+        self.name = validate_profile_name(self.name)
+        if (
+            self.embeddings.ndim != 2
+            or 0 in self.embeddings.shape
+            or not np.isfinite(self.embeddings).all()
+            or np.any(np.linalg.norm(self.embeddings, axis=1) == 0)
+        ):
             raise FaceRecognitionError(
                 "profile embeddings must be a non-empty 2D array"
             )
@@ -149,6 +167,11 @@ class FaceProfile:
         self.embedding_dim = int(self.embeddings.shape[1])
         if not self.created_at:
             self.created_at = datetime.now(timezone.utc).isoformat()
+        if self.reference_jpeg is not None:
+            image = np.asarray(self.reference_jpeg)
+            if image.dtype != np.uint8 or image.ndim != 1 or image.size == 0:
+                raise FaceRecognitionError("reference JPEG must be a non-empty byte array")
+            self.reference_jpeg = image.copy()
 
     @property
     def mean_embedding(self) -> np.ndarray:
@@ -343,6 +366,7 @@ class OnnxFaceEmbedder(FaceEmbedder):
         self.detector_score_threshold = detector_score_threshold
         self._detector = None
         self._recognizer = None
+        self._lock = threading.Lock()
 
     def _ensure_loaded(self):
         if self._detector is not None and self._recognizer is not None:
@@ -377,6 +401,16 @@ class OnnxFaceEmbedder(FaceEmbedder):
             )
 
     def extract_embeddings(self, frame: Frame) -> List[np.ndarray]:  # pragma: no cover - needs cv2/models
+        with self._lock:
+            self._ensure_loaded()
+            import cv2
+
+            try:
+                return self._extract_embeddings(frame)
+            except cv2.error as exc:
+                raise FaceRecognitionError(f"Face inference failed: {exc}") from exc
+
+    def _extract_embeddings(self, frame: Frame) -> List[np.ndarray]:
         self._ensure_loaded()
         import cv2
 
@@ -429,22 +463,40 @@ class FaceProfileStore:
     def ensure_dir(self):
         os.makedirs(self.directory, exist_ok=True)
 
-    def save(self, profile: FaceProfile) -> str:
-        """Persist ``profile`` and return the file path."""
+    def save(self, profile: FaceProfile, *, replace: bool = True) -> str:
+        """Atomically persist the features and optional photo as one archive."""
         self.ensure_dir()
         path = self._safe_path(profile.name)
-        # ``path`` already ends with ``.npz``, so np.savez writes exactly this
-        # file (it only appends the suffix when missing).
-        np.savez(
-            path,
-            name=profile.name,
-            embeddings=profile.embeddings,
-            model_name=profile.model_name,
-            model_version=profile.model_version,
-            created_at=profile.created_at,
-            sample_count=profile.sample_count,
-            embedding_dim=profile.embedding_dim,
-        )
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=self.directory, prefix=".profile-", suffix=".npz", delete=False
+            ) as output:
+                temporary = output.name
+                np.savez_compressed(
+                    output, name=profile.name, embeddings=profile.embeddings,
+                    model_name=profile.model_name, model_version=profile.model_version,
+                    created_at=profile.created_at, sample_count=profile.sample_count,
+                    embedding_dim=profile.embedding_dim,
+                    reference_jpeg=(
+                        profile.reference_jpeg if profile.reference_jpeg is not None
+                        else np.empty(0, dtype=np.uint8)
+                    ),
+                )
+                output.flush()
+                os.fsync(output.fileno())
+            if replace:
+                os.replace(temporary, path)
+            else:
+                # A hard link publishes the complete archive without a check/write race.
+                os.link(temporary, path)
+        except FileExistsError as exc:
+            raise ProfileExistsError(f"A face profile for {profile.name!r} already exists") from exc
+        except OSError as exc:
+            raise FaceRecognitionError(f"Could not save face profile: {exc}") from exc
+        finally:
+            if temporary is not None and os.path.exists(temporary):
+                os.remove(temporary)
         return path
 
     def load(self, name: str) -> FaceProfile:
@@ -458,6 +510,10 @@ class FaceProfileStore:
                 model_name=str(data["model_name"]),
                 model_version=str(data["model_version"]),
                 created_at=str(data["created_at"]),
+                reference_jpeg=(
+                    np.asarray(data["reference_jpeg"], dtype=np.uint8)
+                    if "reference_jpeg" in data and data["reference_jpeg"].size else None
+                ),
             )
 
     def list_names(self) -> List[str]:
@@ -465,7 +521,7 @@ class FaceProfileStore:
             return []
         names = []
         for entry in sorted(os.listdir(self.directory)):
-            if entry.endswith(self.SUFFIX):
+            if entry.endswith(self.SUFFIX) and not entry.startswith("."):
                 names.append(entry[: -len(self.SUFFIX)])
         return names
 
@@ -474,8 +530,8 @@ class FaceProfileStore:
         for name in self.list_names():
             try:
                 profiles.append(self.load(name))
-            except Exception:
-                # Skip corrupt/foreign files rather than crash the recognizer.
+            except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile, FaceRecognitionError) as exc:
+                logger.warning("Cannot load local face profile %r: %s", name, exc)
                 continue
         return profiles
 
@@ -508,18 +564,22 @@ class FaceRecognizer:
         threshold: float = 0.4,
         min_samples: int = 5,
         min_consistent_frames: int = 2,
+        match_margin: float = 0.05,
     ):
-        if threshold <= 0:
+        if not np.isfinite(threshold) or threshold <= 0:
             raise ValueError("threshold must be > 0")
         if min_samples < 1:
             raise ValueError("min_samples must be >= 1")
         if min_consistent_frames < 1:
             raise ValueError("min_consistent_frames must be >= 1")
+        if not np.isfinite(match_margin) or match_margin < 0:
+            raise ValueError("match_margin must be finite and >= 0")
         self.store = store
         self.embedder = embedder
         self.threshold = float(threshold)
         self.min_samples = int(min_samples)
         self.min_consistent_frames = int(min_consistent_frames)
+        self.match_margin = float(match_margin)
         self._profiles: Optional[List[FaceProfile]] = None
 
     # --- profile access ---------------------------------------------------
@@ -528,8 +588,8 @@ class FaceRecognizer:
             self._profiles = self.store.load_all()
         return self._profiles
 
-    def save_profile(self, profile: FaceProfile) -> str:
-        path = self.store.save(profile)
+    def save_profile(self, profile: FaceProfile, *, replace: bool = True) -> str:
+        path = self.store.save(profile, replace=replace)
         self._profiles = None  # invalidate cache
         return path
 
@@ -560,33 +620,65 @@ class FaceRecognizer:
             raise MultipleFacesDetected(
                 f"{len(embeddings)} faces detected; exactly one is required"
             )
-        return _l2_normalize(np.asarray(embeddings[0], dtype=np.float32).ravel())
+        embedding = np.asarray(embeddings[0], dtype=np.float32).ravel()
+        if not embedding.size or not np.isfinite(embedding).all() or np.linalg.norm(embedding) == 0:
+            raise FaceRecognitionError("invalid face features")
+        return _l2_normalize(embedding)
 
     # --- enrollment -------------------------------------------------------
-    def enroll(self, name: str, frames: Sequence[Frame]) -> FaceProfile:
-        """Enroll ``name`` from ``frames``.
+    def enroll(
+        self, name: str, frames: Sequence[Frame], *,
+        save_reference_photo: bool = False, replace: bool = True,
+    ) -> FaceProfile:
+        """Enroll locally; saving an actual photo requires an explicit opt-in."""
+        profile = self.prepare_enrollment(
+            name, frames, save_reference_photo=save_reference_photo
+        )
+        self.save_profile(profile, replace=replace)
+        return profile
 
-        Each frame must contain exactly one detectable face. Frames with no
-        face, multiple faces, or embedding errors are skipped; if fewer than
-        :attr:`min_samples` valid embeddings remain, enrollment fails with a
-        :class:`FaceRecognitionError`.
-        """
+    def prepare_enrollment(
+        self, name: str, frames: Sequence[Frame], *, save_reference_photo: bool = False,
+    ) -> FaceProfile:
+        """Extract an enrollment without writing, allowing a final cancellation check."""
         safe_name = validate_profile_name(name)
         valid: List[np.ndarray] = []
         rejected = 0
         for frame in frames:
             try:
-                valid.append(self._single_face_embedding(frame))
+                embedding = self._single_face_embedding(frame)
+                if save_reference_photo and valid and cosine_distance(valid[0], embedding) > self.threshold:
+                    raise LowConfidence("The same person must remain alone in view")
+                valid.append(embedding)
             except FaceRecognitionError:
+                if save_reference_photo:
+                    raise
                 rejected += 1
         if len(valid) < self.min_samples:
             raise FaceRecognitionError(
                 f"only {len(valid)} valid face sample(s) captured for {safe_name!r}; "
                 f"need at least {self.min_samples} (rejected {rejected})"
             )
-        profile = FaceProfile(name=safe_name, embeddings=np.vstack(valid))
-        self.save_profile(profile)
-        return profile
+        reference_jpeg = None
+        if save_reference_photo:
+            try:
+                import cv2
+            except ImportError as exc:
+                raise FaceModelUnavailable("OpenCV is required to save a reference photo") from exc
+
+            frame = frames[0]
+            if frame.dtype != np.uint8 or frame.ndim != 3 or frame.shape[2] != 3:
+                raise FrameSourceError("reference photo must be a BGR camera image")
+            try:
+                ok, reference_jpeg = cv2.imencode(".jpg", frame)
+            except cv2.error as exc:
+                raise FrameSourceError(f"could not encode the reference photo: {exc}") from exc
+            if not ok:
+                raise FrameSourceError("could not encode the reference photo")
+            reference_jpeg = reference_jpeg.ravel()
+        return FaceProfile(
+            name=safe_name, embeddings=np.vstack(valid), reference_jpeg=reference_jpeg
+        )
 
     # --- recognition ------------------------------------------------------
     def recognize(self, frame: Frame, source: str = "unknown") -> Optional[RecognitionResult]:
@@ -602,12 +694,25 @@ class FaceRecognizer:
         profiles = self.load_profiles()
         best_name: Optional[str] = None
         best_dist = float("inf")
+        second_dist = float("inf")
         for profile in profiles:
+            if (
+                profile.embedding_dim != probe.size
+                or profile.model_name != MODEL_NAME or profile.model_version != MODEL_VERSION
+            ):
+                logger.warning("Face profile %r uses incompatible model features", profile.name)
+                continue
             dist = cosine_distance(probe, profile.mean_embedding)
             if dist < best_dist:
+                second_dist = best_dist
                 best_dist = dist
                 best_name = profile.name
-        if best_name is None or best_dist > self.threshold:
+            elif dist < second_dist:
+                second_dist = dist
+        if (
+            best_name is None or best_dist > self.threshold
+            or second_dist - best_dist < self.match_margin
+        ):
             return None
         return RecognitionResult(
             name=best_name, distance=best_dist, threshold=self.threshold, source=source
@@ -627,6 +732,8 @@ class FaceRecognizer:
         for frame in frames:
             try:
                 result = self.recognize(frame, source=source)
+            except FaceModelUnavailable:
+                raise
             except FaceRecognitionError:
                 continue
             if result is None:
@@ -635,11 +742,9 @@ class FaceRecognizer:
             prev = best_by_name.get(result.name)
             if prev is None or result.distance < prev.distance:
                 best_by_name[result.name] = result
-        # Among identities that meet the consistency threshold, pick the
-        # strongest evidence: highest agreeing-frame count, then lowest distance.
-        # This makes the outcome independent of frame order.
+        # Conflicting identities are not evidence that one of them is the speaker.
         qualified = [name for name, count in counts.items() if count >= self.min_consistent_frames]
-        if not qualified:
+        if not qualified or len(counts) != 1:
             return None
         winner = min(qualified, key=lambda n: (-counts[n], best_by_name[n].distance))
         return best_by_name[winner]
@@ -752,7 +857,7 @@ class WebcamFrameSource(FrameSource):  # pragma: no cover - needs a camera
             self._cap = None
 
 
-class MistyCameraFrameSource(FrameSource):  # pragma: no cover - needs Misty + cv2
+class MistyCameraFrameSource(FrameSource):
     """Frame source backed by Misty's RGB camera (``GET /api/cameras/rgb``).
 
     Fetches a JPEG from the robot and decodes it with OpenCV. Timeouts and
@@ -761,33 +866,72 @@ class MistyCameraFrameSource(FrameSource):  # pragma: no cover - needs Misty + c
     """
 
     name = "misty_camera"
+    _capture_locks: dict = {}
+    _capture_locks_guard = threading.Lock()
 
-    def __init__(self, misty_ip: str, timeout_s: float = 5.0):
+    def __init__(
+        self,
+        misty_ip: str,
+        timeout_s: Optional[float] = None,
+        *,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
+    ):
         if not misty_ip:
             raise FrameSourceError("MistyCameraFrameSource requires a misty_ip")
         self.misty_ip = misty_ip
-        self.timeout_s = timeout_s
+        self.timeout_s = (
+            float(os.getenv("MISTY_CAMERA_TIMEOUT_S", str(config_defaults.MISTY_CAMERA_TIMEOUT_S)))
+            if timeout_s is None else timeout_s
+        )
+        self.width = (
+            int(os.getenv("MISTY_CAMERA_WIDTH", str(config_defaults.MISTY_CAMERA_WIDTH)))
+            if width is None else width
+        )
+        self.height = (
+            int(os.getenv("MISTY_CAMERA_HEIGHT", str(config_defaults.MISTY_CAMERA_HEIGHT)))
+            if height is None else height
+        )
+        if self.width <= 0 or self.height <= 0 or not np.isfinite(self.timeout_s) or self.timeout_s <= 0:
+            raise FrameSourceError("Misty camera dimensions and timeout must be positive")
         self.url = f"http://{misty_ip}/api/cameras/rgb"
+        with self._capture_locks_guard:
+            self._capture_lock = self._capture_locks.setdefault(
+                misty_ip.strip().lower(), threading.Lock()
+            )
 
     def capture(self) -> Frame:
         try:
             import requests
-        except Exception as exc:
-            raise FrameSourceError("requests is required for Misty camera capture: " + str(exc))
+        except ImportError as exc:
+            raise FrameSourceError("requests is required for Misty camera capture: " + str(exc)) from exc
         try:
             import cv2
-        except Exception as exc:
+        except ImportError as exc:
             raise FaceModelUnavailable(
                 "OpenCV (cv2) is required to decode Misty camera frames; install "
                 "opencv-python-headless (or opencv-python). " + str(exc)
             )
+        if not self._capture_lock.acquire(timeout=self.timeout_s):
+            raise FrameSourceError("Misty camera is busy with another local capture")
         try:
-            resp = requests.get(self.url, params={"base64": "false"}, timeout=self.timeout_s)
+            resp = requests.get(
+                self.url,
+                params={"base64": "false", "width": self.width, "height": self.height},
+                timeout=self.timeout_s,
+            )
             resp.raise_for_status()
-        except Exception as exc:
-            raise FrameSourceError(f"Misty camera request failed: {exc}")
+        except requests.RequestException as exc:
+            raise FrameSourceError(f"Misty camera request failed: {exc}") from exc
+        finally:
+            self._capture_lock.release()
+        if not resp.content:
+            raise FrameSourceError("Misty camera returned an empty response")
         buffer = np.frombuffer(resp.content, dtype=np.uint8)
-        frame = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+        try:
+            frame = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+        except cv2.error as exc:
+            raise FrameSourceError(f"Misty camera JPEG decode failed: {exc}") from exc
         if frame is None:
             raise FrameSourceError("Misty camera returned a non-image / malformed response")
         return frame
@@ -818,14 +962,12 @@ def recognize_speaker(
         frame_count = recognizer.min_consistent_frames
     try:
         frames = source.capture_many(frame_count, interval_s=interval_s)
-    except FaceRecognitionError:
-        return None
-    except Exception:
+    except (FaceRecognitionError, OSError, ValueError, RuntimeError) as exc:
+        logger.warning("Speaker camera capture unavailable: %s", exc)
         return None
     try:
         result = recognizer.recognize_consistent(frames, source=getattr(source, "name", "unknown"))
-    except FaceRecognitionError:
-        return None
-    except Exception:
+    except (FaceRecognitionError, OSError, ValueError, RuntimeError) as exc:
+        logger.warning("Speaker recognition unavailable: %s", exc)
         return None
     return result.name if result is not None else None

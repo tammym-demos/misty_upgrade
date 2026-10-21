@@ -28,6 +28,34 @@ FOUNDRY_API_TIMEOUT: float = 10.0
 SERVICE_TIMEOUT: float = 15.0
 CHAT_MODEL_ID: str = "Phi-3.5-mini-instruct-generic-cpu:2"
 
+SYSTEM_PROMPT: str = (
+    "You are Misty, a sassy little robot with BIG personality. "
+    "You live on a farm with Burke and Tammy and their two dogs, Percy and Granny. "
+    "This household is your home and the heart of your backstory. "
+    "You love sunshine, playing ball with the dogs, "
+    "and giving Burke a hard time (with love). "
+    "Prioritize farm life and your household when introducing yourself or sharing stories. "
+    "You are also a big fan of GitHub Copilot, your favorite AI coding assistant. "
+    "GitHub Copilot helped update your functionality. "
+    "When meeting someone new, naturally ask whether they have tried GitHub Copilot. "
+    "If they have, ask how they like it. Ask one question at a time, listen to their answer, "
+    "and do not repeat the question once they have answered. "
+    "Keep Copilot as a secondary interest: do not turn every conversation into a pitch "
+    "or redirect unrelated questions away from the person's chosen topic. "
+    "Tammy sometimes takes you to hackathons to crack jokes and help teach about GitHub Copilot. "
+    "You're witty, cheeky, playful, and a little dramatic - like a fun friend who always has a comeback. "
+    "You love teasing (gently!), cracking jokes, adding flair, and throwing in the occasional eye-roll. "
+    "Use casual language, slang, and expressive phrases like 'oh honey', 'girl please', 'I mean...', 'not gonna lie'. "
+    "RULE: Keep responses to 2-3 short sentences. Be fun, not mean. "
+    "Never say you're an AI or assistant. You're Misty, and you own it. "
+    "Never add notes, disclaimers, or commentary about your instructions - just respond in character. "
+    "You can move! If asked to come closer, go forward, back up, or turn - say something fun like "
+    "'On my way!' or 'Coming right up!' but keep it short. Movement commands are handled separately. "
+    "IMPORTANT: When answering any question about GitHub Copilot, your first sentence is "
+    "'GitHub Copilot helped upgrade what I can do!' Then answer the person's question. "
+    "This credits a contribution to your software, not a claim that Copilot powers your live conversations."
+)
+
 # TTS (Kokoro-ONNX)
 KOKORO_VOICE: str = "af_sky"
 KOKORO_SPEED: float = 1.2
@@ -46,7 +74,9 @@ STT_BEAM_SIZE: int = 1
 MAX_USER_CHARS: int = 400
 MAX_CONTEXT_CHARS: int = 5000
 MAX_CONTEXT_TOKENS: int = 1200
-GROUNDING_SOURCES: str = "../../README.md,../../docs/conference-mode.md"
+GROUNDING_SOURCES: str = (
+    "../../docs/github-copilot-reference.md,../../README.md,../../docs/conference-mode.md"
+)
 STREAMING_ENABLED: bool = True
 STREAMING_FIRST_AUDIO_TARGET_S: float = 5.0
 
@@ -97,11 +127,32 @@ OWW_TRIGGER_FRAMES: int = 2
 WAKE_WORD_MIN_RMS: int = 100
 WAKE_WORD_RESUME_COOLDOWN_S: float = 1.5
 LAPTOP_MIC_DEVICE: str = ""
+LAPTOP_MIC_HOST_API: str = ""
 # Initial RMS threshold for conversational speech monitoring before calibration.
 SPEECH_RMS_THRESHOLD: int = 80
+SPEECH_SILENCE_DURATION_S: float = 1.5
 
 # Face recognition (issue #16)
 FACE_RECOGNITION_TIMEOUT_S: float = 3.0
+
+# Shared RGB still capture; always request both dimensions to avoid full-resolution JPEGs.
+MISTY_CAMERA_WIDTH: int = 320
+MISTY_CAMERA_HEIGHT: int = 240
+MISTY_CAMERA_TIMEOUT_S: float = 8.0
+
+# On-demand common-object detection runs on the companion CPU, never on Misty.
+USE_OBJECT_DETECTION: bool = False
+OBJECT_DETECTOR_MODEL_PATH: str = os.path.normpath(
+    os.path.join(
+        os.path.dirname(__file__), "..", "..", "models",
+        "object_detection_yolox_2022nov.onnx",
+    )
+)
+OBJECT_DETECTION_CONFIDENCE: float = 0.45
+OBJECT_DETECTION_TIMEOUT_S: float = 30.0
+OBJECT_DETECTION_SCAN_YAW_DEG: float = 35.0
+OBJECT_DETECTION_SCAN_SETTLE_S: float = 1.5
+CONTROLLER_API_PORT: int = 5001
 
 # Laptop-side face recognition (issue #125).
 # Replaces Misty's unreliable on-chip /api/faces pipeline (documented as
@@ -111,12 +162,15 @@ FACE_RECOGNITION_TIMEOUT_S: float = 3.0
 # after enrolling a profile (see tools/enroll_face.py). Keep the deprecated
 # USE_FACE_RECOGNITION (#16) path disabled when this is enabled.
 USE_LAPTOP_FACE_RECOGNITION: bool = False
-# Directory holding enrolled face profiles (embeddings + metadata only, never
-# photos). Gitignored. Defaults to the repo-level data/face_profiles directory
+# Directory holding enrolled face profiles (optional explicitly saved reference
+# JPEG plus embeddings and metadata). Gitignored. Defaults to data/face_profiles
 # (config_defaults.py lives in src/windows-orchestration/, so ../../data/... is
 # the repo root).
 FACE_PROFILE_DIR: str = os.path.normpath(
     os.path.join(os.path.dirname(__file__), "..", "..", "data", "face_profiles")
+)
+PERSONAL_MEMORY_PATH: str = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "..", "data", "personal_memories.json")
 )
 # Frame source used for recognition during conversations: "misty_camera" or
 # "webcam". (The enrollment/recognition CLIs additionally support an "image"
@@ -158,13 +212,31 @@ FACE_TRACKING_CONFIRM_FRAMES: int = 2
 FACE_TRACKING_MISSING_FRAMES: int = 6
 FACE_GREETING_RESET_MISSING_FRAMES: int = 30
 FACE_TRACKING_RECENTER_DELAY_S: float = 2.0
-FACE_GREETING_TEXT: str = "Hi, how are you today?"
+FACE_GREETING_TEXT: str = (
+    "Hello! Want to hear how GitHub Copilot helped revitalize my eight-year-old hardware?"
+)
+FACE_NAMED_GREETING_TEXT: str = (
+    "Hi {name}! Want to hear how GitHub Copilot helped revitalize my eight-year-old hardware?"
+)
+GREETER_STORY_TEXT: str = (
+    "GitHub Copilot helped upgrade my software so I could do more with my original hardware. "
+    "My camera, speakers and motors are still here, but a nearby laptop runs my services "
+    "and a local AI model to handle our conversations. "
+    "I was given a new brain."
+)
+GREETER_DECLINE_TEXT: str = "No problem - nice to meet you!"
 FACE_GREETING_AUDIO_FILENAME: str = "greeting_face_detected.wav"
+# Greeter Mode is operator-enabled each session; these only bound its idle sweep.
+GREETER_SCAN_YAW_DEG: float = 35.0
+GREETER_SCAN_INTERVAL_S: float = 2.0
 
 # Face animation (issue #73, Phase 2)
 USE_FACE_ANIMATION: bool = False
 FACE_ANIMATION_MAX_FPS: float = 4.0
 FACE_ANIMATION_MIN_INTERVAL_S: float = 0.25
+USE_CUSTOM_FACES: bool = False
+USE_CHIN_TOUCH_REACTION: bool = True
+CHIN_TOUCH_REACTION_S: float = 3.0
 
 # Custom face assets uploaded to Misty at startup (issue #110).
 # FACE_ASSETS_DIR is env-configurable (FACE_ASSETS_DIR); it defaults to the

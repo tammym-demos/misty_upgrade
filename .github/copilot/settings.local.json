@@ -1,0 +1,8 @@
+{
+  "disabledMcpServers": [
+    "workiq",
+    "computer-use",
+    "github-copilot-connector-94d26095770df60673dd",
+    "github-copilot-connector-d0750c651cd16d6e8896"
+  ]
+}
