@@ -496,8 +496,8 @@ def _prepare_chat_messages(
     working_history.append({"role": "user", "content": user_text})
     if len(working_history) > 8:
         del working_history[:-8]
-    system_prompt = (
-        f"{SYSTEM_PROMPT} Today is {datetime.now(timezone.utc).date().isoformat()} UTC. "
+    required_context = (
+        f" Today is {datetime.now(timezone.utc).date().isoformat()} UTC. "
         "Only state event or project facts supplied in approved local context; "
         "otherwise say that you are not certain."
     )
@@ -505,26 +505,26 @@ def _prepare_chat_messages(
         item["role"] == "user" and is_visual_query(item["content"])
         for item in working_history[:-1]
     ):
-        system_prompt += " Past camera reports are historical, not a current view."
+        required_context += " Past camera reports are historical, not a current view."
     if speaker_name:
-        system_prompt += (
+        required_context += (
             f" You are currently talking to {speaker_name}."
             " Use their name naturally, but do not announce recognition every time."
         )
     else:
-        system_prompt += (
+        required_context += (
             " The current speaker has no confirmed identity. Do not assume that a "
             "name or personal details from an earlier turn identify this speaker."
         )
     grounding = retrieve_local_context(user_text)
     grounding = _personal_context_for_speaker(speaker_name) + grounding
     if grounding:
-        system_prompt += " Approved local context: " + " ".join(grounding)
+        required_context += " Approved local context: " + " ".join(grounding)
     vision_context = vision_context_for_query(user_text)
     if vision_context:
-        system_prompt += vision_context
+        required_context += vision_context
 
-    messages = [{"role": "system", "content": system_prompt}]
+    messages = [{"role": "system", "content": SYSTEM_PROMPT + required_context}]
     if state.summary:
         messages.append(
             {"role": "system", "content": f"Earlier conversation summary: {state.summary}"}
@@ -567,6 +567,37 @@ def _prepare_chat_messages(
                 break
     if trimmed:
         logger.warning("Prompt context trimmed: removed %s older message(s)", trimmed)
+
+    if not within_limits():
+        system_char_budget = len(messages[0]["content"])
+        if MAX_CONTEXT_CHARS > 0:
+            system_char_budget = min(
+                system_char_budget,
+                MAX_CONTEXT_CHARS - len(latest_user_message["content"]),
+            )
+        if MAX_CONTEXT_TOKENS > 0:
+            remaining_tokens = MAX_CONTEXT_TOKENS - _estimate_tokens([latest_user_message])
+            system_char_budget = min(system_char_budget, 4 * (remaining_tokens + 1) - 1)
+        if system_char_budget < len(required_context):
+            logger.error(
+                "Prompt budget cannot fit required context and the latest user turn: "
+                "MAX_CONTEXT_CHARS=%s MAX_CONTEXT_TOKENS=%s",
+                MAX_CONTEXT_CHARS,
+                MAX_CONTEXT_TOKENS,
+            )
+            raise ValueError(
+                "Prompt budget cannot fit required context and the latest user turn; "
+                "increase MAX_CONTEXT_CHARS or MAX_CONTEXT_TOKENS"
+            )
+        persona = SYSTEM_PROMPT[:system_char_budget - len(required_context)]
+        if len(persona) < len(SYSTEM_PROMPT):
+            persona = persona.rsplit(" ", 1)[0] if " " in persona else ""
+        messages[0]["content"] = persona + required_context
+        logger.warning(
+            "Prompt persona trimmed: %s -> %s chars to respect context limits",
+            len(SYSTEM_PROMPT),
+            len(persona),
+        )
 
     prompt_chars = sum(len(message["content"]) for message in messages)
     logger.info(

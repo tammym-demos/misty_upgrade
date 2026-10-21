@@ -299,7 +299,72 @@ def test_prompt_builder_applies_same_limits_and_preserves_latest_turn(monkeypatc
     }
     assert any(message is working_history[-1] for message in messages)
     assert svc._estimate_tokens(messages) <= 350
+    assert sum(len(message["content"]) for message in messages) <= 1400
     assert not any("old user turn" in item["content"] for item in messages)
+
+
+@pytest.mark.parametrize("char_limit,token_limit", [(1000, 0), (0, 250), (1000, 200)])
+def test_prompt_budget_trims_persona_but_preserves_required_context(
+    monkeypatch, caplog, char_limit, token_limit
+):
+    monkeypatch.setattr(svc, "MAX_CONTEXT_CHARS", char_limit)
+    monkeypatch.setattr(svc, "MAX_CONTEXT_TOKENS", token_limit)
+    monkeypatch.setattr(svc, "SYSTEM_PROMPT", "Misty persona. " * 300)
+    monkeypatch.setattr(svc, "retrieve_local_context", lambda _: ["[source:1] Verified fact."])
+    monkeypatch.setattr(svc, "_personal_context_for_speaker", lambda _: [])
+    monkeypatch.setattr(svc, "vision_context_for_query", lambda _: " Camera is unavailable.")
+    state = svc.ConversationState()
+
+    messages, history = svc._prepare_chat_messages(
+        state, "latest question", None, svc.RESPONSE_MODE_CONFIG["short"]
+    )
+
+    if char_limit:
+        assert sum(len(message["content"]) for message in messages) <= char_limit
+    if token_limit:
+        assert svc._estimate_tokens(messages) <= token_limit
+    assert messages[-1] is history[-1]
+    assert history == [{"role": "user", "content": "latest question"}]
+    assert state.history == []
+    assert "Only state event or project facts supplied in approved local context" in messages[0]["content"]
+    assert "The current speaker has no confirmed identity" in messages[0]["content"]
+    assert "[source:1] Verified fact." in messages[0]["content"]
+    assert "Camera is unavailable." in messages[0]["content"]
+    assert "Prompt persona trimmed" in caplog.text
+
+
+@pytest.mark.parametrize("char_limit,token_limit", [(1, 0), (0, 1), (100, 25)])
+def test_prompt_budget_rejects_limits_too_small_for_required_context(
+    monkeypatch, caplog, char_limit, token_limit
+):
+    monkeypatch.setattr(svc, "MAX_CONTEXT_CHARS", char_limit)
+    monkeypatch.setattr(svc, "MAX_CONTEXT_TOKENS", token_limit)
+    monkeypatch.setattr(svc, "retrieve_local_context", lambda _: [])
+    monkeypatch.setattr(svc, "_personal_context_for_speaker", lambda _: [])
+    monkeypatch.setattr(svc, "vision_context_for_query", lambda _: "")
+
+    with pytest.raises(ValueError, match="increase MAX_CONTEXT_CHARS or MAX_CONTEXT_TOKENS"):
+        svc._prepare_chat_messages(
+            svc.ConversationState(), "latest question", None, svc.RESPONSE_MODE_CONFIG["short"]
+        )
+
+    assert "Prompt budget cannot fit required context" in caplog.text
+
+
+def test_disabled_prompt_budgets_preserve_full_persona(monkeypatch, caplog):
+    monkeypatch.setattr(svc, "MAX_CONTEXT_CHARS", 0)
+    monkeypatch.setattr(svc, "MAX_CONTEXT_TOKENS", 0)
+    monkeypatch.setattr(svc, "SYSTEM_PROMPT", "Misty persona. " * 300)
+    monkeypatch.setattr(svc, "retrieve_local_context", lambda _: [])
+    monkeypatch.setattr(svc, "_personal_context_for_speaker", lambda _: [])
+    monkeypatch.setattr(svc, "vision_context_for_query", lambda _: "")
+
+    messages, _ = svc._prepare_chat_messages(
+        svc.ConversationState(), "latest question", None, svc.RESPONSE_MODE_CONFIG["short"]
+    )
+
+    assert messages[0]["content"].startswith(svc.SYSTEM_PROMPT)
+    assert "Prompt persona trimmed" not in caplog.text
 
 
 def test_followup_uses_common_streaming_dispatcher(monkeypatch):

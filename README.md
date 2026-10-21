@@ -254,6 +254,7 @@ Common environment variables:
 | `KOKORO_SPEED` | `1.2` | Kokoro speech speed; synthesis latency scales mostly with response length. |
 | `MAX_USER_CHARS` | `400` | Per-utterance prompt character cap. |
 | `MAX_CONTEXT_CHARS` | `5000` | Total LLM context character budget. |
+| `MAX_CONTEXT_TOKENS` | `1200` | Total estimated LLM context token budget. |
 | `FOLLOWUP_ENABLED` | `false` | Enables automatic follow-up listening after an answer. Disabled by default to avoid echo/noise-triggered hallucinated responses. |
 | `FOLLOWUP_LISTEN_S` | `5.0` | Per follow-up listen duration before silence/no-speech handling. |
 | `FOLLOWUP_TIMEOUT_S` | `90` | Follow-up conversation window. |
@@ -705,6 +706,11 @@ including audio routing, variable substitution, gesture annotations, live
 controls, and configuration.
 
 ---
+
+Prompt budgets trim older conversation messages first, then persona text if needed.
+Grounding, speaker-identity instructions, and the latest user turn are preserved.
+If those cannot fit, the request fails explicitly; increase `MAX_CONTEXT_CHARS` or
+`MAX_CONTEXT_TOKENS`. Set either limit to `0` to disable that individual budget.
 
 ## Testing
 
